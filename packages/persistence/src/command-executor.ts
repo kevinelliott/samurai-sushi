@@ -1,16 +1,25 @@
 import { timingSafeEqual } from "node:crypto";
-import { subjectIdentity } from "@samurai-sushi/domain";
+import { canonicalJson, subjectIdentity, validateCommandEnvelope } from "@samurai-sushi/domain";
 import type { JsonObject, JsonValue } from "@samurai-sushi/domain";
+import { canonicalizeDecision, hashPersistenceResponse } from "./canonical-decision";
+import { constantTimeDigestEqual, GuestSecretFormatError } from "./crypto";
+import type { HmacKeyring, TombstoneKeyring } from "./crypto";
 import type { SqlPool } from "./database";
 import { TransactionRunner } from "./database";
 import type {
   PersistenceCommandEnvelope,
   PersistenceCommandHandler,
 } from "./domain-adapter";
-import { IdempotencyPayloadMismatchError, PersistenceError, RevisionConflictError } from "./errors";
-import { GuestProgressRepository } from "./repositories";
-
-const RECEIPT_LIFETIME_MS = 30 * 24 * 60 * 60 * 1_000;
+import {
+  CommandAuthenticationError,
+  IdempotencyPayloadMismatchError,
+  IdempotencyReceiptExpiredError,
+  PersistenceError,
+  RevisionConflictError,
+} from "./errors";
+import { addMilliseconds, ADR_0003_PERSISTENCE_LIFECYCLE } from "./lifecycle";
+import { assertPersistenceKeyInventory } from "./key-inventory";
+import { GuestProgressRepository, GuestSessionRepository } from "./repositories";
 
 interface ReceiptRow {
   readonly command_name: string;
@@ -21,10 +30,15 @@ interface ReceiptRow {
   readonly response_payload: unknown;
   readonly result_hash: Uint8Array;
   readonly committed_revision: string;
+  readonly expires_at: Date;
 }
 
 interface RevisionRow {
   readonly revision: string;
+}
+
+interface DatabaseClockRow {
+  readonly now: Date;
 }
 
 export interface CommandExecutionResult<ResponsePayload> {
@@ -49,10 +63,12 @@ function sameDigest(left: Uint8Array, right: Uint8Array): boolean {
 export class GuestCommandExecutor {
   private readonly runner: TransactionRunner;
   private readonly progress = new GuestProgressRepository();
+  private readonly sessions = new GuestSessionRepository();
 
   constructor(
     pool: SqlPool,
-    private readonly now: () => Date = () => new Date(),
+    private readonly resumeKeys: HmacKeyring,
+    private readonly tombstoneKeys: TombstoneKeyring,
   ) {
     this.runner = new TransactionRunner(pool);
   }
@@ -62,20 +78,55 @@ export class GuestCommandExecutor {
     Checkpoint extends JsonObject,
     ResponsePayload extends JsonValue,
   >(
-    command: PersistenceCommandEnvelope<Payload>,
+    resumeSecret: string,
+    commandInput: unknown,
     handler: PersistenceCommandHandler<Payload, Checkpoint, ResponsePayload>,
   ): Promise<CommandExecutionResult<ResponsePayload>> {
+    let command: PersistenceCommandEnvelope<Payload>;
+    let candidates;
+    try {
+      const detached = JSON.parse(canonicalJson(commandInput)) as unknown;
+      command = deepFreeze(validateCommandEnvelope(detached)) as PersistenceCommandEnvelope<Payload>;
+      candidates = this.resumeKeys.candidates(resumeSecret);
+    } catch (error) {
+      if (error instanceof GuestSecretFormatError) throw new CommandAuthenticationError();
+      throw error;
+    }
     if (command.subject.kind !== "guest") throw new PersistenceError("UNSUPPORTED_SUBJECT", "Stage 1 accepts guest subjects only.");
     const subject = subjectIdentity(command.subject);
     const guestSessionId = subject.subjectId;
     const payloadHash = digestFromDomainHash(command.payloadHash, "payloadHash");
     return this.runner.run(async (client) => {
+      await assertPersistenceKeyInventory(client, this.resumeKeys, this.tombstoneKeys);
+      const session = await this.sessions.findResumeMatchForUpdate(client, candidates);
+      const authenticatedCandidate = session
+        ? candidates.find((candidate) => candidate.keyVersion === session.digestKeyVersion)
+        : undefined;
+      const authenticated = Boolean(
+        session
+        && session.id === guestSessionId
+        && authenticatedCandidate
+        && constantTimeDigestEqual(authenticatedCandidate.digest, session.digest),
+      );
+      const clock = await client.query<DatabaseClockRow>("SELECT clock_timestamp() AS now");
+      const now = clock.rows[0]?.now;
+      if (!now) throw new PersistenceError("DATABASE_CLOCK_UNAVAILABLE", "PostgreSQL did not return its authoritative clock.");
+      if (
+        !authenticated
+        || !session
+        || session.expiresAt.getTime() <= now.getTime()
+        || (session.slot === "predecessor"
+          && (!session.digestValidUntil || session.digestValidUntil.getTime() <= now.getTime()))
+      ) {
+        throw new CommandAuthenticationError();
+      }
+
       const lockScope = `guest:${guestSessionId}:${command.idempotencyKey}`;
       await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [lockScope]);
 
       const receipt = await client.query<ReceiptRow>(
         `SELECT command_name, expected_revision, content_version, payload_hash,
-                response_schema_version, response_payload, result_hash, committed_revision
+                response_schema_version, response_payload, result_hash, committed_revision, expires_at
            FROM samurai_persistence.command_receipts
           WHERE guest_session_id = $1 AND idempotency_key = $2`,
         [guestSessionId, command.idempotencyKey],
@@ -90,11 +141,17 @@ export class GuestCommandExecutor {
         ) {
           throw new IdempotencyPayloadMismatchError();
         }
+        if (stored.expires_at.getTime() <= now.getTime()) throw new IdempotencyReceiptExpiredError();
+        const replayResponse = deepFreeze(JSON.parse(canonicalJson(stored.response_payload)) as ResponsePayload);
+        const replayResultHash = hashPersistenceResponse(stored.response_schema_version, replayResponse);
+        if (!sameDigest(digestFromDomainHash(replayResultHash, "replayResultHash"), stored.result_hash)) {
+          throw new PersistenceError("RECEIPT_INTEGRITY_FAILURE", "The stored response no longer matches its canonical result hash.");
+        }
         return {
           disposition: "replayed",
           responseSchemaVersion: stored.response_schema_version,
-          response: stored.response_payload as ResponsePayload,
-          resultHash: `sha256:${Buffer.from(stored.result_hash).toString("hex")}`,
+          response: replayResponse,
+          resultHash: replayResultHash,
           committedRevision: Number(stored.committed_revision),
         };
       }
@@ -105,9 +162,11 @@ export class GuestCommandExecutor {
         throw new RevisionConflictError(command.expectedRevision, progress.revision);
       }
 
-      const decision = await handler(progress.checkpoint, command);
+      const canonicalCheckpoint = deepFreeze(JSON.parse(canonicalJson(progress.checkpoint)) as Checkpoint);
+      const rawDecision = await handler(canonicalCheckpoint, command);
+      const canonical = canonicalizeDecision<Checkpoint, ResponsePayload>(rawDecision);
+      const decision = canonical.decision;
       const committedRevision = command.expectedRevision + 1;
-      const now = this.now();
       const updated = await client.query<RevisionRow>(
         `UPDATE samurai_persistence.guest_progress
             SET revision = revision + 1,
@@ -151,7 +210,7 @@ export class GuestCommandExecutor {
          VALUES ($1, 'pending', 0, $2)`,
         [decision.event.eventId, now],
       );
-      const resultHash = digestFromDomainHash(decision.response.resultHash, "resultHash");
+      const resultHash = digestFromDomainHash(canonical.resultHash, "resultHash");
       await client.query(
         `INSERT INTO samurai_persistence.command_receipts
           (guest_session_id, idempotency_key, command_name, expected_revision, content_version, payload_hash,
@@ -169,16 +228,24 @@ export class GuestCommandExecutor {
           resultHash,
           committedRevision,
           now,
-          new Date(now.getTime() + RECEIPT_LIFETIME_MS),
+          addMilliseconds(now, ADR_0003_PERSISTENCE_LIFECYCLE.receiptLifetimeMs),
         ],
       );
       return {
         disposition: "committed",
         responseSchemaVersion: decision.response.schemaVersion,
-        response: decision.response.payload,
-        resultHash: decision.response.resultHash,
+        response: deepFreeze(decision.response.payload),
+        resultHash: canonical.resultHash,
         committedRevision,
       };
     });
   }
+}
+
+function deepFreeze<T>(value: T): T {
+  if (value && typeof value === "object" && !Object.isFrozen(value)) {
+    Object.freeze(value);
+    for (const child of Object.values(value as Record<string, unknown>)) deepFreeze(child);
+  }
+  return value;
 }

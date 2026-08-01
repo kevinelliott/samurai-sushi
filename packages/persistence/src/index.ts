@@ -4,5 +4,8 @@ export * from "./database";
 export * from "./domain-adapter";
 export * from "./errors";
 export * from "./guest-sessions";
+export * from "./key-inventory";
+export * from "./lifecycle";
 export * from "./migrations";
+export * from "./outbox";
 export * from "./repositories";

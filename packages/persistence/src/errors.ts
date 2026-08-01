@@ -15,6 +15,20 @@ export class GuestResumeError extends PersistenceError {
   }
 }
 
+export class CommandAuthenticationError extends PersistenceError {
+  constructor() {
+    super("COMMAND_AUTHENTICATION_FAILED", "The guest command credential is invalid or expired.");
+    this.name = "CommandAuthenticationError";
+  }
+}
+
+export class IdempotencyReceiptExpiredError extends PersistenceError {
+  constructor() {
+    super("IDEMPOTENCY_RECEIPT_EXPIRED", "The repeatable response horizon for this idempotency key has expired.");
+    this.name = "IdempotencyReceiptExpiredError";
+  }
+}
+
 export class IdempotencyPayloadMismatchError extends PersistenceError {
   constructor() {
     super("IDEMPOTENCY_PAYLOAD_MISMATCH", "The idempotency key was already used for a different canonical command.");
@@ -33,5 +47,19 @@ export class MigrationChangedError extends PersistenceError {
   constructor(readonly migrationName: string) {
     super("MIGRATION_CHANGED", `Applied migration ${migrationName} no longer matches its recorded checksum.`);
     this.name = "MigrationChangedError";
+  }
+}
+
+export class MigrationSchemaDriftError extends PersistenceError {
+  constructor(message = "The live persistence schema does not match its migration ledger attestation.") {
+    super("MIGRATION_SCHEMA_DRIFT", message);
+    this.name = "MigrationSchemaDriftError";
+  }
+}
+
+export class OutboxClaimLostError extends PersistenceError {
+  constructor() {
+    super("OUTBOX_CLAIM_LOST", "The outbox delivery is no longer owned by this worker claim.");
+    this.name = "OutboxClaimLostError";
   }
 }

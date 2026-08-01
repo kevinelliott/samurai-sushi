@@ -24,14 +24,16 @@ export class HmacKeyring {
   readonly active: VersionedHmacKey;
   readonly verification: ReadonlyMap<number, VersionedHmacKey>;
 
-  constructor(active: VersionedHmacKey, previous?: VersionedHmacKey) {
+  constructor(active: VersionedHmacKey, previous: VersionedHmacKey | readonly VersionedHmacKey[] = []) {
     assertKey(active);
-    if (previous) {
-      assertKey(previous);
-      if (previous.version === active.version) throw new Error("Active and previous HMAC key versions must differ.");
+    const verificationOnly = Array.isArray(previous) ? previous : [previous];
+    for (const key of verificationOnly) {
+      assertKey(key);
+      if (key.version === active.version) throw new Error("Active and verification-only HMAC key versions must differ.");
     }
     this.active = active;
-    this.verification = new Map([active, ...(previous ? [previous] : [])].map((key) => [key.version, key]));
+    this.verification = new Map([active, ...verificationOnly].map((key) => [key.version, key]));
+    if (this.verification.size !== verificationOnly.length + 1) throw new Error("HMAC key versions must be unique.");
   }
 
   digest(secret: string, keyVersion = this.active.version): VersionedDigest {
@@ -46,24 +48,41 @@ export class HmacKeyring {
   candidates(secret: string): readonly VersionedDigest[] {
     return [...this.verification.values()].map((key) => this.digest(secret, key.version));
   }
+
+  hasVersion(version: number): boolean {
+    return this.verification.has(version);
+  }
 }
 
 export class TombstoneKeyring {
   readonly active: VersionedHmacKey;
+  readonly verification: ReadonlyMap<number, VersionedHmacKey>;
 
-  constructor(active: VersionedHmacKey) {
+  constructor(active: VersionedHmacKey, verificationOnly: readonly VersionedHmacKey[] = []) {
     assertKey(active);
+    for (const key of verificationOnly) {
+      assertKey(key);
+      if (key.version === active.version) throw new Error("Active and verification-only tombstone key versions must differ.");
+    }
     this.active = active;
+    this.verification = new Map([active, ...verificationOnly].map((key) => [key.version, key]));
+    if (this.verification.size !== verificationOnly.length + 1) throw new Error("Tombstone key versions must be unique.");
   }
 
-  digest(kind: TombstoneKind, replayKey: string): VersionedDigest {
+  digest(kind: TombstoneKind, replayKey: string, keyVersion = this.active.version): VersionedDigest {
     if (replayKey.length < 16) throw new Error("Replay keys must contain at least 16 characters of opaque material.");
+    const key = this.verification.get(keyVersion);
+    if (!key) throw new Error(`Tombstone key version ${keyVersion} is unavailable.`);
     return {
-      keyVersion: this.active.version,
-      digest: createHmac("sha256", this.active.key)
+      keyVersion,
+      digest: createHmac("sha256", key.key)
         .update(`samurai-sushi:deletion-tombstone:v1\n${kind}:${replayKey}`, "utf8")
         .digest(),
     };
+  }
+
+  hasVersion(version: number): boolean {
+    return this.verification.has(version);
   }
 }
 

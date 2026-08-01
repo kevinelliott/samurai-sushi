@@ -41,8 +41,14 @@ canonical command; every different logical command or payload gets a new key.
 Command payloads use UTF-8 RFC 8785 JSON Canonicalization Scheme bytes and
 SHA-256 in the domain `samurai-sushi:command:v1`; digests are compared in
 constant time. The durable receipt stores the response schema version and
-canonical response payload, not only its hash. Outbox delivery is at-least-once
-and consumers deduplicate by event ID.
+canonical response payload, not only its hash. The server, never a command
+handler, derives `resultHash` from
+`samurai-sushi:command-response:v1\n` followed by the canonical JSON of
+`{schemaVersion,payload}`. Outbox delivery is at-least-once and consumers
+deduplicate by event ID. Workers claim with an unpredictable token plus a
+monotonic generation under `FOR UPDATE SKIP LOCKED`; an expired lease loses
+authority at the exact PostgreSQL-clock boundary, retry uses bounded backoff,
+and terminal attempts become dead letters.
 
 ### Guest identity
 
@@ -67,6 +73,12 @@ headers and secrets are redacted before application,
 proxy, trace, error-report, or analytics logging. Guest play remains
 browser-bound: there is no fingerprint, email requirement, analytics identity,
 public profile, or wallet prompt before the first settled service.
+
+Session, receipt, predecessor-grace, tombstone, lease, and cleanup boundaries
+use the authoritative PostgreSQL clock. Process clocks never decide whether a
+credential, response, tombstone, or worker claim remains valid. Startup and
+retention jobs inventory every key version referenced by a live resume digest
+or tombstone and fail closed if its verification-only key is unavailable.
 
 Unclaimed guests expire after 30 days of inactivity; a retention job must run
 the same deletion matrix within 24 hours. Explicit guest deletion
@@ -228,7 +240,9 @@ Only the first stage is required before Phase 1 service-state code merges:
 
 - Rebuild a disposable real PostgreSQL database from empty; repeat migration is
   clean and required foreign-key, uniqueness, check, and revision constraints
-  are exercised.
+  are exercised. An already-created namespace is not an empty install: first
+  bootstrap accepts only a missing namespace, while later startup requires the
+  exact ordered ledger and a matching live-catalog attestation.
 - Valid resume works; wrong, expired, and deleted secrets fail. Raw secrets are
   absent from stored rows and log-shaped repository output.
 - Exact idempotent retry returns the same result; changed payload and stale

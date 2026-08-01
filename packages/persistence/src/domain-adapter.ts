@@ -19,7 +19,6 @@ export interface PersistenceEvent {
 export interface PersistenceResponse<ResponsePayload extends JsonValue> {
   readonly schemaVersion: number;
   readonly payload: ResponsePayload;
-  readonly resultHash: `sha256:${string}`;
 }
 
 export interface PersistenceDecision<Checkpoint extends JsonObject, ResponsePayload extends JsonValue> {
