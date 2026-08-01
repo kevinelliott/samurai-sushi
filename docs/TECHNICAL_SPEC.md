@@ -2,9 +2,10 @@
 
 ## 1. Proposed architecture
 
-Working assumption: TypeScript/pnpm workspace. The server/Postgres authority
-model is proposed, not adopted, until the Phase 0 persistence/account ADR
-resolves offline play, privacy, deletion, and guest-to-wallet migration.
+Adopted Phase 0 application spine: TypeScript/pnpm workspace and Next.js web
+shell. The server/Postgres authority model remains proposed, not adopted, until
+the Phase 0 persistence/account ADR resolves offline play, privacy, deletion,
+and guest-to-wallet migration.
 
 ```text
 apps/

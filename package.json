@@ -1,0 +1,42 @@
+{
+  "name": "samurai-sushi",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@10.13.1",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "dev": "tsx scripts/run-network-command.ts localnet dev",
+    "dev:raw": "tsx scripts/run-profiled-command.ts dev",
+    "build": "tsx scripts/run-network-command.ts localnet build",
+    "build:raw": "tsx scripts/run-profiled-command.ts build",
+    "start": "tsx scripts/run-network-command.ts localnet start",
+    "start:raw": "tsx scripts/run-profiled-command.ts start",
+    "dev:shadownet": "tsx scripts/run-network-command.ts shadownet dev",
+    "build:shadownet": "tsx scripts/run-network-command.ts shadownet build",
+    "start:shadownet": "tsx scripts/run-network-command.ts shadownet start",
+    "test:shadownet": "tsx scripts/run-network-command.ts shadownet test:integration",
+    "test": "pnpm -r --if-present test",
+    "test:unit": "vitest run",
+    "test:e2e": "playwright test",
+    "dev:e2e": "tsx scripts/run-e2e-server.ts",
+    "test:integration": "tsx scripts/run-network-command.ts localnet test:integration",
+    "test:integration:raw": "tsx scripts/run-profiled-command.ts test:integration",
+    "typecheck": "pnpm -r --if-present typecheck",
+    "lint": "eslint apps packages scripts --max-warnings=0",
+    "validate": "pnpm lint && pnpm typecheck && pnpm test:unit"
+  },
+  "devDependencies": {
+    "@samurai-sushi/network": "workspace:*",
+    "@eslint/js": "9.35.0",
+    "@playwright/test": "1.62.1",
+    "@types/node": "24.3.0",
+    "eslint": "9.35.0",
+    "typescript": "5.9.2",
+    "tsx": "4.20.5",
+    "typescript-eslint": "8.42.0",
+    "vitest": "3.2.4"
+  }
+}
