@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { NetworkProfile } from "@samurai-sushi/network";
 import { portableSaveCryptoProfile } from "@samurai-sushi/domain/portable-save-crypto";
+import { claimProtocolProfile } from "@samurai-sushi/domain/claim-protocol";
 
 const serviceSteps = [
   { action: "Season the rice", station: "Rice hearth", ingredient: "rice" },
@@ -77,7 +78,11 @@ export function CounterShell({
   }
 
   return (
-    <main className="counter-shell" data-recovery-suite={portableSaveCryptoProfile.suite}>
+    <main
+      className="counter-shell"
+      data-claim-challenge-domain={claimProtocolProfile.challengeDomain}
+      data-recovery-suite={portableSaveCryptoProfile.suite}
+    >
       <header className="counter-header">
         <div className="wordmark" aria-label="Samurai Sushi, Moonwake counter">
           <span className="wordmark-mark" aria-hidden="true"><i /><i /><i /></span>

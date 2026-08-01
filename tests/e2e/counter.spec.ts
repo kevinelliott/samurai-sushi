@@ -5,6 +5,10 @@ test("walletless first-shift shell is operable and truthful", async ({ page }, t
   await expect(page.getByRole("heading", { name: "Your counter opens tonight." })).toBeVisible();
   await expect(page.getByText("NetXtJqPyJGB6Pc")).toBeVisible();
   await expect(page.getByRole("button", { name: "Start first shift" })).toBeVisible();
+  await expect(page.locator("main")).toHaveAttribute(
+    "data-claim-challenge-domain",
+    "samurai-sushi:guest-claim:v1",
+  );
   await expect(page.getByRole("button", { name: /wallet/i })).toHaveCount(0);
   await expect(page.locator("html")).toHaveJSProperty("scrollWidth", await page.locator("html").evaluate((node) => node.clientWidth));
 
