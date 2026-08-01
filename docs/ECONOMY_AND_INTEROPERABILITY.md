@@ -76,6 +76,10 @@ hash, metadata digest policy, issuer/admin and mint/burn powers, current supply
 consistency, custody behavior, pause/upgrade powers, intended Samurai use,
 policy version, start/end conditions, and caps.
 
+The manifest-verified `AssetBinding` registry is the sole authorization source
+for recognition, escrow, or consumption. Any accepted-asset cache or index is a
+non-authoritative projection; disagreement or drift disables the action.
+
 Name, ticker, slug, image, culinary meaning, or client-supplied metadata are
 never sufficient.
 

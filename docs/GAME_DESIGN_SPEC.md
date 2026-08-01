@@ -129,13 +129,14 @@ clearly previewed milestone.
 Content is data-authored:
 
 ```text
-Species { id, scientificName, localizedCommonNames, marketNames, group, reviewId }
-Ingredient { id, kind, speciesId?, productKind?, names, glossary, baseAllergens, artKey, reviewId }
-PreparedComponent { id, ingredientId, cutStyleId?, treatment, rawNotice, allergens, stationSteps, artKey, reviewId }
-DishFamily { id, structuralSlots, forbiddenSlots, namingRules, platingRules, reviewId }
-Dish { id, familyId, componentSlots, rawProfile, allergenProfile, dietaryTags, artKey, reviewId }
-RecipeVersion { id, version, dishId, exactComponents, stations, unlock, recovery, seasonalityRules, contentHash }
-RecipeVariant { id, baseRecipeVersion, exactSubstitutions, resultingDishId, reviewIds, status }
+VersionedRef { id, version }
+Species { id, version, contentHash, scientificName, names, marketNames, group, reviewId }
+Ingredient { id, version, contentHash, kind, speciesRef?, productKind?, names, glossary, allergenSets, artKey, reviewId }
+PreparedComponent { id, version, contentHash, ingredientRef, cutStyleRef?, treatment, rawNotice, allergenSets, stationSteps, artKey, reviewId }
+DishFamily { id, version, contentHash, structuralSlots, forbiddenSlots, namingRules, platingRules, reviewId }
+Dish { id, version, contentHash, familyRef, componentSlots, rawProfile, allergenSets, dietaryTags, artKey, reviewId }
+RecipeVersion { id, version, dishRef, exactComponentAmounts, stations, unlock, recovery, seasonalityRuleRefs, contentHash }
+RecipeVariant { id, version, contentHash, baseRecipeRef, exactSubstitutions, resultingDishRef, reviewIds, status }
 Guest { id, portraits, preferences, accessibleTell, dialogue, storyFlags }
 Service { id, menuRules, guestSequence, constraints, outcomes }
 Quest { id, prerequisites, serviceMutation, consequence, keepsake, replayPolicy }

@@ -49,26 +49,29 @@ operation, event, projection, and receipt.
 
 ```text
 AssetRef { chainId, contractAddress, tokenId, standard, decimals, metadataDigest }
-AcceptedAssetRef { semanticSubjectType, semanticSubjectId, assetRef, policyVersion, enabled }
-SpeciesDefinition { speciesId, scientificName, localizedCommonNames, marketNames, group, culinaryReviewId }
-IngredientDefinition { ingredientId, kind, speciesId?, productKind?, names, glossary, baseAllergens, artKey, culturalReviewId }
-CutStyle { cutStyleId, names, glossary, compatibleProductKinds, presentationClass, culturalReviewId }
-PreparedComponent { componentId, ingredientId, cutStyleId?, treatment, rawNotice, allergens, stationSteps, artKey, reviewId }
-DishFamily { familyId, structuralSlots, forbiddenSlots, namingRules, platingRules, reviewId }
-DishDefinition { dishId, familyId, names, componentSlots, rawProfile, allergenProfile, dietaryTags, presentationRules, artKey, reviewId }
-RecipeVariant { variantId, baseRecipeId, baseVersion, substitutions, resultingDishId, reviewIds, status }
-SeasonalityRule { ruleId, subjectType, subjectId, regionId, calendar, windows, availability, sourceRef, reviewedAt }
-ProvenanceProfile { profileId, semanticSubjectId, claimType, claimValue, evidenceRef, validFrom?, validUntil?, reviewStatus }
-AssetBinding { bindingId, semanticSubjectType, semanticSubjectId, assetRef, use, policyVersion, manifestHash, reviewIds, enabled }
+VersionedRef { id, version }
+SpeciesDefinition { id, version, contentHash, scientificName, localizedCommonNames, marketNames, group, culinaryReviewId }
+IngredientDefinition { id, version, contentHash, kind, speciesRef?, productKind?, names, glossary, baseContainsAllergens, baseMayContainAllergens, baseCrossContactTags, artKey, reviewId }
+CutStyle { id, version, contentHash, names, glossary, compatibleProductKinds, presentationClass, reviewId }
+PreparedComponent { id, version, contentHash, ingredientRef, cutStyleRef?, treatment, rawNotice, containsAllergens, mayContainAllergens, crossContactTags, stationSteps, artKey, reviewId }
+DishFamily { id, version, contentHash, structuralSlots, forbiddenSlots, namingRules, platingRules, reviewId }
+DishDefinition { id, version, contentHash, familyRef, names, componentSlots, rawProfile, containsAllergens, mayContainAllergens, crossContactTags, dietaryTags, presentationRules, artKey, reviewId }
+ComponentAmount { componentRef:VersionedRef, quantity, role }
+RecipeVariant { id, version, contentHash, baseRecipeRef, substitutions, resultingDishRef, reviewIds, status }
+SeasonWindow { startLocalDateInclusive, endLocalDateExclusive, availability }
+SeasonalityRule { id, version, contentHash, subjectRef, regionId, ianaTimeZone, calendar, tzdbVersion, windows:[SeasonWindow], sourceRef, reviewedAt }
+ProvenanceProfile { id, version, contentHash, semanticSubjectRef, claimType, claimValue, evidenceRef, validFrom?, validUntil?, reviewStatus }
+AssetBinding { id, version, semanticSubjectRef, assetRef, use, policyVersion, manifestHash, reviewIds, enabled }
+ContentPack { id, version, contentHash, speciesRefs, ingredientRefs, componentRefs, dishRefs, recipeRefs, seasonalityRuleRefs, archivePolicy, reviewSignoffs }
 GuestSession { id, resumeSecretHash, state, createdAt, lastSeenAt, expiresAt, consentVersion }
 Player { id, linkedWallets, tutorialState, createdAt }
 SubjectRef = GuestSubject { guestSessionId } | PlayerSubject { playerId }
 PlayerProgress { subjectType, subjectId, revision, contentVersion, services, mastery, cosmetics }
 ProgressMerge { idempotencyKey, guestId, playerId, guestRevision, playerRevision, resultDigest }
 ServiceSession { id, subject:SubjectRef, originKind, originSubjectCommitment, contentVersion, state, openedAt, closedAt }
-OrderTicket { id, sessionId, recipeId, recipeVersion, dishId, modifiers, deadline, state }
+OrderTicket { id, sessionId, recipeRef, dishRef, modifiers, deadline, state }
 Preparation { orderId, requiredSteps, completedSteps, mistakes, state }
-RecipeVersion { id, version, dishId, exactComponents, quantities, stationSequence, output, disposition, unlock, recovery, seasonalityRuleIds, contentHash, policyHash, status }
+RecipeVersion { id, version, dishRef, exactComponentAmounts:[ComponentAmount], stationSequence, output, disposition, unlock, recovery, seasonalityRuleRefs, contentHash, policyHash, status }
 CraftIntent { id, account, chainId, recipeVersion, quantity, expectedDeltas, expiry }
 ReceiptIntent { id, subject:SubjectRef, account, serviceCommitment, payloadHash, manifestHash, state, expiresAt, createdAt }
 OperationAttempt { id, intentId, chainId, hash, source, counter, state, replacesAttemptId, replacedByAttemptId, includedLevel, includedBlockHash, orphanedBlockHash, confirmations, submittedAt, includedAt, confirmedAt, finalizedAt, lastObservedAt, errorCode }
@@ -83,6 +86,35 @@ ServiceReceipt { chainId, contract, owner, serviceCommitment, contentVersion, no
 
 APIs and storage use decimal strings; chain boundaries use raw integer strings.
 Token amounts never use JavaScript `number`.
+
+Published content rows are append-only and every transitive reference is a
+`VersionedRef`. Editing a species, ingredient, cut, component, family, dish,
+variant, seasonality rule, or recipe creates a new version and content hash.
+Every field ending in `Ref`/`Refs` contains one or more `VersionedRef` values.
+Art references resolve to immutable content digests included in the owning row
+and content-pack hashes.
+Historical orders pin recipe and dish refs; their recipe pins every component,
+family, seasonality, allergen/raw profile, recovery result, and output needed to
+replay the original meaning.
+
+`AssetBinding` is the only authorization record connecting semantic content to
+an onchain asset. Any read-optimized accepted-asset view is a non-authoritative
+projection rebuilt from the manifest-verified binding registry; disagreement,
+missing manifest evidence, or drift disables the operation.
+
+Allergen derivation preserves three independent sets. Dish `contains` is the
+union of component `contains`; `mayContain` is the union of component
+`mayContain`; cross-contact is the union of component cross-contact tags. Rules
+may conservatively add entries but never remove a contained allergen or
+downgrade it to may-contain/cross-contact.
+
+Season windows are ISO-8601 Gregorian local dates with half-open
+`[startLocalDateInclusive, endLocalDateExclusive)` bounds. The service derives
+and pins its local date at open using the rule's IANA zone and pinned tzdb
+version. Only exact subject-version and region matches participate. No match is
+valid `unspecified`; malformed/negative windows, unknown zone/calendar, or
+overlapping matching windows with contradictory availability produce
+`SEASONALITY_UNRESOLVED` and reject activation.
 
 ### Guest identity and merge
 
@@ -258,6 +290,15 @@ unverifiable readiness; it never silently falls back to mainnet.
   unreachable output, family-slot violations, wildcard/ambiguous variants,
   species/product/cut mismatch, raw-notice gaps, allergen derivation conflicts,
   seasonality boundaries, unsupported provenance, and semantic/asset lookalikes.
+- Historical-content fixtures update each transitive entity and prove pinned
+  orders retain byte-equivalent components, raw/allergen profile, recovery,
+  output, art, and content hash.
+- Allergen fixtures reject a `contains` → `mayContain` or cross-contact
+  downgrade. Asset fixtures make binding/projection disagreement fail closed.
+- Seasonality fixtures exercise immediately below/at/above every half-open
+  boundary, negative and zero windows, leap dates, UTC-to-local conversion at
+  DST transitions, region mismatch, contradictory overlap, unknown tzdb, and
+  valid no-rule `unspecified` behavior.
 - Golden content builds prove finite, acyclic, duplicate-free variant expansion
   and byte-identical content hashes across repeated builds.
 - SmartPy tests for authorization, exactly-once receipt, failure atomicity,

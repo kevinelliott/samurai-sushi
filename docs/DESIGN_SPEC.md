@@ -184,7 +184,7 @@ deltas, fee, operation hash, timestamps, confirmations, manifest, and finality.
 - `SS-CONTENT-001`: ingredient and recipe facts expose raw/cooked state,
   allergens, exact culinary identity, and unknown/unsupported evidence states
   without presenting real-world food-safety instruction.
-- `SS-VIS-003`: culturally specific production assets have recorded signoff.
+- `SS-CULT-001`: culturally specific production assets have recorded signoff.
 - `SS-A11Y-001`: no serious/critical automated issues plus manual journeys.
 - `SS-A11Y-002`: contrast, targets, zoom, 320 px, and non-color state pass.
 - `SS-A11Y-003`: switch/assistive input, reduced-motion parity, persisted

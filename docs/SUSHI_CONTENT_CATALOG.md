@@ -137,61 +137,74 @@ stable reviewed dish ID and version.
 
 ```text
 SpeciesDefinition {
-  speciesId, scientificName, localizedCommonNames, marketNames,
-  group: finfish|crustacean|mollusk|otherAquatic, culinaryReviewId
+  speciesId, version, contentHash, scientificName, localizedCommonNames,
+  marketNames, group, culinaryReviewId
 }
 IngredientDefinition {
-  ingredientId, kind, speciesId?, productKind?: flesh|roe|shellfish|other,
-  names, glossary, baseAllergens, artKey, culturalReviewId
+  ingredientId, version, contentHash, kind, speciesRef?,
+  productKind?: flesh|roe|shellfish|other, names, glossary,
+  baseContainsAllergens, baseMayContainAllergens, baseCrossContactTags,
+  artKey, culturalReviewId
 }
 CutStyle {
-  cutStyleId, names, glossary, compatibleProductKinds,
+  cutStyleId, version, contentHash, names, glossary, compatibleProductKinds,
   presentationClass, culturalReviewId
 }
 PreparedComponent {
-  componentId, ingredientId, cutStyleId?,
+  componentId, version, contentHash, ingredientRef, cutStyleRef?,
   treatment: raw|cooked|cured|smoked|surfaceSeared|seasoned|plant,
   requiresRawFoodNotice, containsAllergens, mayContainAllergens,
-  stationSteps, artKey, culturalReviewId
+  crossContactTags, stationSteps, artKey, culturalReviewId
 }
 DishFamily {
-  familyId, structuralSlots, forbiddenSlots, namingRules, platingRules,
-  culturalReviewId
+  familyId, version, contentHash, structuralSlots, forbiddenSlots,
+  namingRules, platingRules, culturalReviewId
 }
 DishDefinition {
-  dishId, familyId, names, componentSlots, rawFoodProfile, allergenProfile,
+  dishId, version, contentHash, familyRef, names, componentSlots,
+  containsAllergens, mayContainAllergens, crossContactTags, rawFoodProfile,
   dietaryTags, presentationRules, artKey, culturalReviewId
 }
 RecipeVersion {
-  recipeId, version, dishId, exactComponents, quantities, stationSequence,
-  unlockRule, recovery, seasonalityRuleIds, contentHash, status
+  recipeId, version, dishRef, exactComponentAmounts, stationSequence,
+  unlockRule, recovery, seasonalityRuleRefs, contentHash, status
 }
 RecipeVariant {
-  variantId, baseRecipeId, baseVersion, exactSubstitutions, resultingDishId,
-  reason, reviewIds, status
+  variantId, version, contentHash, baseRecipeRef, exactSubstitutions,
+  resultingDishRef, reason, reviewIds, status
+}
+SeasonWindow {
+  startLocalDateInclusive, endLocalDateExclusive,
+  availability: available|limited|unavailable
 }
 SeasonalityRule {
-  ruleId, subjectType, subjectId, regionId, calendar, windows,
-  availability: available|limited|unavailable|unspecified, sourceRef, reviewedAt
+  ruleId, version, contentHash, subjectRef, regionId, ianaTimeZone,
+  calendar: iso8601Gregorian, tzdbVersion, windows:[SeasonWindow],
+  sourceRef, reviewedAt
 }
 ProvenanceProfile {
-  profileId, semanticSubjectId, claimType, claimValue, evidenceRef,
-  validFrom?, validUntil?, reviewStatus
+  profileId, version, contentHash, semanticSubjectRef, claimType, claimValue,
+  evidenceRef, validFrom?, validUntil?, reviewStatus
 }
 AssetBinding {
-  bindingId, semanticSubjectType, semanticSubjectId, assetRef,
+  bindingId, version, semanticSubjectRef, assetRef,
   use: recognition|escrow|consumption, policyVersion, manifestHash,
-  enabledFrom?, disabledAt?, reviewIds
+  enabledFrom?, disabledAt?, reviewIds, enabled
 }
 ContentPack {
-  packId, version, dishIds, ingredientIds, availabilityWindow?, archivePolicy,
-  reviewerSignoffs
+  packId, version, contentHash, speciesRefs, ingredientRefs, componentRefs,
+  dishRefs, recipeRefs, seasonalityRuleRefs, availabilityWindow?,
+  archivePolicy, reviewerSignoffs
 }
 ```
 
 Commercial/display names are labels, not identity. Species, culinary product,
 prepared component, dish, recipe, provenance claim, and asset binding remain
-distinct. Game-content identity also does not authorize an onchain asset:
+distinct, versioned, and append-only once published. Every transitive reference
+is `{id, version}`; editing content creates a new version and hash rather than
+reinterpreting historical orders. Art keys resolve to immutable content digests
+pinned by the row and content-pack hashes. Game-content identity also does not
+authorize an onchain asset:
 foreign compatibility still requires the
 full chain/contract/token registry defined in
 [`ECONOMY_AND_INTEROPERABILITY.md`](ECONOMY_AND_INTEROPERABILITY.md).
@@ -206,8 +219,10 @@ full chain/contract/token registry defined in
    free-form tag, display name, or asset.
 5. Every animal-derived prepared component declares treatment and raw-food
    notice policy; omission fails validation rather than defaulting to allowed.
-6. Every dish’s allergens and dietary tags are the monotonic union derived from
-   its exact active component versions and cannot be manually weakened.
+6. Every dish’s `containsAllergens`, `mayContainAllergens`, and
+   `crossContactTags` are derived independently as monotonic unions from its
+   exact component versions. A contained allergen cannot be removed or
+   downgraded to may-contain/cross-contact.
 7. A roe ingredient names its source species and product form; color or display
    name cannot substitute for identity.
 8. Species, cut, preparation, and ingredient substitutions are opt-in authored
@@ -218,11 +233,19 @@ full chain/contract/token registry defined in
    recovery outcome, non-color visual identity, and required reviewer signoff.
 11. Every sprite depicts the actual component roles; garnish cannot imply an
    ingredient absent from the recipe.
-12. Content-pack activation is atomic and version-pinned; broken references,
+12. Every recipe and order pins all transitive `{id, version}` references.
+   Updating a component cannot change historical allergens, raw notice,
+   recovery, art, or content hash.
+13. Content-pack activation is atomic and version-pinned; broken references,
    duplicate IDs, missing art, or missing review reject the whole pack.
-13. Seasonality is region/calendar-bound; no applicable rule means
-   `unspecified`, never inferred availability.
-14. No content term, species name, or culinary equivalence authorizes foreign
+14. Seasonality uses ISO-8601 local dates in a pinned IANA zone/tzdb version and
+   half-open `[start, end)` windows. The service pins its derived local date at
+   open. Exact subject-version and region rules only; no match means valid
+   `unspecified`. Invalid windows, unknown zones, or overlapping contradictory
+   availability produce `SEASONALITY_UNRESOLVED` and reject the pack.
+15. Only the manifest-verified `AssetBinding` registry can authorize
+   recognition, escrow, or consumption. A projection disagreement fails closed.
+16. No content term, species name, or culinary equivalence authorizes foreign
     token use.
 
 ## 8. Experience requirements
