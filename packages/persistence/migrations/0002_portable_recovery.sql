@@ -60,7 +60,10 @@ CREATE TABLE samurai_persistence.recovery_imports (
   CHECK (import_id::text ~ '^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'),
   CHECK (export_id::text ~ '^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'),
   CHECK (updated_at >= created_at),
+  CHECK (updated_at < original_export_expires_at),
+  CHECK (isfinite(original_export_expires_at)),
   CHECK (original_export_expires_at > created_at),
+  CHECK (original_export_expires_at <= created_at + interval '29 days'),
   CHECK (expires_at = original_export_expires_at + interval '1 day')
 );
 

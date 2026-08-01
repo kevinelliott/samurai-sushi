@@ -214,8 +214,10 @@ credential, generates a fresh random replacement, and updates the bounded
 receipt in the same guest-first transaction. Changed input fails. At or after
 the original envelope expiry even an exact retry is rejected; the additional
 one-day receipt and replay-tombstone lifetime is rejection evidence only, not
-an extension of capability authority. Concurrent exact retries serialize and
-leave exactly one durable current credential.
+an extension of capability authority. Receipt timestamps are finite; the
+MAC-bound original expiry is strictly after every receipt update and at most
+29 days after receipt creation, with exact 29-day equality accepted. Concurrent
+exact retries serialize and leave exactly one durable current credential.
 
 The version 1 browser file is canonical JSON with the exact outer fields
 `{format,formatVersion,suite,salt,nonce,ciphertext}`. Its fixed suite is

@@ -231,6 +231,55 @@ class ObservedSessionLockPool implements SqlPool {
   }
 }
 
+class ObservedQueryLockClient implements ConnectedSqlClient {
+  constructor(
+    private readonly delegate: ConnectedSqlClient,
+    private readonly matches: (text: string) => boolean,
+    private readonly attempted: Deferred<number>,
+    private readonly acquired: Deferred<number>,
+    private readonly releaseAfterAcquisition?: Promise<void>,
+  ) {}
+
+  async query<Row extends object>(text: string, values?: readonly SqlValue[]): Promise<QueryResult<Row>> {
+    if (!this.matches(text)) return this.delegate.query<Row>(text, values);
+    const backend = await this.delegate.query<{ readonly pid: string }>("SELECT pg_backend_pid()::text AS pid");
+    const pid = Number(backend.rows[0]?.pid);
+    this.attempted.resolve(pid);
+    const result = await this.delegate.query<Row>(text, values);
+    this.acquired.resolve(pid);
+    if (this.releaseAfterAcquisition) await this.releaseAfterAcquisition;
+    return result;
+  }
+
+  release(): void {
+    this.delegate.release();
+  }
+}
+
+class ObservedQueryLockPool implements SqlPool {
+  constructor(
+    private readonly delegate: SqlPool,
+    private readonly matches: (text: string) => boolean,
+    readonly attempted: Deferred<number>,
+    readonly acquired: Deferred<number>,
+    private readonly releaseAfterAcquisition?: Promise<void>,
+  ) {}
+
+  query<Row extends object>(text: string, values?: readonly SqlValue[]): Promise<QueryResult<Row>> {
+    return this.delegate.query<Row>(text, values);
+  }
+
+  async connect(): Promise<ConnectedSqlClient> {
+    return new ObservedQueryLockClient(
+      await this.delegate.connect(),
+      this.matches,
+      this.attempted,
+      this.acquired,
+      this.releaseAfterAcquisition,
+    );
+  }
+}
+
 class ObservedReplayFenceClient implements ConnectedSqlClient {
   constructor(
     private readonly delegate: ConnectedSqlClient,
@@ -525,7 +574,7 @@ describe("PostgreSQL persistence spine", () => {
       "4d7fd2b2103a1cf7bf332db8e7f14b034e66e72de64efc398a7d4e42b2571533",
     );
     expect(Buffer.from(migrations[1]?.checksum ?? []).toString("hex")).toBe(
-      "76f32b3874498c0b2760a56c35252482f248b99c39cf7b7599d60107415d7d1d",
+      "19228c2338e44feffab73d71c8641bc98b5bcb806be19300501f072a9a49dc48",
     );
     await applyMigrations(pool);
     const result = await rawPool.query<CountRow>("SELECT count(*)::text AS count FROM samurai_persistence.schema_migrations");
@@ -2462,7 +2511,40 @@ describe("PostgreSQL persistence spine", () => {
       envelope,
     } as const;
 
-    const results = await Promise.all([recovery.import(request), recovery.import(request)]);
+    const releaseFirst = deferred<void>();
+    const firstAttempted = deferred<number>();
+    const firstAcquired = deferred<number>();
+    const firstPool = new ObservedQueryLockPool(
+      pool,
+      (text) => text.includes("FROM samurai_persistence.guest_sessions WHERE id = $1 FOR UPDATE"),
+      firstAttempted,
+      firstAcquired,
+      releaseFirst.promise,
+    );
+    const first = new PortableRecoveryService(
+      firstPool,
+      authority,
+      recoveryAuthority,
+      { async describe() { return recoveryContent; } },
+    ).import(request);
+    await firstAcquired.promise;
+    const secondAttempted = deferred<number>();
+    const secondAcquired = deferred<number>();
+    const secondPool = new ObservedQueryLockPool(
+      pool,
+      (text) => text.includes("FROM samurai_persistence.guest_sessions WHERE id = $1 FOR UPDATE"),
+      secondAttempted,
+      secondAcquired,
+    );
+    const second = new PortableRecoveryService(
+      secondPool,
+      authority,
+      recoveryAuthority,
+      { async describe() { return recoveryContent; } },
+    ).import(request);
+    await expectLockWait(rawPool, await secondAttempted.promise);
+    releaseFirst.resolve();
+    const results = [await first, await second];
 
     expect(results.map((result) => result.disposition).sort()).toEqual(["committed", "replayed"]);
     const committed = results.find((result) => result.disposition === "committed")!;
@@ -2489,16 +2571,501 @@ describe("PostgreSQL persistence spine", () => {
       validityMs: 24 * 60 * 60 * 1_000,
     });
 
-    const results = await Promise.allSettled([
-      recovery.import({ importId: "123e4567-e89b-42d3-a456-426614174111", envelope }),
-      recovery.import({ importId: "123e4567-e89b-42d3-a456-426614174112", envelope }),
-    ]);
+    const releaseFirst = deferred<void>();
+    const firstAttempted = deferred<number>();
+    const firstAcquired = deferred<number>();
+    const firstPool = new ObservedQueryLockPool(
+      pool,
+      (text) => text.includes("FROM samurai_persistence.guest_sessions WHERE id = $1 FOR UPDATE"),
+      firstAttempted,
+      firstAcquired,
+      releaseFirst.promise,
+    );
+    const first = new PortableRecoveryService(
+      firstPool,
+      authority,
+      recoveryAuthority,
+      { async describe() { return recoveryContent; } },
+    ).import({ importId: "123e4567-e89b-42d3-a456-426614174111", envelope });
+    await firstAcquired.promise;
+    const secondAttempted = deferred<number>();
+    const secondAcquired = deferred<number>();
+    const secondPool = new ObservedQueryLockPool(
+      pool,
+      (text) => text.includes("FROM samurai_persistence.guest_sessions WHERE id = $1 FOR UPDATE"),
+      secondAttempted,
+      secondAcquired,
+    );
+    const second = new PortableRecoveryService(
+      secondPool,
+      authority,
+      recoveryAuthority,
+      { async describe() { return recoveryContent; } },
+    ).import({ importId: "123e4567-e89b-42d3-a456-426614174112", envelope });
+    await expectLockWait(rawPool, await secondAttempted.promise);
+    releaseFirst.resolve();
 
-    expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(1);
-    expect(results.filter((result) => result.status === "rejected")).toHaveLength(1);
+    await expect(first).resolves.toMatchObject({ disposition: "committed" });
+    await expect(second).rejects.toMatchObject({ recoveryCode: "RECOVERY_ALREADY_CONSUMED" });
     expect((await rawPool.query<CountRow>(
       "SELECT count(*)::text AS count FROM samurai_persistence.recovery_imports",
     )).rows[0]?.count).toBe("1");
+  });
+
+  it("serializes healthy import before explicit deletion at the guest-parent lock", async () => {
+    const issued = await sessionService.issue({
+      consentVersion: "privacy-v1",
+      contentVersion: "content-v1",
+      checkpointSchemaVersion: 1,
+      checkpoint: { step: 0 },
+    });
+    const envelope = await recovery.createExport({
+      resumeSecret: issued.resumeSecret,
+      expectedRevision: 0,
+      validityMs: 24 * 60 * 60 * 1_000,
+    });
+    const releaseImport = deferred<void>();
+    const importAttempted = deferred<number>();
+    const importAcquired = deferred<number>();
+    const importPool = new ObservedQueryLockPool(
+      pool,
+      (text) => text.includes("FROM samurai_persistence.guest_sessions WHERE id = $1 FOR UPDATE"),
+      importAttempted,
+      importAcquired,
+      releaseImport.promise,
+    );
+    const importing = new PortableRecoveryService(
+      importPool,
+      authority,
+      recoveryAuthority,
+      { async describe() { return recoveryContent; } },
+    );
+    const importResult = importing.import({
+      importId: "123e4567-e89b-42d3-a456-426614174160",
+      envelope,
+    });
+    await importAcquired.promise;
+
+    const deleteAttempted = deferred<number>();
+    const deleteAcquired = deferred<number>();
+    const deletePool = new ObservedQueryLockPool(
+      pool,
+      (text) => text.includes("FOR UPDATE OF s"),
+      deleteAttempted,
+      deleteAcquired,
+    );
+    const deletion = new GuestSessionService(deletePool, authority).delete(issued.resumeSecret);
+    await expectLockWait(rawPool, await deleteAttempted.promise);
+    releaseImport.resolve();
+
+    const imported = await importResult;
+    await expect(deletion).rejects.toMatchObject({ code: "GUEST_RESUME_INVALID" });
+    await expect(sessionService.resume(imported.rotatedResumeSecret)).resolves.toMatchObject({
+      session: { id: issued.session.id },
+    });
+    const state = await rawPool.query<{
+      guests: string; digests: string; exports: string; imports: string;
+      guest_tombstones: string; command_tombstones: string; export_tombstones: string; import_tombstones: string;
+    }>(`SELECT
+      (SELECT count(*)::text FROM samurai_persistence.guest_sessions) AS guests,
+      (SELECT count(*)::text FROM samurai_persistence.guest_resume_digests) AS digests,
+      (SELECT count(*)::text FROM samurai_persistence.save_exports) AS exports,
+      (SELECT count(*)::text FROM samurai_persistence.recovery_imports) AS imports,
+      (SELECT count(*)::text FROM samurai_persistence.deletion_tombstones WHERE kind = 'guest-session') AS guest_tombstones,
+      (SELECT count(*)::text FROM samurai_persistence.deletion_tombstones WHERE kind = 'command') AS command_tombstones,
+      (SELECT count(*)::text FROM samurai_persistence.deletion_tombstones WHERE kind = 'save-export') AS export_tombstones,
+      (SELECT count(*)::text FROM samurai_persistence.deletion_tombstones WHERE kind = 'save-import') AS import_tombstones`);
+    expect(state.rows[0]).toEqual({
+      guests: "1", digests: "1", exports: "0", imports: "1",
+      guest_tombstones: "1", command_tombstones: "0", export_tombstones: "1", import_tombstones: "1",
+    });
+  });
+
+  it("serializes explicit deletion before healthy import at the guest-parent lock", async () => {
+    const issued = await sessionService.issue({
+      consentVersion: "privacy-v1",
+      contentVersion: "content-v1",
+      checkpointSchemaVersion: 1,
+      checkpoint: { step: 0 },
+    });
+    const envelope = await recovery.createExport({
+      resumeSecret: issued.resumeSecret,
+      expectedRevision: 0,
+      validityMs: 24 * 60 * 60 * 1_000,
+    });
+    const releaseDelete = deferred<void>();
+    const deleteAttempted = deferred<number>();
+    const deleteAcquired = deferred<number>();
+    const deletePool = new ObservedQueryLockPool(
+      pool,
+      (text) => text.includes("FOR UPDATE OF s"),
+      deleteAttempted,
+      deleteAcquired,
+      releaseDelete.promise,
+    );
+    const deletion = new GuestSessionService(deletePool, authority).delete(issued.resumeSecret);
+    await deleteAcquired.promise;
+
+    const importAttempted = deferred<number>();
+    const importAcquired = deferred<number>();
+    const importPool = new ObservedQueryLockPool(
+      pool,
+      (text) => text.includes("FROM samurai_persistence.guest_sessions WHERE id = $1 FOR UPDATE"),
+      importAttempted,
+      importAcquired,
+    );
+    const importing = new PortableRecoveryService(
+      importPool,
+      authority,
+      recoveryAuthority,
+      { async describe() { return recoveryContent; } },
+    ).import({
+      importId: "123e4567-e89b-42d3-a456-426614174161",
+      envelope,
+    });
+    await expectLockWait(rawPool, await importAttempted.promise);
+    releaseDelete.resolve();
+
+    await expect(deletion).resolves.toBeUndefined();
+    await expect(importing).rejects.toMatchObject({ recoveryCode: "RECOVERY_INVALID" });
+    const state = await rawPool.query<{
+      guests: string; digests: string; exports: string; imports: string;
+      guest_tombstones: string; command_tombstones: string; export_tombstones: string; import_tombstones: string;
+    }>(`SELECT
+      (SELECT count(*)::text FROM samurai_persistence.guest_sessions) AS guests,
+      (SELECT count(*)::text FROM samurai_persistence.guest_resume_digests) AS digests,
+      (SELECT count(*)::text FROM samurai_persistence.save_exports) AS exports,
+      (SELECT count(*)::text FROM samurai_persistence.recovery_imports) AS imports,
+      (SELECT count(*)::text FROM samurai_persistence.deletion_tombstones WHERE kind = 'guest-session') AS guest_tombstones,
+      (SELECT count(*)::text FROM samurai_persistence.deletion_tombstones WHERE kind = 'command') AS command_tombstones,
+      (SELECT count(*)::text FROM samurai_persistence.deletion_tombstones WHERE kind = 'save-export') AS export_tombstones,
+      (SELECT count(*)::text FROM samurai_persistence.deletion_tombstones WHERE kind = 'save-import') AS import_tombstones`);
+    expect(state.rows[0]).toEqual({
+      guests: "0", digests: "0", exports: "0", imports: "0",
+      guest_tombstones: "1", command_tombstones: "0", export_tombstones: "1", import_tombstones: "0",
+    });
+  });
+
+  it("serializes healthy import before expiry deletion with SKIP LOCKED", async () => {
+    const issued = await sessionService.issue({
+      consentVersion: "privacy-v1",
+      contentVersion: "content-v1",
+      checkpointSchemaVersion: 1,
+      checkpoint: { step: 0 },
+    });
+    const envelope = await recovery.createExport({
+      resumeSecret: issued.resumeSecret,
+      expectedRevision: 0,
+      validityMs: 24 * 60 * 60 * 1_000,
+    });
+    const releaseImport = deferred<void>();
+    const importAttempted = deferred<number>();
+    const importAcquired = deferred<number>();
+    const importPool = new ObservedQueryLockPool(
+      pool,
+      (text) => text.includes("FROM samurai_persistence.guest_sessions WHERE id = $1 FOR UPDATE"),
+      importAttempted,
+      importAcquired,
+      releaseImport.promise,
+    );
+    const importResult = new PortableRecoveryService(
+      importPool,
+      authority,
+      recoveryAuthority,
+      { async describe() { return recoveryContent; } },
+    ).import({
+      importId: "123e4567-e89b-42d3-a456-426614174162",
+      envelope,
+    });
+    await importAcquired.promise;
+    const future = new Date(issued.session.expiresAt.getTime() + 1);
+    const cleanupPool = new ControlledClockPool(pool, [future, future]);
+    await expect(new GuestSessionService(cleanupPool, authority).deleteExpired()).resolves.toBe(0);
+    releaseImport.resolve();
+
+    const imported = await importResult;
+    await expect(sessionService.resume(imported.rotatedResumeSecret)).resolves.toMatchObject({
+      session: { id: issued.session.id },
+    });
+    const state = await rawPool.query<{
+      guests: string; digests: string; exports: string; imports: string;
+      guest_tombstones: string; command_tombstones: string; export_tombstones: string; import_tombstones: string;
+    }>(`SELECT
+      (SELECT count(*)::text FROM samurai_persistence.guest_sessions) AS guests,
+      (SELECT count(*)::text FROM samurai_persistence.guest_resume_digests) AS digests,
+      (SELECT count(*)::text FROM samurai_persistence.save_exports) AS exports,
+      (SELECT count(*)::text FROM samurai_persistence.recovery_imports) AS imports,
+      (SELECT count(*)::text FROM samurai_persistence.deletion_tombstones WHERE kind = 'guest-session') AS guest_tombstones,
+      (SELECT count(*)::text FROM samurai_persistence.deletion_tombstones WHERE kind = 'command') AS command_tombstones,
+      (SELECT count(*)::text FROM samurai_persistence.deletion_tombstones WHERE kind = 'save-export') AS export_tombstones,
+      (SELECT count(*)::text FROM samurai_persistence.deletion_tombstones WHERE kind = 'save-import') AS import_tombstones`);
+    expect(state.rows[0]).toEqual({
+      guests: "1", digests: "1", exports: "0", imports: "1",
+      guest_tombstones: "1", command_tombstones: "0", export_tombstones: "1", import_tombstones: "1",
+    });
+  });
+
+  it("serializes expiry deletion before healthy import at the guest-parent lock", async () => {
+    const issued = await sessionService.issue({
+      consentVersion: "privacy-v1",
+      contentVersion: "content-v1",
+      checkpointSchemaVersion: 1,
+      checkpoint: { step: 0 },
+    });
+    const envelope = await recovery.createExport({
+      resumeSecret: issued.resumeSecret,
+      expectedRevision: 0,
+      validityMs: 24 * 60 * 60 * 1_000,
+    });
+    const future = new Date(issued.session.expiresAt.getTime() + 1);
+    const releaseCleanup = deferred<void>();
+    const cleanupAttempted = deferred<number>();
+    const cleanupAcquired = deferred<number>();
+    const cleanupPool = new ObservedQueryLockPool(
+      new ControlledClockPool(pool, [future, future]),
+      (text) => text.includes("FROM samurai_persistence.guest_sessions") && text.includes("FOR UPDATE SKIP LOCKED"),
+      cleanupAttempted,
+      cleanupAcquired,
+      releaseCleanup.promise,
+    );
+    const cleanup = new GuestSessionService(cleanupPool, authority).deleteExpired();
+    await cleanupAcquired.promise;
+
+    const importAttempted = deferred<number>();
+    const importAcquired = deferred<number>();
+    const importPool = new ObservedQueryLockPool(
+      pool,
+      (text) => text.includes("FROM samurai_persistence.guest_sessions WHERE id = $1 FOR UPDATE"),
+      importAttempted,
+      importAcquired,
+    );
+    const importing = new PortableRecoveryService(
+      importPool,
+      authority,
+      recoveryAuthority,
+      { async describe() { return recoveryContent; } },
+    ).import({
+      importId: "123e4567-e89b-42d3-a456-426614174163",
+      envelope,
+    });
+    await expectLockWait(rawPool, await importAttempted.promise);
+    releaseCleanup.resolve();
+
+    await expect(cleanup).resolves.toBe(1);
+    await expect(importing).rejects.toMatchObject({ recoveryCode: "RECOVERY_INVALID" });
+    const state = await rawPool.query<{
+      guests: string; digests: string; exports: string; imports: string;
+      guest_tombstones: string; command_tombstones: string; export_tombstones: string; import_tombstones: string;
+    }>(`SELECT
+      (SELECT count(*)::text FROM samurai_persistence.guest_sessions) AS guests,
+      (SELECT count(*)::text FROM samurai_persistence.guest_resume_digests) AS digests,
+      (SELECT count(*)::text FROM samurai_persistence.save_exports) AS exports,
+      (SELECT count(*)::text FROM samurai_persistence.recovery_imports) AS imports,
+      (SELECT count(*)::text FROM samurai_persistence.deletion_tombstones WHERE kind = 'guest-session') AS guest_tombstones,
+      (SELECT count(*)::text FROM samurai_persistence.deletion_tombstones WHERE kind = 'command') AS command_tombstones,
+      (SELECT count(*)::text FROM samurai_persistence.deletion_tombstones WHERE kind = 'save-export') AS export_tombstones,
+      (SELECT count(*)::text FROM samurai_persistence.deletion_tombstones WHERE kind = 'save-import') AS import_tombstones`);
+    expect(state.rows[0]).toEqual({
+      guests: "0", digests: "0", exports: "0", imports: "0",
+      guest_tombstones: "1", command_tombstones: "0", export_tombstones: "1", import_tombstones: "0",
+    });
+  });
+
+  it("rechecks exact export expiry after a blocked export-row lock", async () => {
+    const issued = await sessionService.issue({
+      consentVersion: "privacy-v1",
+      contentVersion: "content-v1",
+      checkpointSchemaVersion: 1,
+      checkpoint: { step: 0 },
+    });
+    const envelope = await recovery.createExport({
+      resumeSecret: issued.resumeSecret,
+      expectedRevision: 0,
+      validityMs: 24 * 60 * 60 * 1_000,
+    });
+    const blocker = await rawPool.connect();
+    try {
+      await blocker.query("BEGIN");
+      await blocker.query(
+        "SELECT export_id FROM samurai_persistence.save_exports WHERE export_id = $1::uuid FOR UPDATE",
+        [envelope.exportId],
+      );
+      const attempted = deferred<number>();
+      const acquired = deferred<number>();
+      const expiry = new Date(envelope.expiresAt);
+      const before = new Date(expiry.getTime() - 1);
+      const importPool = new ObservedQueryLockPool(
+        new ControlledClockPool(pool, [before, before, before, expiry, expiry]),
+        (text) => text.includes("WHERE export_id = $1::uuid AND guest_session_id = $2") && text.includes("FOR UPDATE"),
+        attempted,
+        acquired,
+      );
+      const importing = new PortableRecoveryService(
+        importPool,
+        authority,
+        recoveryAuthority,
+        { async describe() { return recoveryContent; } },
+      ).import({
+        importId: "123e4567-e89b-42d3-a456-426614174164",
+        envelope,
+      });
+      await expectLockWait(rawPool, await attempted.promise);
+      await blocker.query("COMMIT");
+      await acquired.promise;
+      await expect(importing).rejects.toMatchObject({ recoveryCode: "RECOVERY_EXPIRED" });
+    } finally {
+      await blocker.query("ROLLBACK").catch(() => undefined);
+      blocker.release();
+    }
+    const state = await rawPool.query<{ exports: string; imports: string; digests: string; tombstones: string }>(
+      `SELECT (SELECT count(*)::text FROM samurai_persistence.save_exports) AS exports,
+              (SELECT count(*)::text FROM samurai_persistence.recovery_imports) AS imports,
+              (SELECT count(*)::text FROM samurai_persistence.guest_resume_digests) AS digests,
+              (SELECT count(*)::text FROM samurai_persistence.deletion_tombstones) AS tombstones`,
+    );
+    expect(state.rows[0]).toEqual({ exports: "1", imports: "0", digests: "1", tombstones: "0" });
+  });
+
+  it("rechecks integrity-key compromise after a blocked export-row lock", async () => {
+    const issued = await sessionService.issue({
+      consentVersion: "privacy-v1",
+      contentVersion: "content-v1",
+      checkpointSchemaVersion: 1,
+      checkpoint: { step: 0 },
+    });
+    const envelope = await recovery.createExport({
+      resumeSecret: issued.resumeSecret,
+      expectedRevision: 0,
+      validityMs: 24 * 60 * 60 * 1_000,
+    });
+    const compromisedAt = new Date(new Date(envelope.expiresAt).getTime() - 12 * 60 * 60 * 1_000);
+    const before = new Date(compromisedAt.getTime() - 1);
+    const after = new Date(compromisedAt.getTime() + 1);
+    const compromisedKey = { ...hmacKey("portable-integrity", 5, 5), compromisedAt } as const;
+    const blocker = await rawPool.connect();
+    try {
+      await blocker.query("BEGIN");
+      await blocker.query(
+        "SELECT export_id FROM samurai_persistence.save_exports WHERE export_id = $1::uuid FOR UPDATE",
+        [envelope.exportId],
+      );
+      const attempted = deferred<number>();
+      const acquired = deferred<number>();
+      const importPool = new ObservedQueryLockPool(
+        new ControlledClockPool(pool, [before, before, before, after, after]),
+        (text) => text.includes("WHERE export_id = $1::uuid AND guest_session_id = $2") && text.includes("FOR UPDATE"),
+        attempted,
+        acquired,
+      );
+      const crossingAuthority = new PortableRecoveryAuthority(importPool, new IntegrityKeyring(compromisedKey));
+      const importing = new PortableRecoveryService(
+        importPool,
+        authority,
+        crossingAuthority,
+        { async describe() { return recoveryContent; } },
+      ).import({
+        importId: "123e4567-e89b-42d3-a456-426614174165",
+        envelope,
+      });
+      await expectLockWait(rawPool, await attempted.promise);
+      await blocker.query("COMMIT");
+      await acquired.promise;
+      await expect(importing).rejects.toMatchObject({ recoveryCode: "RECOVERY_INVALID" });
+    } finally {
+      await blocker.query("ROLLBACK").catch(() => undefined);
+      blocker.release();
+    }
+    const state = await rawPool.query<{ exports: string; imports: string; digests: string; tombstones: string }>(
+      `SELECT (SELECT count(*)::text FROM samurai_persistence.save_exports) AS exports,
+              (SELECT count(*)::text FROM samurai_persistence.recovery_imports) AS imports,
+              (SELECT count(*)::text FROM samurai_persistence.guest_resume_digests) AS digests,
+              (SELECT count(*)::text FROM samurai_persistence.deletion_tombstones) AS tombstones`,
+    );
+    expect(state.rows[0]).toEqual({ exports: "1", imports: "0", digests: "1", tombstones: "0" });
+  });
+
+  it("deletes every credential, export, receipt, and replay identity for explicit and expiry deletion", async () => {
+    for (const [index, mode] of ["explicit", "expiry"].entries()) {
+      await rawPool.query("TRUNCATE samurai_persistence.guest_sessions CASCADE");
+      await rawPool.query("DELETE FROM samurai_persistence.deletion_tombstones");
+      const issued = await sessionService.issue({
+        consentVersion: "privacy-v1",
+        contentVersion: "content-v1",
+        checkpointSchemaVersion: 1,
+        checkpoint: { step: 0 },
+      });
+      const consumed = await recovery.createExport({
+        resumeSecret: issued.resumeSecret,
+        expectedRevision: 0,
+        validityMs: 24 * 60 * 60 * 1_000,
+      });
+      const imported = await recovery.import({
+        importId: `123e4567-e89b-42d3-a456-42661417417${index}`,
+        envelope: consumed,
+      });
+      await executor.execute(
+        imported.rotatedResumeSecret,
+        command(issued.session.id, `018f47fe-347b-4dac-8f45-a6f3f43bd61${index}`, 0),
+        () => ({
+          checkpointSchemaVersion: 1,
+          checkpoint: { step: 1 },
+          event: {
+            eventId: `018f47fe-347b-4dac-8f45-a6f3f43bd62${index}`,
+            eventType: "checkpoint.advanced",
+            schemaVersion: 1,
+            payload: { step: 1 },
+          },
+          response: { schemaVersion: 1, payload: { accepted: true } },
+        }),
+      );
+      await recovery.createExport({
+        resumeSecret: imported.rotatedResumeSecret,
+        expectedRevision: 1,
+        validityMs: 24 * 60 * 60 * 1_000,
+      });
+      await recovery.createExport({
+        resumeSecret: imported.rotatedResumeSecret,
+        expectedRevision: 1,
+        validityMs: 2 * 24 * 60 * 60 * 1_000,
+      });
+
+      if (mode === "explicit") {
+        await sessionService.delete(imported.rotatedResumeSecret);
+      } else {
+        const clock = await rawPool.query<{ readonly now: Date }>("SELECT clock_timestamp() AS now");
+        const expiry = new Date(clock.rows[0]!.now.getTime() + 24 * 60 * 60 * 1_000);
+        await rawPool.query(
+          `UPDATE samurai_persistence.guest_sessions
+              SET rotate_after = $2,
+                  expires_at = $3
+            WHERE id = $1`,
+          [issued.session.id, new Date(expiry.getTime() - 1), expiry],
+        );
+        const expiryService = new GuestSessionService(
+          new ControlledClockPool(pool, [expiry, expiry]),
+          authority,
+        );
+        await expect(expiryService.deleteExpired()).resolves.toBe(1);
+      }
+
+      const state = await rawPool.query<{
+        guests: string; digests: string; commands: string; exports: string; imports: string;
+        guest_tombstones: string; command_tombstones: string; export_tombstones: string; import_tombstones: string;
+      }>(`SELECT
+        (SELECT count(*)::text FROM samurai_persistence.guest_sessions) AS guests,
+        (SELECT count(*)::text FROM samurai_persistence.guest_resume_digests) AS digests,
+        (SELECT count(*)::text FROM samurai_persistence.command_receipts) AS commands,
+        (SELECT count(*)::text FROM samurai_persistence.save_exports) AS exports,
+        (SELECT count(*)::text FROM samurai_persistence.recovery_imports) AS imports,
+        (SELECT count(*)::text FROM samurai_persistence.deletion_tombstones WHERE kind = 'guest-session') AS guest_tombstones,
+        (SELECT count(*)::text FROM samurai_persistence.deletion_tombstones WHERE kind = 'command') AS command_tombstones,
+        (SELECT count(*)::text FROM samurai_persistence.deletion_tombstones WHERE kind = 'save-export') AS export_tombstones,
+        (SELECT count(*)::text FROM samurai_persistence.deletion_tombstones WHERE kind = 'save-import') AS import_tombstones`);
+      expect(state.rows[0], mode).toEqual({
+        guests: "0", digests: "0", commands: "0", exports: "0", imports: "0",
+        guest_tombstones: "2", command_tombstones: "1", export_tombstones: "3", import_tombstones: "1",
+      });
+    }
   });
 
   it("rolls every recovery mutation back when receipt persistence fails late", async () => {
@@ -2563,7 +3130,7 @@ describe("PostgreSQL persistence spine", () => {
     )).rows[0]?.count).toBe("0");
   });
 
-  it("serializes concurrent exact retries to one durable random credential and stops retry authority at envelope expiry", async () => {
+  it("keeps one durable random credential on exact retry and stops retry authority at envelope expiry", async () => {
     const issued = await sessionService.issue({
       consentVersion: "privacy-v1",
       contentVersion: "content-v1",
@@ -2576,21 +3143,14 @@ describe("PostgreSQL persistence spine", () => {
       validityMs: 24 * 60 * 60 * 1_000,
     });
     const importId = "123e4567-e89b-42d3-a456-426614174110";
-    const results = await Promise.all([
-      recovery.import({ importId, envelope }),
-      recovery.import({ importId, envelope }),
-    ]);
-    expect(results.map((result) => result.disposition).sort()).toEqual(["committed", "replayed"]);
-    expect(results[0]!.rotatedResumeSecret).not.toBe(results[1]!.rotatedResumeSecret);
-    const resumable = await Promise.all(results.map(async (result) => {
-      try {
-        await sessionService.resume(result.rotatedResumeSecret);
-        return true;
-      } catch {
-        return false;
-      }
-    }));
-    expect(resumable.filter(Boolean)).toHaveLength(1);
+    const committed = await recovery.import({ importId, envelope });
+    const replayed = await recovery.import({ importId, envelope });
+    expect([committed.disposition, replayed.disposition]).toEqual(["committed", "replayed"]);
+    expect(committed.rotatedResumeSecret).not.toBe(replayed.rotatedResumeSecret);
+    await expect(sessionService.resume(committed.rotatedResumeSecret)).rejects.toMatchObject({ code: "GUEST_RESUME_INVALID" });
+    await expect(sessionService.resume(replayed.rotatedResumeSecret)).resolves.toMatchObject({
+      session: { id: issued.session.id },
+    });
     const durable = await rawPool.query<{ digests: string; receipts: string; generation: string }>(
       `SELECT (SELECT count(*)::text FROM samurai_persistence.guest_resume_digests) AS digests,
               (SELECT count(*)::text FROM samurai_persistence.recovery_imports) AS receipts,
@@ -2952,33 +3512,64 @@ describe("PostgreSQL persistence spine", () => {
       importId: "123e4567-e89b-42d3-a456-426614174147",
       envelope: receiptEnvelope,
     });
+    const verifyUntil = new Date(envelope.expiresAt);
+    const compromisedAt = new Date(verifyUntil.getTime() - 12 * 60 * 60 * 1_000);
+    const beforeCompromise = new Date(compromisedAt.getTime() - 1);
+    const afterVerification = new Date(verifyUntil.getTime() + 1);
     const unavailableOld = {
       ...hmacKey("portable-integrity", 5, 5, true),
-      verifyUntil: new Date("2026-07-01T00:00:00.000Z"),
-      compromisedAt: new Date("2026-06-15T00:00:00.000Z"),
+      retiredAt: new Date(compromisedAt.getTime() - 24 * 60 * 60 * 1_000),
+      verifyUntil,
+      compromisedAt,
     } as const;
-    const purgeAuthority = new PortableRecoveryAuthority(
-      pool,
-      new IntegrityKeyring(hmacKey("portable-integrity", 6, 6), [unavailableOld]),
+    const integrityRing = new IntegrityKeyring(hmacKey("portable-integrity", 6, 6), [unavailableOld]);
+    const releasePurge = deferred<void>();
+    const purgeAttempted = deferred<number>();
+    const purgeAcquired = deferred<number>();
+    const purgePool = new ObservedQueryLockPool(
+      new ControlledClockPool(pool, Array.from({ length: 8 }, () => afterVerification)),
+      (text) => text.includes("FROM samurai_persistence.guest_sessions WHERE id = $1 FOR UPDATE"),
+      purgeAttempted,
+      purgeAcquired,
+      releasePurge.promise,
     );
+    const purgeAuthority = new PortableRecoveryAuthority(purgePool, integrityRing);
     const purgeService = new PortableRecoveryService(
-      pool,
+      purgePool,
       authority,
       purgeAuthority,
       { async describe() { return recoveryContent; } },
     );
-    await expect(purgeAuthority.assertSafeToDestroy(5)).rejects.toMatchObject({
+    const destructionAuthority = new PortableRecoveryAuthority(
+      new ControlledClockPool(pool, [afterVerification, afterVerification]),
+      integrityRing,
+    );
+    await expect(destructionAuthority.assertSafeToDestroy(5)).rejects.toMatchObject({
       code: "KEY_DESTRUCTION_UNSAFE",
     });
-    const [purgeResult, importResult] = await Promise.allSettled([
-      purgeService.purgeUnavailableIntegrityReferences(),
-      purgeService.import({
+    const purgeResult = purgeService.purgeUnavailableIntegrityReferences();
+    await purgeAcquired.promise;
+    const importAttempted = deferred<number>();
+    const importAcquired = deferred<number>();
+    const importPool = new ObservedQueryLockPool(
+      new ControlledClockPool(pool, Array.from({ length: 8 }, () => beforeCompromise)),
+      (text) => text.includes("FROM samurai_persistence.guest_sessions WHERE id = $1 FOR UPDATE"),
+      importAttempted,
+      importAcquired,
+    );
+    const importResult = new PortableRecoveryService(
+      importPool,
+      authority,
+      new PortableRecoveryAuthority(importPool, integrityRing),
+      { async describe() { return recoveryContent; } },
+    ).import({
         importId: "123e4567-e89b-42d3-a456-426614174144",
         envelope,
-      }),
-    ]);
-    expect(purgeResult).toMatchObject({ status: "fulfilled", value: 2 });
-    expect(importResult).toMatchObject({ status: "rejected" });
+      });
+    await expectLockWait(rawPool, await importAttempted.promise);
+    releasePurge.resolve();
+    await expect(purgeResult).resolves.toBe(2);
+    await expect(importResult).rejects.toMatchObject({ recoveryCode: "RECOVERY_ALREADY_CONSUMED" });
     await expect(sessionService.resume(issued.resumeSecret)).resolves.toMatchObject({
       session: { id: issued.session.id },
     });
@@ -2999,7 +3590,7 @@ describe("PostgreSQL persistence spine", () => {
       export_tombstones: "2",
       import_tombstones: "1",
     });
-    await expect(purgeAuthority.assertSafeToDestroy(5)).resolves.toBeUndefined();
+    await expect(destructionAuthority.assertSafeToDestroy(5)).resolves.toBeUndefined();
   });
 
   it("imports a pre-retirement export through its verification-only integrity key", async () => {
@@ -3204,6 +3795,51 @@ describe("PostgreSQL persistence spine", () => {
         Buffer.alloc(32, 7),
       ],
     )).rejects.toMatchObject({ code: "23514" });
+    const receiptInsert = (importId: string, updatedAt: string, originalExpiresAt: string, expiresAt: string) => rawPool.query(
+      `INSERT INTO samurai_persistence.recovery_imports
+        (import_id, guest_session_id, export_id, request_hash, committed_revision,
+         integrity_key_version, integrity_key_identity,
+         issued_digest_key_version, issued_digest_key_identity, issued_digest,
+         delivery_generation, created_at, updated_at, original_export_expires_at, expires_at)
+       VALUES ($1::uuid, $2, $3::uuid, $4, 0, 5, $5, 2, $6, $7, 1,
+               '2026-08-01T00:00:00.000Z', $8::timestamptz, $9::timestamptz, $10::timestamptz)`,
+      [
+        importId,
+        issued.session.id,
+        "123e4567-e89b-42d3-a456-426614174159",
+        Buffer.alloc(32, 11),
+        keyIdentityBytes(integrityKeys.active.keyIdentity),
+        Buffer.alloc(32, 13),
+        Buffer.alloc(32, 14),
+        updatedAt,
+        originalExpiresAt,
+        expiresAt,
+      ],
+    );
+    await expect(receiptInsert(
+      "123e4567-e89b-42d3-a456-426614174150",
+      "2026-08-01T00:00:00.000Z",
+      "infinity",
+      "infinity",
+    )).rejects.toMatchObject({ code: "23514" });
+    await expect(receiptInsert(
+      "123e4567-e89b-42d3-a456-426614174151",
+      "2026-08-01T00:00:00.000Z",
+      "2026-08-30T00:00:00.001Z",
+      "2026-08-31T00:00:00.001Z",
+    )).rejects.toMatchObject({ code: "23514" });
+    await expect(receiptInsert(
+      "123e4567-e89b-42d3-a456-426614174152",
+      "2026-08-30T00:00:00.000Z",
+      "2026-08-30T00:00:00.000Z",
+      "2026-08-31T00:00:00.000Z",
+    )).rejects.toMatchObject({ code: "23514" });
+    await expect(receiptInsert(
+      "123e4567-e89b-42d3-a456-426614174153",
+      "2026-08-29T23:59:59.999Z",
+      "2026-08-30T00:00:00.000Z",
+      "2026-08-31T00:00:00.000Z",
+    )).resolves.toMatchObject({ rowCount: 1 });
     const envelope = await recovery.createExport({
       resumeSecret: issued.resumeSecret,
       expectedRevision: 0,

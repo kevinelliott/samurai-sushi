@@ -37,8 +37,8 @@ const MIGRATION_MANIFEST = [
   },
   {
     name: "0002_portable_recovery.sql",
-    checksumHex: "76f32b3874498c0b2760a56c35252482f248b99c39cf7b7599d60107415d7d1d",
-    catalogChecksumHex: "2c913a12272cc443d51d487c6686f9ef1709e417f154d8fc4754403685a9762a",
+    checksumHex: "19228c2338e44feffab73d71c8641bc98b5bcb806be19300501f072a9a49dc48",
+    catalogChecksumHex: "9353296a3bc15b064810e3a3ab1cd28ed17d02d70daf35cec4903a868a4e6692",
   },
 ] as const;
 
