@@ -7,6 +7,7 @@ export interface PersistenceLifecyclePolicy {
   readonly receiptLifetimeMs: number;
   readonly tombstoneLifetimeMs: number;
   readonly cleanupMaximumDelayMs: number;
+  readonly portableExportMaximumLifetimeMs: number;
 }
 
 export const ADR_0003_PERSISTENCE_LIFECYCLE: PersistenceLifecyclePolicy = Object.freeze({
@@ -15,6 +16,7 @@ export const ADR_0003_PERSISTENCE_LIFECYCLE: PersistenceLifecyclePolicy = Object
   receiptLifetimeMs: 30 * DAY_MS,
   tombstoneLifetimeMs: 30 * DAY_MS,
   cleanupMaximumDelayMs: DAY_MS,
+  portableExportMaximumLifetimeMs: 29 * DAY_MS,
 });
 
 export function assertPersistenceLifecycle(policy: PersistenceLifecyclePolicy): void {
@@ -26,6 +28,9 @@ export function assertPersistenceLifecycle(policy: PersistenceLifecyclePolicy): 
   }
   if (policy.tombstoneLifetimeMs < policy.receiptLifetimeMs) {
     throw new Error("Replay tombstones must not expire before the receipt horizon they replace.");
+  }
+  if (policy.tombstoneLifetimeMs < policy.portableExportMaximumLifetimeMs + policy.cleanupMaximumDelayMs) {
+    throw new Error("Replay tombstones must cover the maximum portable-export lifetime plus cleanup delay.");
   }
   for (const [name, value] of Object.entries(policy)) {
     if (!Number.isSafeInteger(value) || value <= 0) throw new Error(`${name} must be a positive safe millisecond duration.`);

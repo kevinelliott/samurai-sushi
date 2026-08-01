@@ -35,6 +35,11 @@ const MIGRATION_MANIFEST = [
     checksumHex: "4d7fd2b2103a1cf7bf332db8e7f14b034e66e72de64efc398a7d4e42b2571533",
     catalogChecksumHex: "434770ddcac493dfdcbe90e8747bdc0319065b81000cd8f1613a22cefb386c4c",
   },
+  {
+    name: "0002_portable_recovery.sql",
+    checksumHex: "76f32b3874498c0b2760a56c35252482f248b99c39cf7b7599d60107415d7d1d",
+    catalogChecksumHex: "2c913a12272cc443d51d487c6686f9ef1709e417f154d8fc4754403685a9762a",
+  },
 ] as const;
 
 type MigrationTextReader = (name: string) => Promise<string>;
@@ -268,6 +273,14 @@ async function applyMigrationsWithReader(pool: SqlPool, readMigration: Migration
       || ledger.rows.some((row, index) => row.name !== selectedNames[index])
     ) {
       throw new MigrationSchemaDriftError("The migration ledger contains unknown or out-of-order entries.");
+    }
+    if (ledger.rows.length > 0) {
+      const prefix = selected[ledger.rows.length - 1];
+      if (!prefix) throw new MigrationSchemaDriftError("The migration ledger prefix is not code-known.");
+      const livePrefixChecksum = await catalogChecksum(client);
+      if (!Buffer.from(livePrefixChecksum).equals(Buffer.from(prefix.catalogChecksum))) {
+        throw new MigrationSchemaDriftError("The live persistence catalog does not match its applied migration prefix.");
+      }
     }
     let expectedCatalogChecksum: Uint8Array | undefined;
     for (const migration of selected) {

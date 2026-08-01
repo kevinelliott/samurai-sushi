@@ -5,6 +5,7 @@ import {
   constantTimeDigestEqual,
   GuestSecretFormatError,
   issueResumeSecret,
+  type TombstoneKind,
 } from "./crypto";
 import { GuestResumeError, GuestRotationDeferredError, PersistenceError } from "./errors";
 import {
@@ -60,6 +61,15 @@ interface ResumeDigestRow {
   readonly digest_key_version: number;
   readonly digest_key_identity: Uint8Array;
   readonly digest: Uint8Array;
+}
+
+interface SaveExportRow {
+  readonly export_id: string;
+  readonly expires_at: Date;
+}
+interface SaveImportRow {
+  readonly import_id: string;
+  readonly expires_at: Date;
 }
 
 export interface GuestSessionServiceOptions {
@@ -309,10 +319,48 @@ export class GuestSessionService {
         "SELECT idempotency_key FROM samurai_persistence.command_receipts WHERE guest_session_id = $1",
         [match.id],
       );
+      const exportIds = await client.query<SaveExportRow>(
+        `SELECT export_id::text, expires_at
+           FROM samurai_persistence.save_exports
+          WHERE guest_session_id = $1
+          ORDER BY export_id
+          FOR UPDATE`,
+        [match.id],
+      );
+      const importIds = await client.query<SaveImportRow>(
+        `SELECT import_id::text, expires_at
+           FROM samurai_persistence.recovery_imports
+          WHERE guest_session_id = $1
+          ORDER BY import_id
+          FOR UPDATE`,
+        [match.id],
+      );
+      const deleteNow = await this.authority.assertTransactionReady(client);
+      if (match.expiresAt.getTime() <= deleteNow.getTime()) throw new GuestResumeError("GUEST_RESUME_EXPIRED");
       await client.query("DELETE FROM samurai_persistence.guest_sessions WHERE id = $1", [match.id]);
-      for (const row of digests.rows) await this.insertTombstone(client, "guest-session", this.resumeReplayKey(row), now, row);
+      for (const row of digests.rows) await this.insertTombstone(client, "guest-session", this.resumeReplayKey(row), deleteNow, row);
       for (const row of commandKeys.rows) {
-        await this.insertTombstone(client, "command", this.commandReplayKey(match.id, row.idempotency_key), now);
+        await this.insertTombstone(client, "command", this.commandReplayKey(match.id, row.idempotency_key), deleteNow);
+      }
+      for (const row of exportIds.rows) {
+        await this.insertTombstone(
+          client,
+          "save-export",
+          this.exportReplayKey(row.export_id),
+          deleteNow,
+          undefined,
+          addMilliseconds(row.expires_at, ADR_0003_PERSISTENCE_LIFECYCLE.cleanupMaximumDelayMs),
+        );
+      }
+      for (const row of importIds.rows) {
+        await this.insertTombstone(
+          client,
+          "save-import",
+          this.importReplayKey(row.import_id),
+          deleteNow,
+          undefined,
+          row.expires_at,
+        );
       }
     });
   }
@@ -346,12 +394,49 @@ export class GuestSessionService {
           "SELECT idempotency_key FROM samurai_persistence.command_receipts WHERE guest_session_id = $1",
           [session.id],
         );
+        const exportIds = await client.query<SaveExportRow>(
+          `SELECT export_id::text, expires_at
+             FROM samurai_persistence.save_exports
+            WHERE guest_session_id = $1
+            ORDER BY export_id
+            FOR UPDATE`,
+          [session.id],
+        );
+        const importIds = await client.query<SaveImportRow>(
+          `SELECT import_id::text, expires_at
+             FROM samurai_persistence.recovery_imports
+            WHERE guest_session_id = $1
+            ORDER BY import_id
+            FOR UPDATE`,
+          [session.id],
+        );
+        const deleteNow = await this.authority.assertRetentionTransactionReady(client);
         await client.query("DELETE FROM samurai_persistence.guest_sessions WHERE id = $1", [session.id]);
         for (const row of digests.rows) {
-          await this.insertTombstone(client, "guest-session", this.resumeReplayKey(row), now, row);
+          await this.insertTombstone(client, "guest-session", this.resumeReplayKey(row), deleteNow, row);
         }
         for (const row of commandKeys.rows) {
-          await this.insertTombstone(client, "command", this.commandReplayKey(session.id, row.idempotency_key), now);
+          await this.insertTombstone(client, "command", this.commandReplayKey(session.id, row.idempotency_key), deleteNow);
+        }
+        for (const row of exportIds.rows) {
+          await this.insertTombstone(
+            client,
+            "save-export",
+            this.exportReplayKey(row.export_id),
+            deleteNow,
+            undefined,
+            addMilliseconds(row.expires_at, ADR_0003_PERSISTENCE_LIFECYCLE.cleanupMaximumDelayMs),
+          );
+        }
+        for (const row of importIds.rows) {
+          await this.insertTombstone(
+            client,
+            "save-import",
+            this.importReplayKey(row.import_id),
+            deleteNow,
+            undefined,
+            row.expires_at,
+          );
         }
       }
       return expired.rows.length;
@@ -360,10 +445,11 @@ export class GuestSessionService {
 
   private async insertTombstone(
     client: SqlClient,
-    kind: "guest-session" | "command",
+    kind: TombstoneKind,
     replayKey: string,
     now: Date,
     resumeDigest?: ResumeDigestRow,
+    minimumExpiresAt?: Date,
   ): Promise<void> {
     const tombstone = this.authority.tombstoneKeys.digest(kind, replayKey, now);
     await client.query(
@@ -381,7 +467,10 @@ export class GuestSessionService {
         resumeDigest?.digest_key_version ?? null,
         resumeDigest?.digest_key_identity ?? null,
         now,
-        addMilliseconds(now, this.policy.tombstoneLifetimeMs),
+        new Date(Math.max(
+          addMilliseconds(now, this.policy.tombstoneLifetimeMs).getTime(),
+          minimumExpiresAt?.getTime() ?? 0,
+        )),
       ],
     );
   }
@@ -392,6 +481,14 @@ export class GuestSessionService {
 
   private commandReplayKey(guestSessionId: string, idempotencyKey: string): string {
     return `guest:${guestSessionId}:command:${idempotencyKey}`;
+  }
+
+  private exportReplayKey(exportId: string): string {
+    return `export:${exportId}`;
+  }
+
+  private importReplayKey(importId: string): string {
+    return `import:${importId}`;
   }
 
 }

@@ -3,9 +3,10 @@ import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypt
 const SECRET_BYTES = 32;
 const DIGEST_BYTES = 32;
 const KEY_IDENTITY_DOMAIN = "samurai-sushi:hmac-key-identity:v1\n";
+const PORTABLE_SAVE_INTEGRITY_DOMAIN = "samurai-sushi:portable-save-integrity:v1\n";
 const KEY_IDENTITY_PATTERN = /^sha256:[0-9a-f]{64}$/;
 
-export type HmacKeyPurpose = "resume" | "tombstone";
+export type HmacKeyPurpose = "resume" | "tombstone" | "portable-integrity";
 export type KeyIdentity = `sha256:${string}`;
 
 export interface VersionedHmacKey {
@@ -33,7 +34,7 @@ export interface VersionedDigest {
   readonly digest: Uint8Array;
 }
 
-export type TombstoneKind = "guest-session" | "command";
+export type TombstoneKind = "guest-session" | "command" | "save-export" | "save-import";
 
 interface PrivateKeyRecord {
   readonly metadata: HmacKeyMetadata;
@@ -224,6 +225,66 @@ export class TombstoneKeyring {
   }
 }
 
+export class IntegrityKeyring {
+  readonly active: HmacKeyMetadata;
+  readonly #activeRecord: PrivateKeyRecord;
+  readonly #records: ReadonlyMap<number, PrivateKeyRecord>;
+
+  constructor(active: VersionedHmacKey, verificationOnly: readonly VersionedHmacKey[] = []) {
+    const prepared = buildKeyMap(active, verificationOnly, "portable-integrity");
+    this.#activeRecord = prepared.active;
+    this.#records = prepared.records;
+    this.active = prepared.active.metadata;
+  }
+
+  sign(canonicalClaims: Uint8Array, now: Date): VersionedDigest {
+    if (!usable(this.#activeRecord, now)) throw new KeyLifecycleError("ACTIVE_KEY_UNAVAILABLE", this.active.version);
+    return this.#tag(this.#activeRecord, canonicalClaims);
+  }
+
+  verify(
+    canonicalClaims: Uint8Array,
+    tag: Uint8Array,
+    keyVersion: number,
+    keyIdentity: KeyIdentity,
+    now: Date,
+  ): boolean {
+    const record = this.#records.get(keyVersion);
+    if (!record || !usable(record, now) || record.metadata.keyIdentity !== keyIdentity) {
+      throw new KeyLifecycleError("KEY_VERSION_UNAVAILABLE", keyVersion);
+    }
+    return constantTimeDigestEqual(this.#tag(record, canonicalClaims).digest, tag);
+  }
+
+  metadata(version: number): HmacKeyMetadata | undefined {
+    return this.#records.get(version)?.metadata;
+  }
+
+  allMetadata(): readonly HmacKeyMetadata[] {
+    return [...this.#records.values()].map((record) => record.metadata);
+  }
+
+  canVerify(version: number, now: Date): boolean {
+    const record = this.#records.get(version);
+    return Boolean(record && usable(record, now));
+  }
+
+  assertActive(now: Date): void {
+    if (!usable(this.#activeRecord, now)) throw new KeyLifecycleError("ACTIVE_KEY_UNAVAILABLE", this.active.version);
+  }
+
+  #tag(record: PrivateKeyRecord, canonicalClaims: Uint8Array): VersionedDigest {
+    return {
+      keyVersion: record.metadata.version,
+      keyIdentity: record.metadata.keyIdentity,
+      digest: createHmac("sha256", record.bytes)
+        .update(PORTABLE_SAVE_INTEGRITY_DOMAIN, "utf8")
+        .update(canonicalClaims)
+        .digest(),
+    };
+  }
+}
+
 export function keyIdentityBytes(identity: KeyIdentity): Uint8Array {
   if (!KEY_IDENTITY_PATTERN.test(identity)) throw new Error("Invalid key identity.");
   return Buffer.from(identity.slice("sha256:".length), "hex");
@@ -251,7 +312,10 @@ export function constantTimeDigestEqual(left: Uint8Array, right: Uint8Array): bo
 }
 
 export class KeyLifecycleError extends Error {
-  constructor(readonly code: "KEY_VERSION_UNAVAILABLE" | "ACTIVE_KEY_UNAVAILABLE", readonly version: number) {
+  constructor(
+    readonly code: "KEY_VERSION_UNAVAILABLE" | "ACTIVE_KEY_UNAVAILABLE" | "KEY_IDENTITY_MISMATCH",
+    readonly version: number,
+  ) {
     super(`HMAC key version ${version} is unavailable for ${code === "ACTIVE_KEY_UNAVAILABLE" ? "active use" : "verification"}.`);
     this.name = "KeyLifecycleError";
   }

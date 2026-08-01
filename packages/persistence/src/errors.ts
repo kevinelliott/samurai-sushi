@@ -77,3 +77,31 @@ export class OutboxClaimLostError extends PersistenceError {
     this.name = "OutboxClaimLostError";
   }
 }
+
+export type PortableRecoveryErrorCode =
+  | "RECOVERY_ALREADY_CONSUMED"
+  | "RECOVERY_AUTHORITY_ROLLBACK"
+  | "RECOVERY_CONTENT_INCOMPATIBLE"
+  | "RECOVERY_EXPIRED"
+  | "RECOVERY_IDEMPOTENCY_MISMATCH"
+  | "RECOVERY_INVALID"
+  | "RECOVERY_REVISION_STALE";
+
+export class PortableRecoveryError extends PersistenceError {
+  constructor(readonly recoveryCode: PortableRecoveryErrorCode) {
+    super(recoveryCode, recoveryCode === "RECOVERY_INVALID"
+      ? "The portable save is invalid or unavailable."
+      : "The portable save cannot be used in its current authority state.");
+    this.name = "PortableRecoveryError";
+  }
+}
+
+export const PORTABLE_RECOVERY_PUBLIC_FAILURE = Object.freeze({
+  code: "RECOVERY_REJECTED",
+  message: "This portable save could not be verified or is no longer available.",
+} as const);
+
+/** Public adapters collapse every portable-recovery authority failure to this non-oracular shape. */
+export function portableRecoveryPublicFailure(_error: unknown): typeof PORTABLE_RECOVERY_PUBLIC_FAILURE {
+  return PORTABLE_RECOVERY_PUBLIC_FAILURE;
+}
