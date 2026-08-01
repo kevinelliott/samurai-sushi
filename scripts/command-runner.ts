@@ -103,6 +103,19 @@ export async function materializeApprovedRuntime(
   }
 }
 
+export function projectProfileEnvironment(
+  network: NetworkName,
+  revision: string,
+  source: NetworkEnvironment,
+): NetworkEnvironment {
+  const environment = {
+    ...source,
+    SAMURAI_TEZOS_RUNTIME_REVISION: revision,
+  };
+  validateSigningEnvironment(network, environment);
+  return environment;
+}
+
 export async function runNetworkCommand(
   projectRoot: string,
   network: NetworkName,
@@ -118,11 +131,7 @@ export async function runNetworkCommand(
     execFileAsync("git", ["-C", runtimeRoot, "status", "--porcelain=v1"]),
   ]);
   assertApprovedRuntimeState(pin, { revision: revision.trim(), porcelain });
-  const environment = {
-    ...process.env,
-    SAMURAI_TEZOS_RUNTIME_REVISION: pin.revision,
-  };
-  validateSigningEnvironment(network, environment);
+  const environment = projectProfileEnvironment(network, pin.revision, process.env);
   const execution = await materializeApprovedRuntime(runtimeRoot, pin);
   try {
     return await runner(

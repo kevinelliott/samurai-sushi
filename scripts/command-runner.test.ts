@@ -4,7 +4,11 @@ import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import { promisify } from "node:util";
 import { describe, expect, it, vi } from "vitest";
-import { materializeApprovedRuntime, runProfiledCommand } from "./command-runner";
+import {
+  materializeApprovedRuntime,
+  projectProfileEnvironment,
+  runProfiledCommand,
+} from "./command-runner";
 import type { RuntimePin } from "@samurai-sushi/network";
 
 const projectRoot = resolve(import.meta.dirname, "..");
@@ -80,5 +84,18 @@ describe("project command contract", () => {
     } finally {
       await execution.cleanup();
     }
+  });
+
+  it("hands the shared profile only the validated profile-scoped signer name", () => {
+    const environment = projectProfileEnvironment("shadownet", "a".repeat(40), {
+      SAMURAI_SHADOWNET_SIGNER_PRIVATE_KEY: "command-secret",
+    });
+    expect(environment.SAMURAI_SHADOWNET_SIGNER_PRIVATE_KEY).toBe("command-secret");
+    expect(environment.SAMURAI_SIGNER_PRIVATE_KEY).toBeUndefined();
+    expect(() =>
+      projectProfileEnvironment("shadownet", "a".repeat(40), {
+        SAMURAI_LOCALNET_SIGNER_PRIVATE_KEY: "wrong-profile",
+      }),
+    ).toThrow(/forbidden while running the shadownet profile/);
   });
 });
