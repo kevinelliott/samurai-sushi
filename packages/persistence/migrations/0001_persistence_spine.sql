@@ -102,7 +102,11 @@ CREATE TABLE samurai_persistence.outbox_deliveries (
     (attempt_count = 0 AND claim_generation = 0 AND last_attempt_at IS NULL) OR
     (attempt_count > 0 AND claim_generation > 0 AND last_attempt_at IS NOT NULL)
   ),
-  CHECK (state <> 'pending' OR attempt_count = 0 OR last_error_code IS NOT NULL),
+  CHECK (
+    state <> 'pending' OR
+    (attempt_count = 0 AND last_error_code IS NULL) OR
+    (attempt_count > 0 AND last_error_code IS NOT NULL)
+  ),
   CHECK (last_error_code IS NULL OR last_error_code ~ '^[A-Z][A-Z0-9_]{0,127}$')
 );
 

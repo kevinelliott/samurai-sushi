@@ -32,8 +32,8 @@ interface CatalogRow {
 const MIGRATION_MANIFEST = [
   {
     name: "0001_persistence_spine.sql",
-    checksumHex: "00d95adda1af34ed05a5e9477d597455af9d53ded2c09f86452e9cb1a13eff1f",
-    catalogChecksumHex: "e87504aa545ecd7c5758049ec2dd5b60a7c026ab0e9f8f5f6775a232fa1f2382",
+    checksumHex: "4d7fd2b2103a1cf7bf332db8e7f14b034e66e72de64efc398a7d4e42b2571533",
+    catalogChecksumHex: "434770ddcac493dfdcbe90e8747bdc0319065b81000cd8f1613a22cefb386c4c",
   },
 ] as const;
 

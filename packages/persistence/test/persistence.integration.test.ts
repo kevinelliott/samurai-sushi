@@ -369,7 +369,7 @@ describe("PostgreSQL persistence spine", () => {
   it("migrates an empty PostgreSQL database and cleanly reapplies forward migrations", async () => {
     const migration = (await bundledMigrations())[0];
     expect(Buffer.from(migration?.checksum ?? []).toString("hex")).toBe(
-      "00d95adda1af34ed05a5e9477d597455af9d53ded2c09f86452e9cb1a13eff1f",
+      "4d7fd2b2103a1cf7bf332db8e7f14b034e66e72de64efc398a7d4e42b2571533",
     );
     await applyMigrations(pool);
     const result = await rawPool.query<CountRow>("SELECT count(*)::text AS count FROM samurai_persistence.schema_migrations");
@@ -1453,6 +1453,7 @@ describe("PostgreSQL persistence spine", () => {
       ["018f47fe-347b-4dac-8f45-a6f3f43bd603", 2],
       ["018f47fe-347b-4dac-8f45-a6f3f43bd604", 3],
       ["018f47fe-347b-4dac-8f45-a6f3f43bd605", 4],
+      ["018f47fe-347b-4dac-8f45-a6f3f43bd606", 5],
     ] as const;
     for (const [hostileEventId, revision] of hostileEvents) {
       await rawPool.query(
@@ -1474,6 +1475,9 @@ describe("PostgreSQL persistence spine", () => {
       `INSERT INTO samurai_persistence.outbox_deliveries
         (event_id, state, attempt_count, available_at, last_attempt_at, claim_generation, delivered_at, last_error_code)
        VALUES ($1, 'delivered', 1, clock_timestamp(), clock_timestamp(), 1, clock_timestamp(), 'STALE')`,
+      `INSERT INTO samurai_persistence.outbox_deliveries
+        (event_id, state, attempt_count, available_at, claim_generation, last_error_code)
+       VALUES ($1, 'pending', 0, clock_timestamp(), 0, 'PRETEND')`,
     ] as const;
     for (const [index, statement] of hostileInserts.entries()) {
       await expect(rawPool.query(statement, [hostileEvents[index]![0]])).rejects.toMatchObject({ code: "23514" });
@@ -1656,6 +1660,41 @@ describe("PostgreSQL persistence spine", () => {
               (SELECT count(*)::text FROM samurai_persistence.guest_progress) AS progress`,
     );
     expect(remaining.rows[0]).toEqual({ sessions: "0", progress: "0" });
+  });
+
+  it("rechecks key authority after issue waits on the replay fence", async () => {
+    const clock = await rawPool.query<{ readonly now: Date }>("SELECT clock_timestamp() AS now");
+    const active = {
+      ...hmacKey("resume", 18, 18),
+      compromisedAt: new Date(clock.rows[0]!.now.getTime() + 150),
+    } as const;
+    const release = deferred<void>();
+    const observedPool = new ObservedReplayFencePool(pool, deferred<number>(), deferred<number>(), release.promise);
+    const observedAuthority = new PersistenceAuthority(
+      observedPool,
+      new HmacKeyring(active),
+      tombstoneKeys,
+    );
+    await observedAuthority.bootstrap();
+    const service = new GuestSessionService(observedPool, observedAuthority, {
+      issueSecret: () => issueResumeSecret(),
+    });
+    const pending = service.issue({
+      consentVersion: "privacy-v1",
+      contentVersion: "content-v1",
+      checkpointSchemaVersion: 1,
+      checkpoint: { step: 0 },
+    });
+    await observedPool.acquired.promise;
+    await rawPool.query("SELECT pg_sleep(0.25)");
+    release.resolve();
+    await expect(pending).rejects.toMatchObject({ code: "ACTIVE_KEY_UNAVAILABLE" });
+    const counts = await rawPool.query<{ readonly sessions: string; readonly progress: string; readonly digests: string }>(
+      `SELECT (SELECT count(*)::text FROM samurai_persistence.guest_sessions) AS sessions,
+              (SELECT count(*)::text FROM samurai_persistence.guest_progress) AS progress,
+              (SELECT count(*)::text FROM samurai_persistence.guest_resume_digests) AS digests`,
+    );
+    expect(counts.rows[0]).toEqual({ sessions: "0", progress: "0", digests: "0" });
   });
 
   it("preserves the single predecessor through overlapping use and defers further rotation", async () => {

@@ -115,8 +115,9 @@ export class GuestSessionService {
   ): Promise<IssuedGuest<Checkpoint>> {
     const secret = this.createSecret();
     return this.runner.run(async (client) => {
+      const initialNow = await this.authority.assertTransactionReady(client);
+      await this.authority.lockGuestSecretReplayFence(client, secret, initialNow);
       const now = await this.authority.assertTransactionReady(client);
-      await this.authority.lockGuestSecretReplayFence(client, secret, now);
       await this.authority.assertGuestSecretNotTombstoned(client, secret, now);
       const session: GuestSessionRecord = {
         id: this.createId(),
