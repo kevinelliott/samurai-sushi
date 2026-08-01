@@ -1,15 +1,30 @@
 import { Pool } from "pg";
+import { generateKeyPairSync, sign as signMessage } from "node:crypto";
+import { blake2b } from "@noble/hashes/blake2b";
+import { b58Encode, getPkhfromPk, PrefixV2 } from "@taquito/utils";
 import type { JsonObject } from "@samurai-sushi/domain";
 import { createCommandEnvelope, parseIdempotencyKey } from "@samurai-sushi/domain";
+import { walletSigningBytes } from "@samurai-sushi/domain/claim-protocol";
 import type { PoolClient, QueryResult as PgQueryResult } from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { GuestCommandExecutor } from "../src/command-executor";
 import {
+  ACCOUNT_CLAIM_REAUTH_REQUIRED,
+  ACCOUNT_CLAIM_PUBLIC_FAILURE,
+  ACCOUNT_CLAIM_RECOVERY_PUBLIC_FAILURE,
+  ACCOUNT_PLAYER_SESSION_ROTATION_DEFERRED,
+  ACCOUNT_PLAYER_SESSION_PUBLIC_FAILURE,
+  AccountClaimAuthority,
+  AccountClaimService,
+} from "../src/account-claim";
+import {
+  GuestClaimKeyring,
   hmacKeyIdentity,
   HmacKeyring,
   IntegrityKeyring,
   issueResumeSecret,
   keyIdentityBytes,
+  PlayerSessionKeyring,
   TombstoneKeyring,
 } from "../src/crypto";
 import type {
@@ -489,7 +504,7 @@ interface RevisionRow {
 }
 
 const hmacKey = (
-  purpose: "resume" | "tombstone" | "portable-integrity",
+  purpose: "resume" | "tombstone" | "portable-integrity" | "guest-claim" | "player-session",
   version: number,
   marker: number,
   retired = false,
@@ -544,6 +559,9 @@ describe("PostgreSQL persistence spine", () => {
   const authority = new PersistenceAuthority(pool, resumeKeys, tombstoneKeys);
   const integrityKeys = new IntegrityKeyring(hmacKey("portable-integrity", 5, 5));
   const recoveryAuthority = new PortableRecoveryAuthority(pool, integrityKeys);
+  const guestClaimKeys = new GuestClaimKeyring(hmacKey("guest-claim", 6, 6));
+  const playerSessionKeys = new PlayerSessionKeyring(hmacKey("player-session", 7, 7));
+  const claimAuthority = new AccountClaimAuthority(pool, authority, guestClaimKeys, playerSessionKeys);
   let now = new Date("2026-08-01T12:00:00.000Z");
   const sessionService = new GuestSessionService(pool, authority);
   const executor = new GuestCommandExecutor(pool, authority);
@@ -556,11 +574,13 @@ describe("PostgreSQL persistence spine", () => {
     await rawPool.query("DROP SCHEMA IF EXISTS samurai_persistence CASCADE");
     await applyMigrations(pool);
     await authority.bootstrap();
+    await claimAuthority.bootstrap();
   });
 
   beforeEach(async () => {
     now = new Date("2026-08-01T12:00:00.000Z");
     await rawPool.query("TRUNCATE samurai_persistence.guest_sessions CASCADE");
+    await rawPool.query("TRUNCATE samurai_persistence.players, samurai_persistence.claim_challenges CASCADE");
     await rawPool.query("DELETE FROM samurai_persistence.deletion_tombstones");
   });
 
@@ -578,7 +598,7 @@ describe("PostgreSQL persistence spine", () => {
     );
     await applyMigrations(pool);
     const result = await rawPool.query<CountRow>("SELECT count(*)::text AS count FROM samurai_persistence.schema_migrations");
-    expect(result.rows[0]?.count).toBe("2");
+    expect(result.rows[0]?.count).toBe("3");
   });
 
   it("upgrades an exactly attested 0001 catalog to 0002 atomically", async () => {
@@ -608,6 +628,7 @@ describe("PostgreSQL persistence spine", () => {
     expect(ledger.rows.map((row) => row.name)).toEqual([
       "0001_persistence_spine.sql",
       "0002_portable_recovery.sql",
+      "0003_account_claim_persistence.sql",
     ]);
     const tables = await rawPool.query<{ readonly table_name: string }>(
       `SELECT table_name FROM information_schema.tables
@@ -742,7 +763,7 @@ describe("PostgreSQL persistence spine", () => {
     await Promise.all([first, second]);
     await expect(waiter.acquired.promise).resolves.toBe(waiterPid);
     const result = await rawPool.query<CountRow>("SELECT count(*)::text AS count FROM samurai_persistence.schema_migrations");
-    expect(result.rows[0]?.count).toBe("2");
+    expect(result.rows[0]?.count).toBe("3");
   });
 
   it("canonicalizes caller search_path and rejects ACL, type, collation, and generic schema-object drift", async () => {
@@ -3870,5 +3891,1369 @@ describe("PostgreSQL persistence spine", () => {
       "import_id",
       "payload",
     ]));
+  });
+
+  it("retries tombstoned guest claim capabilities and exhausts the bounded collision budget atomically", async () => {
+    const rejectedCapability = Buffer.alloc(32, 0xa1).toString("base64url");
+    const acceptedCapability = Buffer.alloc(32, 0xa2).toString("base64url");
+    const clock = await rawPool.query<{ readonly now: Date }>("SELECT clock_timestamp() AS now");
+    const issuedAt = clock.rows[0]!.now;
+    const rejectedDigest = guestClaimKeys.digest(rejectedCapability, issuedAt);
+    const replayKey = `guest-claim:v${rejectedDigest.keyVersion}:${Buffer.from(rejectedDigest.digest).toString("base64url")}`;
+    const tombstone = tombstoneKeys.digest("guest-claim", replayKey, issuedAt);
+    await rawPool.query(
+      `INSERT INTO samurai_persistence.deletion_tombstones
+        (kind, digest_key_version, digest_key_identity, tombstone_digest,
+         capability_key_purpose, capability_key_version, capability_key_identity,
+         created_at, expires_at)
+       VALUES ('guest-claim', $1, $2, $3, 'guest-claim', $4, $5, $6, $7)`,
+      [
+        tombstone.keyVersion,
+        keyIdentityBytes(tombstone.keyIdentity),
+        tombstone.digest,
+        rejectedDigest.keyVersion,
+        keyIdentityBytes(rejectedDigest.keyIdentity),
+        issuedAt,
+        new Date(issuedAt.getTime() + 30 * 24 * 60 * 60 * 1_000),
+      ],
+    );
+
+    const capabilities = [rejectedCapability, acceptedCapability];
+    const issued = await new GuestSessionService(pool, authority, {
+      claimKeys: guestClaimKeys,
+      issueClaimCapability: () => capabilities.shift()!,
+    }).issue({
+      consentVersion: "consent-v1",
+      contentVersion: "phase0-salmon@1",
+      checkpointSchemaVersion: 1,
+      checkpoint: { orders: [] },
+    });
+    expect(issued.claimCapability).toBe(acceptedCapability);
+
+    await expect(new GuestSessionService(pool, authority, {
+      claimKeys: guestClaimKeys,
+      issueClaimCapability: () => rejectedCapability,
+    }).issue({
+      consentVersion: "consent-v1",
+      contentVersion: "phase0-salmon@1",
+      checkpointSchemaVersion: 1,
+      checkpoint: { orders: [] },
+    })).rejects.toMatchObject({ code: "GUEST_CLAIM_COLLISION" });
+    const state = await rawPool.query<{ readonly guests: string; readonly capabilities: string }>(`
+      SELECT
+        (SELECT count(*)::text FROM samurai_persistence.guest_sessions) AS guests,
+        (SELECT count(*)::text FROM samurai_persistence.guest_claim_capabilities) AS capabilities
+    `);
+    expect(state.rows[0]).toEqual({ guests: "1", capabilities: "1" });
+  });
+
+  it("atomically claims a guest into one pending player issuance and preserves transferred history", async () => {
+    const claimCapability = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+    const claimIntent = {
+      claimId: "123e4567-e89b-42d3-a456-426614174000",
+      guestClaimCommitment: claimCapability,
+      createPlayer: true,
+      guestRevision: 7,
+      idempotencyKey: "223e4567-e89b-42d3-a456-426614174000",
+      contentVersion: "phase0-salmon@1",
+      cosmeticSelections: { counter: "moonwake", norens: "indigo" },
+    } as const;
+    const issued = await new GuestSessionService(pool, authority, {
+      claimKeys: guestClaimKeys,
+      issueClaimCapability: () => claimCapability,
+    }).issue({
+      consentVersion: "consent-v1",
+      contentVersion: claimIntent.contentVersion,
+      checkpointSchemaVersion: 1,
+      checkpoint: { orders: ["rice"] },
+    });
+    expect(issued.claimCapability).toBe(claimCapability);
+    await rawPool.query(
+      "UPDATE samurai_persistence.guest_progress SET revision = 7 WHERE guest_session_id = $1",
+      [issued.session.id],
+    );
+    await rawPool.query(
+      `INSERT INTO samurai_persistence.command_receipts
+        (guest_session_id,idempotency_key,command_name,expected_revision,content_version,payload_hash,
+         response_schema_version,response_payload,result_hash,committed_revision,created_at,expires_at)
+       VALUES ($1,'323e4567-e89b-42d3-a456-426614174000','checkpoint.advance',6,$2,
+               decode(repeat('11',32),'hex'),1,'{}',decode(repeat('22',32),'hex'),7,
+               '2026-08-01T20:00:00Z','2026-08-02T20:00:00Z')`,
+      [issued.session.id, claimIntent.contentVersion],
+    );
+    await rawPool.query(
+      `INSERT INTO samurai_persistence.domain_events
+        (event_id,guest_session_id,event_type,schema_version,payload,committed_revision,created_at)
+       VALUES ('claim-transfer-event',$1,'checkpoint.advanced',1,'{}',7,'2026-08-01T20:00:00Z')`,
+      [issued.session.id],
+    );
+    await rawPool.query(
+      `INSERT INTO samurai_persistence.outbox_deliveries (event_id,available_at)
+       VALUES ('claim-transfer-event','2026-08-01T20:00:00Z')`,
+    );
+
+    const issuedAt = new Date("2026-08-01T20:30:00.000Z");
+    const issueService = new AccountClaimService(
+      new ControlledClockPool(pool, Array.from({ length: 24 }, () => issuedAt)),
+      claimAuthority,
+      {
+        origin: "https://game.samurai-sushi.example",
+        chainId: "NetXdQprcVkpaWU",
+        issueUuid: () => "423e4567-e89b-42d3-a456-426614174000",
+        issueNonce: () => "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBA",
+      },
+    );
+    const challenge = await issueService.issueClaimChallenge({
+      resumeSecret: issued.resumeSecret,
+      intent: claimIntent,
+      account: "tz1MsZxMSJdiUV9hVs4UKAMrXtksDvxWAZe2",
+    });
+    if ("code" in challenge) throw new Error("Claim challenge issuance unexpectedly failed.");
+    expect(challenge.challenge).toMatchObject({
+      nonce: "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBA",
+      issuedAt: "2026-08-01T20:30:00.000Z",
+      expiresAt: "2026-08-01T20:35:00.000Z",
+    });
+    const ids = [
+      "523e4567-e89b-42d3-a456-426614174000",
+      "623e4567-e89b-42d3-a456-426614174000",
+      "723e4567-e89b-42d3-a456-426614174000",
+    ];
+    const rejectedPlayerSecret = Buffer.alloc(32, 0xc1).toString("base64url");
+    const acceptedPlayerSecret = "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCA";
+    const claimNow = new Date("2026-08-01T20:30:01.000Z");
+    const rejectedPlayerDigest = playerSessionKeys.digest(rejectedPlayerSecret, claimNow);
+    const rejectedPlayerReplayKey = `player-session:v${rejectedPlayerDigest.keyVersion}:${Buffer.from(rejectedPlayerDigest.digest).toString("base64url")}`;
+    const rejectedPlayerTombstone = tombstoneKeys.digest("player-session", rejectedPlayerReplayKey, claimNow);
+    await rawPool.query(
+      `INSERT INTO samurai_persistence.deletion_tombstones
+        (kind, digest_key_version, digest_key_identity, tombstone_digest,
+         capability_key_purpose, capability_key_version, capability_key_identity,
+         created_at, expires_at)
+       VALUES ('player-session', $1, $2, $3, 'player-session', $4, $5, $6, $7)`,
+      [
+        rejectedPlayerTombstone.keyVersion,
+        keyIdentityBytes(rejectedPlayerTombstone.keyIdentity),
+        rejectedPlayerTombstone.digest,
+        rejectedPlayerDigest.keyVersion,
+        keyIdentityBytes(rejectedPlayerDigest.keyIdentity),
+        claimNow,
+        new Date("2026-08-31T20:30:01.000Z"),
+      ],
+    );
+    const playerSecrets = [rejectedPlayerSecret, acceptedPlayerSecret];
+    const claimService = new AccountClaimService(
+      new ControlledClockPool(pool, Array.from({ length: 32 }, () => new Date("2026-08-01T20:30:01.000Z"))),
+      claimAuthority,
+      {
+        origin: "https://game.samurai-sushi.example",
+        chainId: "NetXdQprcVkpaWU",
+        issueUuid: () => ids.shift()!,
+        issuePlayerSecret: () => playerSecrets.shift()!,
+      },
+    );
+    const proof = {
+      challenge: challenge.challenge,
+      publicKey: "edpkuZpp81M8NmaFbueXY8bk7EP9V54XTnwsFFt77Z5FTPs2QzLU9r",
+      signature: "edsigu1EdH9zrocmLnTumfutDWqnYfvY3H73y7qbPmQJANttSDZiqWsSaV1e26TR73LWi7Deu1c11UR3J4BBCLo1TKJgwe83ocE",
+    };
+    const claimed = await claimService.claimGuest({
+      resumeSecret: issued.resumeSecret,
+      intent: claimIntent,
+      challengeId: challenge.challengeId,
+      proof,
+    });
+    if ("code" in claimed) throw new Error(`Claim unexpectedly failed: ${claimed.code}`);
+    expect(claimed).toMatchObject({
+      playerId: "523e4567-e89b-42d3-a456-426614174000",
+      claimId: claimIntent.claimId,
+      sessionId: "623e4567-e89b-42d3-a456-426614174000",
+      sessionSecret: acceptedPlayerSecret,
+      disposition: "claimed",
+    });
+    const matrix = await rawPool.query<{ readonly guests: string; readonly players: string; readonly wallets: string;
+      readonly sessions: string; readonly merges: string; readonly commands: string; readonly events: string;
+      readonly outbox: string; readonly tombstones: string }>(`
+      SELECT
+        (SELECT count(*)::text FROM samurai_persistence.guest_sessions) AS guests,
+        (SELECT count(*)::text FROM samurai_persistence.players) AS players,
+        (SELECT count(*)::text FROM samurai_persistence.wallet_credentials) AS wallets,
+        (SELECT count(*)::text FROM samurai_persistence.player_sessions WHERE state='pending-delivery') AS sessions,
+        (SELECT count(*)::text FROM samurai_persistence.progress_merges) AS merges,
+        (SELECT count(*)::text FROM samurai_persistence.command_receipts WHERE player_id=$1 AND guest_session_id IS NULL) AS commands,
+        (SELECT count(*)::text FROM samurai_persistence.domain_events WHERE player_id=$1 AND guest_session_id IS NULL) AS events,
+        (SELECT count(*)::text FROM samurai_persistence.outbox_deliveries) AS outbox,
+        (SELECT count(*)::text FROM samurai_persistence.deletion_tombstones
+          WHERE kind IN ('guest-session','guest-claim','claim-challenge','claim-id','claim-idempotency')) AS tombstones
+    `, [claimed.playerId]);
+    expect(matrix.rows[0]).toEqual({
+      guests: "0", players: "1", wallets: "1", sessions: "1", merges: "1",
+      commands: "1", events: "1", outbox: "1", tombstones: "6",
+    });
+    await rawPool.query(
+      `INSERT INTO samurai_persistence.domain_events
+        (event_id,player_id,event_type,schema_version,payload,committed_revision,created_at)
+       VALUES ('native-player-event',$1,'player.native',1,'{}',7,'2026-08-01T20:31:00Z')`,
+      [claimed.playerId],
+    );
+    expect(await claimService.claimGuestPublic({
+      resumeSecret: issued.resumeSecret,
+      intent: claimIntent,
+      challengeId: challenge.challengeId,
+      proof,
+    })).toEqual(ACCOUNT_CLAIM_REAUTH_REQUIRED);
+
+    await rawPool.query(
+      "UPDATE samurai_persistence.progress_merges SET expires_at='2026-08-01T20:31:00.000Z' WHERE claim_id=$1::uuid",
+      [claimIntent.claimId],
+    );
+    const receiptCleanup = new AccountClaimService(
+      new ControlledClockPool(pool, Array.from({ length: 20 }, () => new Date("2026-08-01T20:31:00.000Z"))),
+      claimAuthority,
+      { origin: "https://game.samurai-sushi.example", chainId: "NetXdQprcVkpaWU" },
+    );
+    await expect(receiptCleanup.deleteExpiredMergeReceipts()).resolves.toBe(1);
+    await expect(receiptCleanup.deleteExpiredMergeReceipts()).resolves.toBe(0);
+    const provenance = await rawPool.query<{
+      readonly merges: string; readonly commands: string; readonly events: string;
+      readonly command_origin: string; readonly event_origin: string;
+    }>(`
+      SELECT
+        (SELECT count(*)::text FROM samurai_persistence.progress_merges) AS merges,
+        (SELECT count(*)::text FROM samurai_persistence.command_receipts WHERE player_id=$1) AS commands,
+        (SELECT count(*)::text FROM samurai_persistence.domain_events WHERE player_id=$1) AS events,
+        (SELECT origin_claim_id::text FROM samurai_persistence.command_receipts WHERE player_id=$1 LIMIT 1) AS command_origin,
+        (SELECT origin_claim_id::text FROM samurai_persistence.domain_events
+          WHERE player_id=$1 AND origin_claim_id IS NOT NULL LIMIT 1) AS event_origin
+    `, [claimed.playerId]);
+    expect(provenance.rows[0]).toEqual({
+      merges: "0", commands: "1", events: "2",
+      command_origin: claimIntent.claimId, event_origin: claimIntent.claimId,
+    });
+    expect(await claimService.claimGuestPublic({
+      resumeSecret: issued.resumeSecret,
+      intent: claimIntent,
+      challengeId: challenge.challengeId,
+      proof,
+    })).toEqual(ACCOUNT_CLAIM_PUBLIC_FAILURE);
+
+    await expect(claimService.deletePlayer(claimed.sessionSecret)).resolves.toBeUndefined();
+    expect(await claimService.claimGuestPublic({
+      resumeSecret: issued.resumeSecret,
+      intent: claimIntent,
+      challengeId: challenge.challengeId,
+      proof,
+    })).toEqual(ACCOUNT_CLAIM_PUBLIC_FAILURE);
+    const deleted = await rawPool.query<CountRow>(`
+      SELECT ((SELECT count(*) FROM samurai_persistence.command_receipts)
+            + (SELECT count(*) FROM samurai_persistence.domain_events)
+            + (SELECT count(*) FROM samurai_persistence.progress_merges))::text AS count
+    `);
+    expect(deleted.rows[0]?.count).toBe("0");
+  });
+
+  it("recovers only the exact signed pending issuance, rotates once, and authenticates delivery acknowledgement", async () => {
+    const { privateKey, publicKey } = generateKeyPairSync("ed25519");
+    const publicDer = publicKey.export({ format: "der", type: "spki" });
+    const publicKeyText = b58Encode(publicDer.subarray(publicDer.byteLength - 32), PrefixV2.Ed25519PublicKey);
+    const account = getPkhfromPk(publicKeyText);
+    const signChallenge = (challenge: unknown) => b58Encode(
+      signMessage(
+        null,
+        blake2b(walletSigningBytes(challenge), { dkLen: 32 }),
+        privateKey,
+      ),
+      PrefixV2.Ed25519Signature,
+    );
+    const claimCapability = "DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDQ";
+    const intent = {
+      claimId: "823e4567-e89b-42d3-a456-426614174000",
+      guestClaimCommitment: claimCapability,
+      createPlayer: true,
+      guestRevision: 0,
+      idempotencyKey: "923e4567-e89b-42d3-a456-426614174000",
+      contentVersion: "content-v1",
+      cosmeticSelections: {},
+    } as const;
+    const issued = await new GuestSessionService(pool, authority, {
+      claimKeys: guestClaimKeys,
+      issueClaimCapability: () => claimCapability,
+    }).issue({
+      consentVersion: "consent-v1",
+      contentVersion: intent.contentVersion,
+      checkpointSchemaVersion: 1,
+      checkpoint: { recovery: true },
+    });
+    const issueClaim = new AccountClaimService(
+      new ControlledClockPool(pool, Array.from({ length: 20 }, () => new Date("2026-07-24T21:00:00.000Z"))),
+      claimAuthority,
+      {
+        origin: "https://game.samurai-sushi.example",
+        chainId: "NetXdQprcVkpaWU",
+        issueUuid: () => "a23e4567-e89b-42d3-a456-426614174000",
+        issueNonce: () => "EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEA",
+      },
+    );
+    const claimChallenge = await issueClaim.issueClaimChallenge({
+      resumeSecret: issued.resumeSecret,
+      intent,
+      account,
+    });
+    if ("code" in claimChallenge) throw new Error("Dynamic claim challenge failed.");
+    const claimIds = [
+      "b23e4567-e89b-42d3-a456-426614174000",
+      "c23e4567-e89b-42d3-a456-426614174000",
+      "d23e4567-e89b-42d3-a456-426614174000",
+    ];
+    const claimService = new AccountClaimService(
+      new ControlledClockPool(pool, Array.from({ length: 24 }, () => new Date("2026-07-24T21:00:01.000Z"))),
+      claimAuthority,
+      {
+        origin: "https://game.samurai-sushi.example",
+        chainId: "NetXdQprcVkpaWU",
+        issueUuid: () => claimIds.shift()!,
+        issuePlayerSecret: () => "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFA",
+      },
+    );
+    const claimed = await claimService.claimGuest({
+      resumeSecret: issued.resumeSecret,
+      intent,
+      challengeId: claimChallenge.challengeId,
+      proof: {
+        challenge: claimChallenge.challenge,
+        publicKey: publicKeyText,
+        signature: signChallenge(claimChallenge.challenge),
+      },
+    });
+    if ("code" in claimed) throw new Error(`Dynamic claim failed: ${claimed.code}`);
+    expect(claimed.deliveryGeneration).toBe(1);
+    const before = await rawPool.query<{ readonly expires_at: Date }>(
+      "SELECT expires_at FROM samurai_persistence.player_sessions WHERE id=$1",
+      [claimed.sessionId],
+    );
+
+    const recoveryIntent = {
+      recoverClaimId: intent.claimId,
+      idempotencyKey: "e23e4567-e89b-42d3-a456-426614174000",
+    };
+    const issueRecovery = new AccountClaimService(
+      new ControlledClockPool(pool, Array.from({ length: 16 }, () => new Date("2026-08-01T21:01:00.000Z"))),
+      claimAuthority,
+      {
+        origin: "https://game.samurai-sushi.example",
+        chainId: "NetXdQprcVkpaWU",
+        issueUuid: () => "f23e4567-e89b-42d3-a456-426614174000",
+        issueNonce: () => "GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGA",
+      },
+    );
+    const recoveryChallenge = await issueRecovery.issueRecoveryChallenge({ recoveryIntent, account });
+    if ("code" in recoveryChallenge) throw new Error("Recovery challenge issue failed.");
+    const recoveryService = new AccountClaimService(
+      new ControlledClockPool(pool, Array.from({ length: 40 }, () => new Date("2026-08-01T21:01:01.000Z"))),
+      claimAuthority,
+      {
+        origin: "https://game.samurai-sushi.example",
+        chainId: "NetXdQprcVkpaWU",
+        issuePlayerSecret: () => "HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHA",
+      },
+    );
+    const recoveryInput = {
+      recoveryIntent,
+      challengeId: recoveryChallenge.challengeId,
+      proof: {
+        challenge: recoveryChallenge.challenge,
+        publicKey: publicKeyText,
+        signature: signChallenge(recoveryChallenge.challenge),
+      },
+    };
+    await expect(recoveryService.acknowledgeClaimDelivery(
+      claimed.playerId,
+      intent.claimId,
+      claimed.sessionSecret,
+      claimed.deliveryGeneration,
+    )).resolves.toEqual(ACCOUNT_CLAIM_RECOVERY_PUBLIC_FAILURE);
+    const attempts = await Promise.all([
+      recoveryService.recoverClaimSession(recoveryInput),
+      recoveryService.recoverClaimSession(recoveryInput),
+    ]);
+    const recovered = attempts.find((item) => !("code" in item));
+    expect(attempts.filter((item) => "code" in item)).toHaveLength(1);
+    if (!recovered || "code" in recovered) throw new Error("Exactly one recovery should succeed.");
+    expect(recovered).toMatchObject({
+      playerId: claimed.playerId,
+      claimId: intent.claimId,
+      sessionId: claimed.sessionId,
+      deliveryGeneration: 2,
+    });
+    expect(recovered.sessionSecret).not.toBe(claimed.sessionSecret);
+    const after = await rawPool.query<{ readonly expires_at: Date }>(
+      "SELECT expires_at FROM samurai_persistence.player_sessions WHERE id=$1",
+      [claimed.sessionId],
+    );
+    expect(after.rows[0]?.expires_at).toEqual(before.rows[0]?.expires_at);
+    await expect(recoveryService.acknowledgeClaimDelivery(
+      claimed.playerId,
+      intent.claimId,
+      "IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIA",
+      recovered.deliveryGeneration,
+    )).resolves.toEqual(ACCOUNT_CLAIM_RECOVERY_PUBLIC_FAILURE);
+    await expect(recoveryService.acknowledgeClaimDelivery(
+      claimed.playerId,
+      intent.claimId,
+      recovered.sessionSecret,
+      recovered.deliveryGeneration,
+    )).resolves.toBeUndefined();
+    expect(await recoveryService.recoverClaimSession(recoveryInput)).toEqual(ACCOUNT_CLAIM_RECOVERY_PUBLIC_FAILURE);
+
+    const blindIssueRecovery = new AccountClaimService(
+      new ControlledClockPool(pool, Array.from({ length: 8 }, () => new Date("2026-08-01T21:02:00.000Z"))),
+      claimAuthority,
+      {
+        origin: "https://game.samurai-sushi.example",
+        chainId: "NetXdQprcVkpaWU",
+        issueUuid: () => "123e4567-e89b-42d3-a456-426614174997",
+        issueNonce: () => "JJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJA",
+      },
+    );
+    const nonexistent = await blindIssueRecovery.issueRecoveryChallenge({
+      recoveryIntent: {
+        recoverClaimId: "123e4567-e89b-42d3-a456-426614174999",
+        idempotencyKey: "123e4567-e89b-42d3-a456-426614174998",
+      },
+      account,
+    });
+    expect(nonexistent).not.toHaveProperty("code");
+
+    const lifecycle = new AccountClaimService(
+      new ControlledClockPool(pool, Array.from({ length: 40 }, () => new Date("2026-08-01T21:01:02.000Z"))),
+      claimAuthority,
+      {
+        origin: "https://game.samurai-sushi.example",
+        chainId: "NetXdQprcVkpaWU",
+        issuePlayerSecret: () => "KKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKA",
+      },
+    );
+    await expect(lifecycle.authenticatePlayerSession(recovered.sessionSecret)).resolves.toMatchObject({
+      playerId: claimed.playerId,
+      credentialKind: "current",
+      rotationRequired: false,
+    });
+    const rotated = await lifecycle.rotatePlayerSession(recovered.sessionSecret);
+    if ("code" in rotated) throw new Error("Current player session failed rotation.");
+    expect(rotated).toMatchObject({ credentialKind: "current", rotationRequired: false });
+    await expect(lifecycle.authenticatePlayerSession(recovered.sessionSecret)).resolves.toMatchObject({
+      credentialKind: "predecessor",
+      rotationRequired: false,
+    });
+    await expect(lifecycle.rotatePlayerSession(recovered.sessionSecret)).resolves.toEqual(ACCOUNT_PLAYER_SESSION_PUBLIC_FAILURE);
+    await expect(lifecycle.rotatePlayerSession(rotated.sessionSecret)).resolves.toEqual(
+      ACCOUNT_PLAYER_SESSION_ROTATION_DEFERRED,
+    );
+    const predecessor = await rawPool.query<{ readonly valid_until: Date }>(
+      "SELECT valid_until FROM samurai_persistence.player_session_digests WHERE player_session_id=$1 AND slot='predecessor'",
+      [claimed.sessionId],
+    );
+    const predecessorExpiry = predecessor.rows[0]!.valid_until;
+    const beforeExpiry = new AccountClaimService(
+      new ControlledClockPool(pool, Array.from({ length: 8 }, () => new Date(predecessorExpiry.getTime() - 1))),
+      claimAuthority,
+      { origin: "https://game.samurai-sushi.example", chainId: "NetXdQprcVkpaWU" },
+    );
+    const atExpiry = new AccountClaimService(
+      new ControlledClockPool(pool, Array.from({ length: 24 }, () => predecessorExpiry)),
+      claimAuthority,
+      {
+        origin: "https://game.samurai-sushi.example",
+        chainId: "NetXdQprcVkpaWU",
+        issuePlayerSecret: () => Buffer.alloc(32, 91).toString("base64url"),
+      },
+    );
+    await expect(beforeExpiry.authenticatePlayerSession(recovered.sessionSecret)).resolves.toMatchObject({
+      credentialKind: "predecessor",
+    });
+    await expect(atExpiry.authenticatePlayerSession(recovered.sessionSecret)).resolves.toEqual(ACCOUNT_PLAYER_SESSION_PUBLIC_FAILURE);
+    await expect(beforeExpiry.rotatePlayerSession(rotated.sessionSecret)).resolves.toEqual(
+      ACCOUNT_PLAYER_SESSION_ROTATION_DEFERRED,
+    );
+    const rotatedAtExpiry = await atExpiry.rotatePlayerSession(rotated.sessionSecret);
+    if ("code" in rotatedAtExpiry) throw new Error("Current player session failed rotation at predecessor equality.");
+    await expect(atExpiry.authenticatePlayerSession(rotated.sessionSecret)).resolves.toMatchObject({
+      credentialKind: "predecessor",
+    });
+
+    const compromisedAt = new Date(predecessorExpiry.getTime() + 1);
+    const compromisedSessionRing = new PlayerSessionKeyring({
+      ...hmacKey("player-session", 7, 7),
+      compromisedAt,
+    });
+    const deletionAuthority = new AccountClaimAuthority(pool, authority, guestClaimKeys, compromisedSessionRing);
+    await deletionAuthority.bootstrap();
+    const compromisedCleanup = new AccountClaimService(
+      new ControlledClockPool(pool, Array.from({ length: 24 }, () => compromisedAt)),
+      deletionAuthority,
+      { origin: "https://game.samurai-sushi.example", chainId: "NetXdQprcVkpaWU" },
+    );
+    await expect(compromisedCleanup.purgeUnavailablePlayerSessionDigests()).resolves.toBe(2);
+    const postRetention = new AccountClaimService(
+      new ControlledClockPool(pool, Array.from({ length: 32 }, () => new Date("2026-09-01T21:01:00.000Z"))),
+      deletionAuthority,
+      { origin: "https://game.samurai-sushi.example", chainId: "NetXdQprcVkpaWU" },
+    );
+    await expect(postRetention.deleteExpiredMergeReceipts()).resolves.toBe(1);
+    await expect(postRetention.deleteExpiredPlayerSessions()).resolves.toBe(0);
+    const retainedPlayer = await rawPool.query<{ readonly sessions: string; readonly digests: string; readonly merges: string;
+      readonly players: string; readonly wallets: string; readonly progress: string }>(`
+      SELECT
+        (SELECT count(*)::text FROM samurai_persistence.player_sessions) AS sessions,
+        (SELECT count(*)::text FROM samurai_persistence.player_session_digests) AS digests,
+        (SELECT count(*)::text FROM samurai_persistence.progress_merges) AS merges,
+        (SELECT count(*)::text FROM samurai_persistence.players) AS players,
+        (SELECT count(*)::text FROM samurai_persistence.wallet_credentials) AS wallets,
+        (SELECT count(*)::text FROM samurai_persistence.player_progress) AS progress
+    `);
+    expect(retainedPlayer.rows[0]).toMatchObject({
+      sessions: "0", digests: "0", merges: "0", players: "1", wallets: "1", progress: "1",
+    });
+    const deletionIntent = {
+      deleteClaimId: intent.claimId,
+      idempotencyKey: "123e4567-e89b-42d3-a456-426614174995",
+    };
+    const crossRecoveryIssue = new AccountClaimService(
+      new ControlledClockPool(pool, Array.from({ length: 16 }, () => new Date("2026-09-01T21:01:59.000Z"))),
+      deletionAuthority,
+      {
+        origin: "https://game.samurai-sushi.example",
+        chainId: "NetXdQprcVkpaWU",
+        issueUuid: () => "323e4567-e89b-42d3-a456-426614174995",
+        issueNonce: () => "RRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRA",
+      },
+    );
+    const crossRecoveryChallenge = await crossRecoveryIssue.issueRecoveryChallenge({
+      recoveryIntent: {
+        recoverClaimId: deletionIntent.deleteClaimId,
+        idempotencyKey: deletionIntent.idempotencyKey,
+      },
+      account,
+    });
+    if ("code" in crossRecoveryChallenge) throw new Error("Cross-operation recovery challenge issue failed.");
+    const issueDeletion = new AccountClaimService(
+      new ControlledClockPool(pool, Array.from({ length: 16 }, () => new Date("2026-09-01T21:02:00.000Z"))),
+      deletionAuthority,
+      {
+        origin: "https://game.samurai-sushi.example",
+        chainId: "NetXdQprcVkpaWU",
+        issueUuid: () => "123e4567-e89b-42d3-a456-426614174996",
+        issueNonce: () => "QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQA",
+      },
+    );
+    const deletionChallenge = await issueDeletion.issuePlayerDeletionChallenge({
+      deletionIntent,
+      account,
+    });
+    if ("code" in deletionChallenge) throw new Error("Player deletion challenge issue failed.");
+    const deletionService = new AccountClaimService(
+      new ControlledClockPool(pool, Array.from({ length: 40 }, () => new Date("2026-09-01T21:02:01.000Z"))),
+      deletionAuthority,
+      { origin: "https://game.samurai-sushi.example", chainId: "NetXdQprcVkpaWU" },
+    );
+    await expect(deletionService.deletePlayerWithWalletProof({
+      deletionIntent,
+      challengeId: crossRecoveryChallenge.challengeId,
+      proof: {
+        challenge: crossRecoveryChallenge.challenge,
+        publicKey: publicKeyText,
+        signature: signChallenge(crossRecoveryChallenge.challenge),
+      },
+    })).resolves.toMatchObject({ code: "PLAYER_DELETION_REJECTED" });
+    await expect(deletionService.recoverClaimSession({
+      recoveryIntent: {
+        recoverClaimId: deletionIntent.deleteClaimId,
+        idempotencyKey: deletionIntent.idempotencyKey,
+      },
+      challengeId: deletionChallenge.challengeId,
+      proof: {
+        challenge: deletionChallenge.challenge,
+        publicKey: publicKeyText,
+        signature: signChallenge(deletionChallenge.challenge),
+      },
+    })).resolves.toEqual(ACCOUNT_CLAIM_RECOVERY_PUBLIC_FAILURE);
+    await rawPool.query(
+      "UPDATE samurai_persistence.claim_challenges SET purpose='recovery' WHERE challenge_id=$1::uuid",
+      [deletionChallenge.challengeId],
+    );
+    await expect(deletionService.deletePlayerWithWalletProof({
+      deletionIntent,
+      challengeId: deletionChallenge.challengeId,
+      proof: {
+        challenge: deletionChallenge.challenge,
+        publicKey: publicKeyText,
+        signature: signChallenge(deletionChallenge.challenge),
+      },
+    })).resolves.toMatchObject({ code: "PLAYER_DELETION_REJECTED" });
+    await rawPool.query(
+      "UPDATE samurai_persistence.claim_challenges SET purpose='delete' WHERE challenge_id=$1::uuid",
+      [deletionChallenge.challengeId],
+    );
+    await rawPool.query(
+      `INSERT INTO samurai_persistence.domain_events
+        (event_id,player_id,event_type,schema_version,payload,committed_revision,created_at)
+       VALUES ('wallet-delete-late-lock-event',$1,'player.native',1,'{}',1,'2026-09-01T21:02:00Z')`,
+      [claimed.playerId],
+    );
+    await rawPool.query(
+      `INSERT INTO samurai_persistence.outbox_deliveries (event_id,available_at)
+       VALUES ('wallet-delete-late-lock-event','2026-09-01T21:02:00Z')`,
+    );
+    const beforeLateDeletionTombstones = (await rawPool.query<CountRow>(
+      "SELECT count(*)::text AS count FROM samurai_persistence.deletion_tombstones",
+    )).rows[0]!.count;
+    const outboxAttempted = deferred<number>();
+    const outboxAcquired = deferred<number>();
+    const releaseOutbox = deferred<void>();
+    const observedDeletionPool = new ObservedQueryLockPool(
+      pool,
+      (sql) => sql.includes("FROM samurai_persistence.outbox_deliveries o"),
+      outboxAttempted,
+      outboxAcquired,
+      releaseOutbox.promise,
+    );
+    const expiryDeletion = new AccountClaimService(
+      new ControlledClockPool(observedDeletionPool, [new Date("2026-09-01T21:07:00.000Z")]),
+      deletionAuthority,
+      { origin: "https://game.samurai-sushi.example", chainId: "NetXdQprcVkpaWU" },
+    );
+    const expiredWhileWaiting = expiryDeletion.deletePlayerWithWalletProof({
+      deletionIntent,
+      challengeId: deletionChallenge.challengeId,
+      proof: {
+        challenge: deletionChallenge.challenge,
+        publicKey: publicKeyText,
+        signature: signChallenge(deletionChallenge.challenge),
+      },
+    });
+    await outboxAttempted.promise;
+    await outboxAcquired.promise;
+    releaseOutbox.resolve();
+    await expect(expiredWhileWaiting).resolves.toMatchObject({ code: "PLAYER_DELETION_REJECTED" });
+    const rolledBackDeletion = await rawPool.query<{ readonly players: string; readonly consumed: string;
+      readonly tombstones: string }>(`
+      SELECT
+        (SELECT count(*)::text FROM samurai_persistence.players WHERE id=$1) AS players,
+        (SELECT count(*)::text FROM samurai_persistence.claim_challenges
+          WHERE challenge_id=$2::uuid AND consumed_at IS NOT NULL) AS consumed,
+        (SELECT count(*)::text FROM samurai_persistence.deletion_tombstones) AS tombstones
+    `, [claimed.playerId, deletionChallenge.challengeId]);
+    expect(rolledBackDeletion.rows[0]).toEqual({
+      players: "1", consumed: "0", tombstones: beforeLateDeletionTombstones,
+    });
+    await expect(deletionService.deletePlayerWithWalletProof({
+      deletionIntent,
+      challengeId: deletionChallenge.challengeId,
+      proof: {
+        challenge: deletionChallenge.challenge,
+        publicKey: publicKeyText,
+        signature: signChallenge(deletionChallenge.challenge),
+      },
+    })).resolves.toBeUndefined();
+    await expect(deletionService.deletePlayerWithWalletProof({
+      deletionIntent,
+      challengeId: deletionChallenge.challengeId,
+      proof: {
+        challenge: deletionChallenge.challenge,
+        publicKey: publicKeyText,
+        signature: signChallenge(deletionChallenge.challenge),
+      },
+    })).resolves.toMatchObject({ code: "PLAYER_DELETION_REJECTED" });
+    await expect(lifecycle.authenticatePlayerSession(rotated.sessionSecret)).resolves.toEqual(ACCOUNT_PLAYER_SESSION_PUBLIC_FAILURE);
+    const cleanup = new AccountClaimService(
+      new ControlledClockPool(pool, Array.from({ length: 8 }, () => new Date("2026-09-01T21:07:00.000Z"))),
+      claimAuthority,
+      { origin: "https://game.samurai-sushi.example", chainId: "NetXdQprcVkpaWU" },
+    );
+    await expect(cleanup.deleteExpiredChallenges()).resolves.toBe(1);
+    const deleted = await rawPool.query<{ readonly players: string; readonly wallets: string; readonly sessions: string;
+      readonly merges: string; readonly challenges: string; readonly commands: string; readonly events: string;
+      readonly outbox: string; readonly tombstones: string }>(`
+      SELECT
+        (SELECT count(*)::text FROM samurai_persistence.players) AS players,
+        (SELECT count(*)::text FROM samurai_persistence.wallet_credentials) AS wallets,
+        (SELECT count(*)::text FROM samurai_persistence.player_sessions) AS sessions,
+        (SELECT count(*)::text FROM samurai_persistence.progress_merges) AS merges,
+        (SELECT count(*)::text FROM samurai_persistence.claim_challenges) AS challenges,
+        (SELECT count(*)::text FROM samurai_persistence.command_receipts) AS commands,
+        (SELECT count(*)::text FROM samurai_persistence.domain_events) AS events,
+        (SELECT count(*)::text FROM samurai_persistence.outbox_deliveries) AS outbox,
+        (SELECT count(*)::text FROM samurai_persistence.deletion_tombstones
+          WHERE kind IN ('player-session','wallet-credential','claim-challenge','claim-id','claim-idempotency')) AS tombstones
+    `);
+    expect(deleted.rows[0]).toMatchObject({
+      players: "0", wallets: "0", sessions: "0", merges: "0", challenges: "0",
+      commands: "0", events: "0", outbox: "0",
+    });
+    expect(Number(deleted.rows[0]!.tombstones)).toBeGreaterThanOrEqual(5);
+
+    const replacementCapability = "NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNA";
+    const replacementGuest = await new GuestSessionService(pool, authority, {
+      claimKeys: guestClaimKeys,
+      issueClaimCapability: () => replacementCapability,
+    }).issue({
+      consentVersion: "consent-v1",
+      contentVersion: "content-v1",
+      checkpointSchemaVersion: 1,
+      checkpoint: { relink: true },
+    });
+    const relinkIntent = {
+      claimId: "223e4567-e89b-42d3-a456-426614174991",
+      guestClaimCommitment: replacementCapability,
+      createPlayer: true,
+      guestRevision: 0,
+      idempotencyKey: "223e4567-e89b-42d3-a456-426614174992",
+      contentVersion: "content-v1",
+      cosmeticSelections: {},
+    } as const;
+    const relinkIssue = new AccountClaimService(
+      new ControlledClockPool(pool, Array.from({ length: 12 }, () => new Date("2026-08-01T23:00:00.000Z"))),
+      claimAuthority,
+      {
+        origin: "https://game.samurai-sushi.example",
+        chainId: "NetXdQprcVkpaWU",
+        issueUuid: () => "223e4567-e89b-42d3-a456-426614174993",
+        issueNonce: () => "OOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOA",
+      },
+    );
+    const relinkChallenge = await relinkIssue.issueClaimChallenge({
+      resumeSecret: replacementGuest.resumeSecret,
+      intent: relinkIntent,
+      account,
+    });
+    if ("code" in relinkChallenge) throw new Error("Wallet relink challenge issue failed.");
+    const relink = new AccountClaimService(
+      new ControlledClockPool(pool, Array.from({ length: 20 }, () => new Date("2026-08-01T23:00:01.000Z"))),
+      claimAuthority,
+      {
+        origin: "https://game.samurai-sushi.example",
+        chainId: "NetXdQprcVkpaWU",
+        issueUuid: () => "223e4567-e89b-42d3-a456-426614174994",
+      },
+    );
+    await expect(relink.claimGuest({
+      resumeSecret: replacementGuest.resumeSecret,
+      intent: relinkIntent,
+      challengeId: relinkChallenge.challengeId,
+      proof: {
+        challenge: relinkChallenge.challenge,
+        publicKey: publicKeyText,
+        signature: signChallenge(relinkChallenge.challenge),
+      },
+    })).resolves.toEqual(ACCOUNT_CLAIM_PUBLIC_FAILURE);
+  });
+
+  it("retries a live challenge nonce collision and rejects nonce resurrection after tombstoned cleanup", async () => {
+    const firstNonce = Buffer.alloc(32, 70).toString("base64url");
+    const freshNonce = Buffer.alloc(32, 71).toString("base64url");
+    const account = "tz1MsZxMSJdiUV9hVs4UKAMrXtksDvxWAZe2";
+    const firstIntent = {
+      recoverClaimId: "923e4567-e89b-42d3-a456-426614174400",
+      idempotencyKey: "923e4567-e89b-42d3-a456-426614174401",
+    };
+    const issuedAt = new Date("2026-08-01T22:30:00.000Z");
+    const first = new AccountClaimService(
+      new ControlledClockPool(pool, Array.from({ length: 8 }, () => issuedAt)),
+      claimAuthority,
+      {
+        origin: "https://game.samurai-sushi.example",
+        chainId: "NetXdQprcVkpaWU",
+        issueUuid: () => "923e4567-e89b-42d3-a456-426614174402",
+        issueNonce: () => firstNonce,
+      },
+    );
+    const firstChallenge = await first.issueRecoveryChallenge({ recoveryIntent: firstIntent, account });
+    if ("code" in firstChallenge) throw new Error("First nonce fixture challenge failed.");
+
+    const nonces = [firstNonce, freshNonce];
+    const ids = [
+      "923e4567-e89b-42d3-a456-426614174403",
+      "923e4567-e89b-42d3-a456-426614174404",
+    ];
+    const retrying = new AccountClaimService(
+      new ControlledClockPool(pool, Array.from({ length: 12 }, () => issuedAt)),
+      claimAuthority,
+      {
+        origin: "https://game.samurai-sushi.example",
+        chainId: "NetXdQprcVkpaWU",
+        issueUuid: () => ids.shift()!,
+        issueNonce: () => nonces.shift()!,
+      },
+    );
+    const retriedChallenge = await retrying.issueRecoveryChallenge({
+      recoveryIntent: { ...firstIntent, idempotencyKey: "923e4567-e89b-42d3-a456-426614174405" },
+      account,
+    });
+    if ("code" in retriedChallenge) throw new Error("Fresh nonce retry did not succeed.");
+    expect(retriedChallenge.challenge.nonce).toBe(freshNonce);
+    expect((await rawPool.query<CountRow>(
+      "SELECT count(*)::text AS count FROM samurai_persistence.claim_challenges",
+    )).rows[0]?.count).toBe("2");
+
+    const expiresAt = new Date(issuedAt.getTime() + 5 * 60 * 1_000);
+    const cleanup = new AccountClaimService(
+      new ControlledClockPool(pool, Array.from({ length: 16 }, () => new Date(expiresAt.getTime() + 1))),
+      claimAuthority,
+      { origin: "https://game.samurai-sushi.example", chainId: "NetXdQprcVkpaWU" },
+    );
+    await expect(cleanup.deleteExpiredChallenges()).resolves.toBe(2);
+    const resurrecting = new AccountClaimService(
+      new ControlledClockPool(pool, Array.from({ length: 8 }, () => new Date(expiresAt.getTime() + 1))),
+      claimAuthority,
+      {
+        origin: "https://game.samurai-sushi.example",
+        chainId: "NetXdQprcVkpaWU",
+        issueUuid: () => "923e4567-e89b-42d3-a456-426614174406",
+        issueNonce: () => firstNonce,
+      },
+    );
+    await expect(resurrecting.issueRecoveryChallenge({
+      recoveryIntent: {
+        recoverClaimId: "923e4567-e89b-42d3-a456-426614174407",
+        idempotencyKey: "923e4567-e89b-42d3-a456-426614174408",
+      },
+      account,
+    })).resolves.toEqual(ACCOUNT_CLAIM_RECOVERY_PUBLIC_FAILURE);
+    expect((await rawPool.query<CountRow>(
+      "SELECT count(*)::text AS count FROM samurai_persistence.claim_challenges",
+    )).rows[0]?.count).toBe("0");
+  });
+
+  it("increments the maximum safe existing-player revision exactly and rejects the unincrementable boundary atomically", async () => {
+    const { privateKey, publicKey } = generateKeyPairSync("ed25519");
+    const publicDer = publicKey.export({ format: "der", type: "spki" });
+    const publicKeyText = b58Encode(publicDer.subarray(publicDer.byteLength - 32), PrefixV2.Ed25519PublicKey);
+    const account = getPkhfromPk(publicKeyText);
+    const signChallenge = (challenge: unknown) => b58Encode(
+      signMessage(null, blake2b(walletSigningBytes(challenge), { dkLen: 32 }), privateKey),
+      PrefixV2.Ed25519Signature,
+    );
+    const targetPlayerId = "max-safe-existing-player";
+    const beforeRevision = Number.MAX_SAFE_INTEGER - 1;
+    await rawPool.query(
+      "INSERT INTO samurai_persistence.players (id,created_at,updated_at) VALUES ($1,'2026-08-01','2026-08-01')",
+      [targetPlayerId],
+    );
+    await rawPool.query(
+      `INSERT INTO samurai_persistence.wallet_credentials
+        (credential_id,player_id,chain_id,account,public_key,scheme,linked_claim_id,linked_at)
+       VALUES ('723e4567-e89b-42d3-a456-426614174300',$1,'NetXdQprcVkpaWU',$2,$3,'tz1',
+               '723e4567-e89b-42d3-a456-426614174301','2026-08-01')`,
+      [targetPlayerId, account, publicKeyText],
+    );
+    await rawPool.query(
+      `INSERT INTO samurai_persistence.player_progress
+        (player_id,revision,content_version,checkpoint_schema_version,checkpoint,created_at,updated_at)
+       VALUES ($1,$2,'content-v1',1,'{"target":true}','2026-08-01','2026-08-01')`,
+      [targetPlayerId, beforeRevision],
+    );
+
+    const claimExisting = async (
+      marker: number,
+      claimId: string,
+      idempotencyKey: string,
+      playerRevision: number,
+    ) => {
+      const claimCapability = Buffer.alloc(32, marker).toString("base64url");
+      const guest = await new GuestSessionService(pool, authority, {
+        claimKeys: guestClaimKeys,
+        issueClaimCapability: () => claimCapability,
+      }).issue({
+        consentVersion: "consent-v1",
+        contentVersion: "content-v1",
+        checkpointSchemaVersion: 1,
+        checkpoint: { guest: marker },
+      });
+      const intent = {
+        claimId,
+        guestClaimCommitment: claimCapability,
+        targetPlayerId,
+        createPlayer: false,
+        guestRevision: 0,
+        playerRevision,
+        idempotencyKey,
+        contentVersion: "content-v1",
+        cosmeticSelections: {},
+      } as const;
+      const issue = new AccountClaimService(
+        new ControlledClockPool(pool, Array.from({ length: 20 }, () => new Date("2026-08-01T22:00:00.000Z"))),
+        claimAuthority,
+        {
+          origin: "https://game.samurai-sushi.example",
+          chainId: "NetXdQprcVkpaWU",
+          issueUuid: () => `723e4567-e89b-42d3-a456-4266141743${marker.toString().padStart(2, "0")}`,
+          issueNonce: () => Buffer.alloc(32, marker + 30).toString("base64url"),
+        },
+      );
+      const challenge = await issue.issueClaimChallenge({ resumeSecret: guest.resumeSecret, intent, account });
+      if ("code" in challenge) throw new Error("Existing-player challenge issue failed.");
+      const claim = new AccountClaimService(
+        new ControlledClockPool(pool, Array.from({ length: 24 }, () => new Date("2026-08-01T22:00:01.000Z"))),
+        claimAuthority,
+        {
+          origin: "https://game.samurai-sushi.example",
+          chainId: "NetXdQprcVkpaWU",
+          issueUuid: () => `823e4567-e89b-42d3-a456-4266141743${marker.toString().padStart(2, "0")}`,
+          issuePlayerSecret: () => Buffer.alloc(32, marker + 60).toString("base64url"),
+        },
+      );
+      return {
+        result: await claim.claimGuest({
+          resumeSecret: guest.resumeSecret,
+          intent,
+          challengeId: challenge.challengeId,
+          proof: { challenge: challenge.challenge, publicKey: publicKeyText, signature: signChallenge(challenge.challenge) },
+        }),
+        guestId: guest.session.id,
+        challengeId: challenge.challengeId,
+      };
+    };
+
+    const accepted = await claimExisting(
+      21,
+      "723e4567-e89b-42d3-a456-426614174310",
+      "723e4567-e89b-42d3-a456-426614174311",
+      beforeRevision,
+    );
+    expect(accepted.result).toMatchObject({ playerId: targetPlayerId, playerRevision: Number.MAX_SAFE_INTEGER });
+    const rejected = await claimExisting(
+      22,
+      "723e4567-e89b-42d3-a456-426614174312",
+      "723e4567-e89b-42d3-a456-426614174313",
+      Number.MAX_SAFE_INTEGER,
+    );
+    expect(rejected.result).toEqual(ACCOUNT_CLAIM_PUBLIC_FAILURE);
+    const state = await rawPool.query<{ readonly revision: string; readonly guest: string;
+      readonly consumed: Date | null; readonly merges: string }>(`
+      SELECT
+        (SELECT revision::text FROM samurai_persistence.player_progress WHERE player_id=$1) AS revision,
+        (SELECT count(*)::text FROM samurai_persistence.guest_sessions WHERE id=$2) AS guest,
+        (SELECT consumed_at FROM samurai_persistence.claim_challenges WHERE challenge_id=$3::uuid) AS consumed,
+        (SELECT count(*)::text FROM samurai_persistence.progress_merges WHERE player_id=$1) AS merges
+    `, [targetPlayerId, rejected.guestId, rejected.challengeId]);
+    expect(state.rows[0]).toEqual({
+      revision: Number.MAX_SAFE_INTEGER.toString(), guest: "1", consumed: null, merges: "1",
+    });
+  });
+
+  it("enforces the seven-day player-session idle boundary, touches accepted use, and cleans at equality", async () => {
+    const secret = Buffer.alloc(32, 61).toString("base64url");
+    const createdAt = new Date("2026-08-01T00:00:00.000Z");
+    const beforeIdleExpiry = new Date("2026-08-07T23:59:59.999Z");
+    const idleExpiry = new Date("2026-08-08T00:00:00.000Z");
+    const absoluteExpiry = new Date("2026-08-31T00:00:00.000Z");
+    const digest = playerSessionKeys.digest(secret, createdAt);
+    await rawPool.query(
+      "INSERT INTO samurai_persistence.players (id,created_at,updated_at) VALUES ('idle-player-subject',$1,$1)",
+      [createdAt],
+    );
+    await rawPool.query(
+      `INSERT INTO samurai_persistence.player_sessions
+        (id,player_id,issuance_kind,issuance_id,state,delivery_generation,created_at,last_seen_at,expires_at,rotate_after)
+       VALUES ('123e4567-e89b-42d3-a456-426614174321','idle-player-subject','claim',
+               '123e4567-e89b-42d3-a456-426614174322','active',1,$1,$1,$2,'2026-08-15T00:00:00Z')`,
+      [createdAt, absoluteExpiry],
+    );
+    await rawPool.query(
+      `INSERT INTO samurai_persistence.player_session_digests
+        (player_session_id,slot,digest_key_version,digest_key_identity,digest,valid_until)
+       VALUES ('123e4567-e89b-42d3-a456-426614174321','current',$1,$2,$3,NULL)`,
+      [digest.keyVersion, keyIdentityBytes(digest.keyIdentity), digest.digest],
+    );
+    const beforeBoundary = new AccountClaimService(
+      new ControlledClockPool(pool, Array.from({ length: 8 }, () => beforeIdleExpiry)),
+      claimAuthority,
+      { origin: "https://game.samurai-sushi.example", chainId: "NetXdQprcVkpaWU" },
+    );
+    await expect(beforeBoundary.authenticatePlayerSession(secret)).resolves.toMatchObject({
+      credentialKind: "current",
+    });
+    const touched = await rawPool.query<{ readonly last_seen_at: Date; readonly expires_at: Date }>(
+      "SELECT last_seen_at, expires_at FROM samurai_persistence.player_sessions WHERE id='123e4567-e89b-42d3-a456-426614174321'",
+    );
+    expect(touched.rows[0]).toEqual({ last_seen_at: beforeIdleExpiry, expires_at: absoluteExpiry });
+    await rawPool.query(
+      "UPDATE samurai_persistence.player_sessions SET last_seen_at=$2 WHERE id=$1::uuid",
+      ["123e4567-e89b-42d3-a456-426614174321", createdAt],
+    );
+
+    const release = deferred<void>();
+    const attempted = deferred<number>();
+    const acquired = deferred<number>();
+    const observed = new ObservedQueryLockPool(
+      pool,
+      (text) => text.includes("FROM samurai_persistence.player_sessions WHERE id = $1::uuid FOR UPDATE"),
+      attempted,
+      acquired,
+      release.promise,
+    );
+    const crossingBoundary = new AccountClaimService(
+      new ControlledClockPool(observed, [beforeIdleExpiry, idleExpiry]),
+      claimAuthority,
+      { origin: "https://game.samurai-sushi.example", chainId: "NetXdQprcVkpaWU" },
+    );
+    const crossingAuthentication = crossingBoundary.authenticatePlayerSession(secret);
+    await acquired.promise;
+    release.resolve(undefined);
+    await expect(crossingAuthentication).resolves.toEqual(ACCOUNT_PLAYER_SESSION_PUBLIC_FAILURE);
+
+    const atBoundary = new AccountClaimService(
+      new ControlledClockPool(pool, Array.from({ length: 16 }, () => idleExpiry)),
+      claimAuthority,
+      { origin: "https://game.samurai-sushi.example", chainId: "NetXdQprcVkpaWU" },
+    );
+    await expect(atBoundary.deleteExpiredPlayerSessions()).resolves.toBe(1);
+    await expect(atBoundary.deleteExpiredPlayerSessions()).resolves.toBe(0);
+    const cleaned = await rawPool.query<{ readonly sessions: string; readonly digests: string; readonly players: string;
+      readonly tombstones: string }>(`
+      SELECT
+        (SELECT count(*)::text FROM samurai_persistence.player_sessions WHERE player_id='idle-player-subject') AS sessions,
+        (SELECT count(*)::text FROM samurai_persistence.player_session_digests) AS digests,
+        (SELECT count(*)::text FROM samurai_persistence.players WHERE id='idle-player-subject') AS players,
+        (SELECT count(*)::text FROM samurai_persistence.deletion_tombstones WHERE kind='player-session') AS tombstones
+    `);
+    expect(cleaned.rows[0]).toEqual({ sessions: "0", digests: "0", players: "1", tombstones: "1" });
+
+    const pendingSecret = Buffer.alloc(32, 62).toString("base64url");
+    const pendingDigest = playerSessionKeys.digest(pendingSecret, createdAt);
+    await rawPool.query(
+      "INSERT INTO samurai_persistence.players (id,created_at,updated_at) VALUES ('idle-pending-player',$1,$1)",
+      [createdAt],
+    );
+    await rawPool.query(
+      `INSERT INTO samurai_persistence.player_sessions
+        (id,player_id,issuance_kind,issuance_id,state,delivery_generation,created_at,last_seen_at,expires_at,rotate_after)
+       VALUES ('123e4567-e89b-42d3-a456-426614174323','idle-pending-player','claim',
+               '123e4567-e89b-42d3-a456-426614174324','pending-delivery',1,$1,$1,$2,'2026-08-15T00:00:00Z')`,
+      [createdAt, absoluteExpiry],
+    );
+    await rawPool.query(
+      `INSERT INTO samurai_persistence.player_session_digests
+        (player_session_id,slot,digest_key_version,digest_key_identity,digest,valid_until)
+       VALUES ('123e4567-e89b-42d3-a456-426614174323','current',$1,$2,$3,NULL)`,
+      [pendingDigest.keyVersion, keyIdentityBytes(pendingDigest.keyIdentity), pendingDigest.digest],
+    );
+    await expect(atBoundary.acknowledgeClaimDelivery(
+      "idle-pending-player",
+      "123e4567-e89b-42d3-a456-426614174324",
+      pendingSecret,
+      1,
+    )).resolves.toEqual(ACCOUNT_CLAIM_RECOVERY_PUBLIC_FAILURE);
+    expect((await rawPool.query<{ readonly state: string }>(
+      "SELECT state FROM samurai_persistence.player_sessions WHERE id='123e4567-e89b-42d3-a456-426614174323'",
+    )).rows[0]?.state).toBe("pending-delivery");
+  });
+
+  it("cleans an expired player session once, preserves history, and rejects exact digest resurrection", async () => {
+    const secret = "MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMA";
+    const createdAt = new Date("2026-08-01T00:00:00.000Z");
+    const expiresAt = new Date("2026-08-02T00:00:00.000Z");
+    const digest = playerSessionKeys.digest(secret, createdAt);
+    await rawPool.query(
+      "INSERT INTO samurai_persistence.players (id,created_at,updated_at) VALUES ('expired-player-subject',$1,$1)",
+      [createdAt],
+    );
+    await rawPool.query(
+      `INSERT INTO samurai_persistence.player_sessions
+        (id,player_id,issuance_kind,issuance_id,state,delivery_generation,created_at,last_seen_at,expires_at,rotate_after)
+       VALUES ('123e4567-e89b-42d3-a456-426614174311','expired-player-subject','claim',
+               '123e4567-e89b-42d3-a456-426614174312','active',1,$1,$1,$2,'2026-08-01T12:00:00Z')`,
+      [createdAt, expiresAt],
+    );
+    await rawPool.query(
+      `INSERT INTO samurai_persistence.player_session_digests
+        (player_session_id,slot,digest_key_version,digest_key_identity,digest,valid_until)
+       VALUES ('123e4567-e89b-42d3-a456-426614174311','current',$1,$2,$3,NULL)`,
+      [digest.keyVersion, keyIdentityBytes(digest.keyIdentity), digest.digest],
+    );
+    await rawPool.query(
+      `INSERT INTO samurai_persistence.domain_events
+        (event_id,player_id,event_type,schema_version,payload,committed_revision,created_at)
+       VALUES ('expired-player-event','expired-player-subject','player.native',1,'{}',1,$1)`,
+      [createdAt],
+    );
+    const cleanup = new AccountClaimService(
+      new ControlledClockPool(pool, Array.from({ length: 16 }, () => new Date(expiresAt.getTime() + 1))),
+      claimAuthority,
+      { origin: "https://game.samurai-sushi.example", chainId: "NetXdQprcVkpaWU" },
+    );
+    await expect(cleanup.deleteExpiredPlayerSessions()).resolves.toBe(1);
+    await expect(cleanup.deleteExpiredPlayerSessions()).resolves.toBe(0);
+    expect((await rawPool.query<CountRow>(
+      "SELECT count(*)::text AS count FROM samurai_persistence.domain_events WHERE player_id='expired-player-subject'",
+    )).rows[0]?.count).toBe("1");
+
+    const laterSecret = "PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPA";
+    const laterDigest = playerSessionKeys.digest(laterSecret, createdAt);
+    await rawPool.query(
+      "INSERT INTO samurai_persistence.players (id,created_at,updated_at) VALUES ('z-live-expired-player',$1,$1)",
+      [createdAt],
+    );
+    await rawPool.query(
+      `INSERT INTO samurai_persistence.player_sessions
+        (id,player_id,issuance_kind,issuance_id,state,delivery_generation,created_at,last_seen_at,expires_at,rotate_after)
+       VALUES ('123e4567-e89b-42d3-a456-426614174313','z-live-expired-player','claim',
+               '123e4567-e89b-42d3-a456-426614174314','active',1,$1,$1,$2,'2026-08-01T12:00:00Z')`,
+      [createdAt, expiresAt],
+    );
+    await rawPool.query(
+      `INSERT INTO samurai_persistence.player_session_digests
+        (player_session_id,slot,digest_key_version,digest_key_identity,digest,valid_until)
+       VALUES ('123e4567-e89b-42d3-a456-426614174313','current',$1,$2,$3,NULL)`,
+      [laterDigest.keyVersion, keyIdentityBytes(laterDigest.keyIdentity), laterDigest.digest],
+    );
+    await expect(cleanup.deleteExpiredPlayerSessions(1)).resolves.toBe(1);
+    await expect(cleanup.deleteExpiredPlayerSessions(1)).resolves.toBe(0);
+
+    await rawPool.query(
+      `INSERT INTO samurai_persistence.player_sessions
+        (id,player_id,issuance_kind,issuance_id,state,delivery_generation,
+         created_at,last_seen_at,expires_at,rotate_after)
+       VALUES ('123e4567-e89b-42d3-a456-426614174311','expired-player-subject','claim',
+               '123e4567-e89b-42d3-a456-426614174312','active',1,
+               '2026-08-01T00:00:00Z','2026-08-01T00:00:00Z',
+               '2026-08-03T00:00:00Z','2026-08-02T12:00:00Z')`,
+    );
+    await rawPool.query(
+      `INSERT INTO samurai_persistence.player_session_digests
+        (player_session_id,slot,digest_key_version,digest_key_identity,digest,valid_until)
+       VALUES ('123e4567-e89b-42d3-a456-426614174311','current',$1,$2,$3,NULL)`,
+      [digest.keyVersion, keyIdentityBytes(digest.keyIdentity), digest.digest],
+    );
+    const resurrected = new AccountClaimService(
+      new ControlledClockPool(pool, Array.from({ length: 8 }, () => new Date("2026-08-02T00:00:00.001Z"))),
+      claimAuthority,
+      { origin: "https://game.samurai-sushi.example", chainId: "NetXdQprcVkpaWU" },
+    );
+    await expect(resurrected.authenticatePlayerSession(secret)).resolves.toEqual(ACCOUNT_PLAYER_SESSION_PUBLIC_FAILURE);
+  });
+
+  it("purges guest claim capabilities when the entire claim-key inventory is unavailable", async () => {
+    const claimCapability = Buffer.alloc(32, 31).toString("base64url");
+    const issued = await new GuestSessionService(pool, authority, {
+      claimKeys: guestClaimKeys,
+      issueClaimCapability: () => claimCapability,
+    }).issue({
+      consentVersion: "consent-v1",
+      contentVersion: "content-v1",
+      checkpointSchemaVersion: 1,
+      checkpoint: { claimInventory: "missing" },
+    });
+    const unavailable = new GuestSessionService(pool, authority);
+    await expect(unavailable.rotateClaimCapability(issued.resumeSecret)).rejects.toMatchObject({
+      code: "GUEST_CLAIM_UNAVAILABLE",
+    });
+    await expect(unavailable.purgeUnavailableClaimCapabilities()).resolves.toBe(1);
+    await expect(unavailable.purgeUnavailableClaimCapabilities()).resolves.toBe(0);
+    const state = await rawPool.query<{ readonly guests: string; readonly progress: string; readonly resumes: string;
+      readonly capabilities: string; readonly tombstones: string }>(`
+      SELECT
+        (SELECT count(*)::text FROM samurai_persistence.guest_sessions WHERE id=$1) AS guests,
+        (SELECT count(*)::text FROM samurai_persistence.guest_progress WHERE guest_session_id=$1) AS progress,
+        (SELECT count(*)::text FROM samurai_persistence.guest_resume_digests WHERE guest_session_id=$1) AS resumes,
+        (SELECT count(*)::text FROM samurai_persistence.guest_claim_capabilities WHERE guest_session_id=$1) AS capabilities,
+        (SELECT count(*)::text FROM samurai_persistence.deletion_tombstones
+          WHERE kind='guest-claim' AND capability_key_purpose='guest-claim') AS tombstones
+    `, [issued.session.id]);
+    expect(state.rows[0]).toEqual({
+      guests: "1", progress: "1", resumes: "1", capabilities: "0", tombstones: "1",
+    });
+    await expect(unavailable.resume(issued.resumeSecret)).resolves.toMatchObject({
+      session: { id: issued.session.id },
+    });
+  });
+
+  it("purges a compromised player-session key without blocking retention or erasing player history", async () => {
+    const compromisedAt = new Date("2026-08-01T21:00:00.000Z");
+    const retired = { ...hmacKey("player-session", 17, 17, true), compromisedAt } as const;
+    const compromisedRing = new PlayerSessionKeyring(hmacKey("player-session", 18, 18), [retired]);
+    const secret = "LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLA";
+    const issuedDigest = compromisedRing.digest(secret, new Date(compromisedAt.getTime() - 1), 17);
+    await rawPool.query(
+      "INSERT INTO samurai_persistence.players (id,created_at,updated_at) VALUES ('compromised-player-subject','2026-07-31','2026-07-31')",
+    );
+    await rawPool.query(
+      `INSERT INTO samurai_persistence.player_sessions
+        (id,player_id,issuance_kind,issuance_id,state,delivery_generation,created_at,last_seen_at,expires_at,rotate_after)
+       VALUES ('123e4567-e89b-42d3-a456-426614174301','compromised-player-subject','claim',
+               '123e4567-e89b-42d3-a456-426614174302','active',1,'2026-07-31','2026-07-31',
+               '2026-08-30','2026-08-01')`,
+    );
+    await rawPool.query(
+      `INSERT INTO samurai_persistence.player_session_digests
+        (player_session_id,slot,digest_key_version,digest_key_identity,digest,valid_until)
+       VALUES ('123e4567-e89b-42d3-a456-426614174301','current',$1,$2,$3,NULL)`,
+      [issuedDigest.keyVersion, keyIdentityBytes(issuedDigest.keyIdentity), issuedDigest.digest],
+    );
+    await rawPool.query(
+      `INSERT INTO samurai_persistence.domain_events
+        (event_id,player_id,event_type,schema_version,payload,committed_revision,created_at)
+       VALUES ('compromised-player-event','compromised-player-subject','player.native',1,'{}',1,'2026-07-31')`,
+    );
+    const compromisedAuthority = new AccountClaimAuthority(pool, authority, guestClaimKeys, compromisedRing);
+    await compromisedAuthority.bootstrap();
+    const cleanup = new AccountClaimService(
+      new ControlledClockPool(pool, Array.from({ length: 12 }, () => new Date(compromisedAt.getTime() + 1))),
+      compromisedAuthority,
+      { origin: "https://game.samurai-sushi.example", chainId: "NetXdQprcVkpaWU" },
+    );
+    await expect(cleanup.authenticatePlayerSession(secret)).resolves.toEqual(ACCOUNT_PLAYER_SESSION_PUBLIC_FAILURE);
+    await expect(cleanup.purgeUnavailablePlayerSessionDigests()).resolves.toBe(1);
+    const state = await rawPool.query<{ readonly sessions: string; readonly digests: string;
+      readonly events: string; readonly tombstones: string }>(`
+      SELECT
+        (SELECT count(*)::text FROM samurai_persistence.player_sessions WHERE state='revoked') AS sessions,
+        (SELECT count(*)::text FROM samurai_persistence.player_session_digests) AS digests,
+        (SELECT count(*)::text FROM samurai_persistence.domain_events WHERE player_id='compromised-player-subject') AS events,
+        (SELECT count(*)::text FROM samurai_persistence.deletion_tombstones
+          WHERE kind='player-session' AND capability_key_version=17) AS tombstones
+    `);
+    expect(state.rows[0]).toEqual({ sessions: "0", digests: "0", events: "1", tombstones: "1" });
+    await expect(compromisedAuthority.assertSafeToDestroy("player-session", 17)).rejects.toMatchObject({
+      code: "KEY_DESTRUCTION_UNSAFE",
+    });
+  });
+
+  it("rejects impossible Stage 3 challenge and credential states in PostgreSQL", async () => {
+    const insertChallenge = (
+      id: string,
+      nonce: string,
+      hash: string,
+      issuedAt: string,
+      expiresAt: string,
+      consumedAt: string | null = null,
+      consumedClaimId: string | null = null,
+    ) => rawPool.query(
+      `INSERT INTO samurai_persistence.claim_challenges
+        (challenge_id,purpose,guest_session_id,claim_id,nonce_digest,challenge_hash,intent_hash,
+         issued_at,expires_at,consumed_at,consumed_claim_id)
+       VALUES ($1,'recovery',NULL,'123e4567-e89b-42d3-a456-426614174000',decode($2,'hex'),decode($3,'hex'),
+               decode(repeat('33',32),'hex'),$4,$5,$6,$7::uuid)`,
+      [id, nonce, hash, issuedAt, expiresAt, consumedAt, consumedClaimId],
+    );
+    await expect(insertChallenge(
+      "123e4567-e89b-42d3-a456-426614174100", "11".repeat(32), "22".repeat(32),
+      "2026-08-01T20:30:00Z", "2026-08-01T20:35:00.001Z",
+    )).rejects.toMatchObject({ code: "23514" });
+    await expect(insertChallenge(
+      "123e4567-e89b-42d3-a456-426614174101", "12".repeat(32), "23".repeat(32),
+      "infinity", "infinity",
+    )).rejects.toMatchObject({ code: "23514" });
+    await expect(insertChallenge(
+      "123e4567-e89b-42d3-a456-426614174102", "13".repeat(32), "24".repeat(32),
+      "2026-08-01T20:30:00Z", "2026-08-01T20:35:00Z", "2026-08-01T20:31:00Z", null,
+    )).rejects.toMatchObject({ code: "23514" });
+    await expect(insertChallenge(
+      "123e4567-e89b-12d3-a456-426614174103", "14".repeat(32), "25".repeat(32),
+      "2026-08-01T20:30:00Z", "2026-08-01T20:35:00Z",
+    )).rejects.toMatchObject({ code: "23514" });
+    await expect(insertChallenge(
+      "123e4567-e89b-42d3-a456-426614174104", "15".repeat(31), "26".repeat(32),
+      "2026-08-01T20:30:00Z", "2026-08-01T20:35:00Z",
+    )).rejects.toMatchObject({ code: "23514" });
+    await insertChallenge(
+      "123e4567-e89b-42d3-a456-426614174105", "16".repeat(32), "27".repeat(32),
+      "2026-08-01T20:30:00Z", "2026-08-01T20:35:00Z",
+    );
+    await expect(insertChallenge(
+      "123e4567-e89b-42d3-a456-426614174106", "16".repeat(32), "28".repeat(32),
+      "2026-08-01T20:30:00Z", "2026-08-01T20:35:00Z",
+    )).rejects.toMatchObject({ code: "23505" });
+    await expect(insertChallenge(
+      "123e4567-e89b-42d3-a456-426614174108", "18".repeat(32), "27".repeat(32),
+      "2026-08-01T20:30:00Z", "2026-08-01T20:35:00Z",
+    )).rejects.toMatchObject({ code: "23505" });
+    await expect(insertChallenge(
+      "123e4567-e89b-42d3-a456-426614174107", "17".repeat(32), "29".repeat(32),
+      "2026-08-01T20:30:00Z", "2026-08-01T20:35:00Z", "2026-08-01T20:31:00Z",
+      "223e4567-e89b-42d3-a456-426614174000",
+    )).rejects.toMatchObject({ code: "23514" });
+
+    await rawPool.query(
+      `INSERT INTO samurai_persistence.players (id,created_at,updated_at)
+       VALUES ('hostile-player-0001','2026-08-01T20:00:00Z','2026-08-01T20:00:00Z')`,
+    );
+    await expect(rawPool.query(
+      `INSERT INTO samurai_persistence.player_sessions
+        (id,player_id,issuance_kind,issuance_id,state,delivery_generation,
+         created_at,last_seen_at,expires_at,rotate_after)
+       VALUES ('223e4567-e89b-42d3-a456-426614174100','hostile-player-0001','wallet-proof',
+               '423e4567-e89b-42d3-a456-426614174100','active',1,
+               '2026-08-01T20:00:00Z','2026-08-01T20:00:00Z',
+               '2026-08-02T20:00:00Z','2026-08-02T08:00:00Z')`,
+    )).rejects.toMatchObject({ code: "23514" });
+    await expect(rawPool.query(
+      `INSERT INTO samurai_persistence.wallet_credentials
+        (credential_id,player_id,chain_id,account,public_key,scheme,linked_claim_id,linked_at)
+       VALUES ('323e4567-e89b-42d3-a456-426614174100','hostile-player-0001',
+               'Net111111111111','tz1${"1".repeat(33)}','edpk','tz1',
+               '423e4567-e89b-42d3-a456-426614174100','2026-08-01T20:00:00Z')`,
+    )).rejects.toMatchObject({ code: "23514" });
+    await expect(rawPool.query(
+      `INSERT INTO samurai_persistence.player_progress
+        (player_id,revision,content_version,checkpoint_schema_version,checkpoint,created_at,updated_at)
+       VALUES ('hostile-player-0001',9007199254740992,'content-v1',1,'{}',
+               '2026-08-01T20:00:00Z','2026-08-01T20:00:00Z')`,
+    )).rejects.toMatchObject({ code: "23514" });
+    await rawPool.query(
+      `INSERT INTO samurai_persistence.wallet_credentials
+        (credential_id,player_id,chain_id,account,public_key,scheme,linked_claim_id,linked_at)
+       VALUES ('323e4567-e89b-42d3-a456-426614174101','hostile-player-0001','NetXdQprcVkpaWU',
+               'tz1MsZxMSJdiUV9hVs4UKAMrXtksDvxWAZe2',
+               'edpkuZpp81M8NmaFbueXY8bk7EP9V54XTnwsFFt77Z5FTPs2QzLU9r','tz1',
+               '423e4567-e89b-42d3-a456-426614174101','2026-08-01T20:00:00Z')`,
+    );
+    await rawPool.query(
+      `INSERT INTO samurai_persistence.players (id,created_at,updated_at)
+       VALUES ('hostile-player-0002','2026-08-01T20:00:00Z','2026-08-01T20:00:00Z')`,
+    );
+    await expect(rawPool.query(
+      `INSERT INTO samurai_persistence.wallet_credentials
+        (credential_id,player_id,chain_id,account,public_key,scheme,linked_claim_id,linked_at)
+       VALUES ('323e4567-e89b-42d3-a456-426614174102','hostile-player-0002','NetXdQprcVkpaWU',
+               'tz2MTdHKt5pvb1qkJz52j9ywzsDkSS2tr5xN',
+               'sppk7bnE8ihKrWKnxZ3a3yGrnwXJNSWv3MVUMm7dimvKRkL1DSBuQbg','tz2',
+               '423e4567-e89b-42d3-a456-426614174101','2026-08-01T20:00:00Z')`,
+    )).rejects.toMatchObject({ code: "23505" });
+    await rawPool.query(
+      `INSERT INTO samurai_persistence.player_sessions
+        (id,player_id,issuance_kind,issuance_id,state,delivery_generation,
+         created_at,last_seen_at,expires_at,rotate_after)
+       VALUES ('523e4567-e89b-42d3-a456-426614174100','hostile-player-0001','claim',
+               '623e4567-e89b-42d3-a456-426614174100','active',1,
+               '2026-08-01T20:00:00Z','2026-08-01T20:00:00Z',
+               '2026-08-02T20:00:00Z','2026-08-02T08:00:00Z')`,
+    );
+    await expect(rawPool.query(
+      `INSERT INTO samurai_persistence.progress_merges
+        (claim_id,idempotency_key,request_hash,claim_intent_hash,challenge_hash,
+         guest_origin_commitment,player_id,create_player,target_player_id,guest_revision,
+         player_revision_before,player_revision_after,content_version,cosmetic_selections,
+         session_id,session_issuance_id,result_hash,created_at,expires_at)
+       VALUES ('623e4567-e89b-42d3-a456-426614174100','hostile-merge-idempotency',
+               decode(repeat('31',32),'hex'),decode(repeat('32',32),'hex'),decode(repeat('33',32),'hex'),
+               decode(repeat('34',32),'hex'),'hostile-player-0001',true,NULL,0,NULL,1,
+               'content-v1','{}','523e4567-e89b-42d3-a456-426614174100',
+               '623e4567-e89b-42d3-a456-426614174100',decode(repeat('35',32),'hex'),
+               '2026-08-01T20:00:00Z','2026-08-02T20:00:00Z')`,
+    )).rejects.toMatchObject({ code: "23514" });
+    await expect(rawPool.query(
+      `INSERT INTO samurai_persistence.progress_merges
+        (claim_id,idempotency_key,request_hash,claim_intent_hash,challenge_hash,
+         guest_origin_commitment,player_id,create_player,target_player_id,guest_revision,
+         player_revision_before,player_revision_after,content_version,cosmetic_selections,
+         session_id,session_issuance_id,result_hash,created_at,expires_at)
+       VALUES ('623e4567-e89b-42d3-a456-426614174100','hostile-max-revision',
+               decode(repeat('41',32),'hex'),decode(repeat('42',32),'hex'),decode(repeat('43',32),'hex'),
+               decode(repeat('44',32),'hex'),'hostile-player-0001',false,'hostile-player-0001',0,
+               9007199254740991,9007199254740992,'content-v1','{}',
+               '523e4567-e89b-42d3-a456-426614174100','623e4567-e89b-42d3-a456-426614174100',
+               decode(repeat('45',32),'hex'),'2026-08-01T20:00:00Z','2026-08-02T20:00:00Z')`,
+    )).rejects.toMatchObject({ code: "23514" });
   });
 });

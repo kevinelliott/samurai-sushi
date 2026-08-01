@@ -3,16 +3,19 @@ import { canonicalJson, portableSaveClaims } from "@samurai-sushi/domain";
 import { describe, expect, it } from "vitest";
 import {
   constantTimeDigestEqual,
+  GuestClaimKeyring,
   GuestSecretFormatError,
   hmacKeyIdentity,
   HmacKeyring,
   IntegrityKeyring,
+  issueCapabilitySecret,
   issueResumeSecret,
+  PlayerSessionKeyring,
   TombstoneKeyring,
 } from "./crypto";
 
 const NOW = new Date("2026-08-01T12:00:00.000Z");
-const key = (purpose: "resume" | "tombstone" | "portable-integrity", version: number, marker: number, retired = false) => {
+const key = (purpose: "resume" | "tombstone" | "portable-integrity" | "guest-claim" | "player-session", version: number, marker: number, retired = false) => {
   const bytes = new Uint8Array(32).fill(marker);
   return {
     version,
@@ -51,6 +54,17 @@ describe("resume-secret digests", () => {
     expect(Buffer.from(guest.digest).toString("hex")).not.toBe(createHash("sha256").update(replayKey).digest("hex"));
   });
 
+  it("keeps compromised retired keys available only for replay fencing through their verification horizon", () => {
+    const retired = {
+      ...key("tombstone", 3, 3, true),
+      compromisedAt: new Date("2026-07-01T00:00:00.000Z"),
+    };
+    const ring = new TombstoneKeyring(key("tombstone", 4, 4), [retired]);
+    const replayKey = "challenge:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+    expect(ring.candidates("claim-challenge", replayKey, NOW).map(({ keyVersion }) => keyVersion)).toEqual([4]);
+    expect(ring.replayCandidates("claim-challenge", replayKey, NOW).map(({ keyVersion }) => keyVersion)).toEqual([4, 3]);
+  });
+
   it("defensively owns key bytes and exposes only immutable primitive lifecycle metadata", () => {
     const configured = key("resume", 7, 7);
     const ring = new HmacKeyring(configured);
@@ -67,6 +81,28 @@ describe("resume-secret digests", () => {
     const configured = key("resume", 8, 8);
     configured.key.fill(9);
     expect(() => new HmacKeyring(configured)).toThrow(/attested key identity/);
+  });
+});
+
+describe("purpose-separated account capabilities", () => {
+  it("keeps same-version guest-claim and player-session identities and digests independent", () => {
+    const secret = issueCapabilitySecret();
+    const guest = new GuestClaimKeyring(key("guest-claim", 7, 7));
+    const player = new PlayerSessionKeyring(key("player-session", 7, 7));
+    expect(guest.active.version).toBe(player.active.version);
+    expect(guest.active.keyIdentity).not.toBe(player.active.keyIdentity);
+    expect(constantTimeDigestEqual(guest.digest(secret, NOW).digest, player.digest(secret, NOW).digest)).toBe(false);
+  });
+
+  it("rejects relabeling identical guest-claim or player-session key material under another version", () => {
+    expect(() => new GuestClaimKeyring(
+      key("guest-claim", 2, 7),
+      [key("guest-claim", 1, 7, true)],
+    )).toThrow(/identities must be unique/u);
+    expect(() => new PlayerSessionKeyring(
+      key("player-session", 2, 8),
+      [key("player-session", 1, 8, true)],
+    )).toThrow(/identities must be unique/u);
   });
 });
 

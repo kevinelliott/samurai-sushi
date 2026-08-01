@@ -40,6 +40,11 @@ const MIGRATION_MANIFEST = [
     checksumHex: "19228c2338e44feffab73d71c8641bc98b5bcb806be19300501f072a9a49dc48",
     catalogChecksumHex: "9353296a3bc15b064810e3a3ab1cd28ed17d02d70daf35cec4903a868a4e6692",
   },
+  {
+    name: "0003_account_claim_persistence.sql",
+    checksumHex: "f11f036d52b1658fe4b60151ee13aef6a3ff3c95efe56911c0f4ba1c90e43d09",
+    catalogChecksumHex: "5fd91438ef6841724374b398e63481de60cd8b8698d72c31594469a1ecc21c92",
+  },
 ] as const;
 
 type MigrationTextReader = (name: string) => Promise<string>;

@@ -4,9 +4,16 @@ const SECRET_BYTES = 32;
 const DIGEST_BYTES = 32;
 const KEY_IDENTITY_DOMAIN = "samurai-sushi:hmac-key-identity:v1\n";
 const PORTABLE_SAVE_INTEGRITY_DOMAIN = "samurai-sushi:portable-save-integrity:v1\n";
+const GUEST_CLAIM_CAPABILITY_DOMAIN = "samurai-sushi:guest-claim-capability:v1\n";
+const PLAYER_SESSION_DOMAIN = "samurai-sushi:player-session:v1\n";
 const KEY_IDENTITY_PATTERN = /^sha256:[0-9a-f]{64}$/;
 
-export type HmacKeyPurpose = "resume" | "tombstone" | "portable-integrity";
+export type HmacKeyPurpose =
+  | "resume"
+  | "tombstone"
+  | "portable-integrity"
+  | "guest-claim"
+  | "player-session";
 export type KeyIdentity = `sha256:${string}`;
 
 export interface VersionedHmacKey {
@@ -34,7 +41,17 @@ export interface VersionedDigest {
   readonly digest: Uint8Array;
 }
 
-export type TombstoneKind = "guest-session" | "command" | "save-export" | "save-import";
+export type TombstoneKind =
+  | "guest-session"
+  | "command"
+  | "save-export"
+  | "save-import"
+  | "guest-claim"
+  | "claim-challenge"
+  | "claim-id"
+  | "claim-idempotency"
+  | "player-session"
+  | "wallet-credential";
 
 interface PrivateKeyRecord {
   readonly metadata: HmacKeyMetadata;
@@ -111,6 +128,8 @@ function buildKeyMap(
   }
   const map = new Map(records.map((record) => [record.metadata.version, record]));
   if (map.size !== records.length) throw new Error("HMAC key versions must be unique.");
+  const identities = new Set(records.map((record) => record.metadata.keyIdentity));
+  if (identities.size !== records.length) throw new Error("HMAC key identities must be unique within a purpose.");
   return { active: preparedActive, records: map };
 }
 
@@ -203,6 +222,19 @@ export class TombstoneKeyring {
       .map((record) => this.digest(kind, replayKey, now, record.metadata.version));
   }
 
+  replayCandidates(kind: TombstoneKind, replayKey: string, now: Date): readonly VersionedDigest[] {
+    if (replayKey.length < 16) throw new Error("Replay keys must contain at least 16 characters of opaque material.");
+    return [...this.#records.values()]
+      .filter((record) => withinVerificationHorizon(record, now))
+      .map((record) => ({
+        keyVersion: record.metadata.version,
+        keyIdentity: record.metadata.keyIdentity,
+        digest: createHmac("sha256", record.bytes)
+          .update(`samurai-sushi:deletion-tombstone:v1\n${kind}:${replayKey}`, "utf8")
+          .digest(),
+      }));
+  }
+
   metadata(version: number): HmacKeyMetadata | undefined {
     return this.#records.get(version)?.metadata;
   }
@@ -285,6 +317,82 @@ export class IntegrityKeyring {
   }
 }
 
+abstract class PurposeSeparatedCapabilityKeyring {
+  readonly active: HmacKeyMetadata;
+  readonly #activeRecord: PrivateKeyRecord;
+  readonly #records: ReadonlyMap<number, PrivateKeyRecord>;
+
+  protected constructor(
+    active: VersionedHmacKey,
+    verificationOnly: readonly VersionedHmacKey[],
+    purpose: "guest-claim" | "player-session",
+    private readonly digestDomain: string,
+  ) {
+    const prepared = buildKeyMap(active, verificationOnly, purpose);
+    this.#activeRecord = prepared.active;
+    this.#records = prepared.records;
+    this.active = prepared.active.metadata;
+  }
+
+  digest(secret: string, now: Date, keyVersion = this.active.version): VersionedDigest {
+    const bytes = decodeCapabilitySecret(secret);
+    const record = this.#records.get(keyVersion);
+    if (!record || !usable(record, now)) throw new KeyLifecycleError("KEY_VERSION_UNAVAILABLE", keyVersion);
+    return this.#digest(record, bytes);
+  }
+
+  candidates(secret: string, now: Date): readonly VersionedDigest[] {
+    const bytes = decodeCapabilitySecret(secret);
+    return [...this.#records.values()]
+      .filter((record) => usable(record, now))
+      .map((record) => this.#digest(record, bytes));
+  }
+
+  tombstoneCandidates(secret: string, now: Date): readonly VersionedDigest[] {
+    const bytes = decodeCapabilitySecret(secret);
+    return [...this.#records.values()]
+      .filter((record) => withinVerificationHorizon(record, now))
+      .map((record) => this.#digest(record, bytes));
+  }
+
+  metadata(version: number): HmacKeyMetadata | undefined {
+    return this.#records.get(version)?.metadata;
+  }
+
+  allMetadata(): readonly HmacKeyMetadata[] {
+    return [...this.#records.values()].map((record) => record.metadata);
+  }
+
+  canVerify(version: number, now: Date): boolean {
+    const record = this.#records.get(version);
+    return Boolean(record && usable(record, now));
+  }
+
+  assertActive(now: Date): void {
+    if (!usable(this.#activeRecord, now)) throw new KeyLifecycleError("ACTIVE_KEY_UNAVAILABLE", this.active.version);
+  }
+
+  #digest(record: PrivateKeyRecord, bytes: Uint8Array): VersionedDigest {
+    return {
+      keyVersion: record.metadata.version,
+      keyIdentity: record.metadata.keyIdentity,
+      digest: createHmac("sha256", record.bytes).update(this.digestDomain, "utf8").update(bytes).digest(),
+    };
+  }
+}
+
+export class GuestClaimKeyring extends PurposeSeparatedCapabilityKeyring {
+  constructor(active: VersionedHmacKey, verificationOnly: readonly VersionedHmacKey[] = []) {
+    super(active, verificationOnly, "guest-claim", GUEST_CLAIM_CAPABILITY_DOMAIN);
+  }
+}
+
+export class PlayerSessionKeyring extends PurposeSeparatedCapabilityKeyring {
+  constructor(active: VersionedHmacKey, verificationOnly: readonly VersionedHmacKey[] = []) {
+    super(active, verificationOnly, "player-session", PLAYER_SESSION_DOMAIN);
+  }
+}
+
 export function keyIdentityBytes(identity: KeyIdentity): Uint8Array {
   if (!KEY_IDENTITY_PATTERN.test(identity)) throw new Error("Invalid key identity.");
   return Buffer.from(identity.slice("sha256:".length), "hex");
@@ -297,6 +405,19 @@ export function keyIdentityFromBytes(value: Uint8Array): KeyIdentity {
 
 export function issueResumeSecret(): string {
   return randomBytes(SECRET_BYTES).toString("base64url");
+}
+
+export function issueCapabilitySecret(): string {
+  return randomBytes(SECRET_BYTES).toString("base64url");
+}
+
+export function decodeCapabilitySecret(secret: string): Uint8Array {
+  if (!/^[A-Za-z0-9_-]{43}$/.test(secret)) throw new CapabilitySecretFormatError();
+  const decoded = Buffer.from(secret, "base64url");
+  if (decoded.byteLength !== SECRET_BYTES || decoded.toString("base64url") !== secret) {
+    throw new CapabilitySecretFormatError();
+  }
+  return decoded;
 }
 
 export function decodeResumeSecret(secret: string): Uint8Array {
@@ -325,5 +446,12 @@ export class GuestSecretFormatError extends Error {
   constructor() {
     super("Guest resume secrets must be canonical 256-bit base64url values.");
     this.name = "GuestSecretFormatError";
+  }
+}
+
+export class CapabilitySecretFormatError extends Error {
+  constructor() {
+    super("Capability secrets must be canonical 256-bit base64url values.");
+    this.name = "CapabilitySecretFormatError";
   }
 }

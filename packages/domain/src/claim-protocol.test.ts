@@ -4,15 +4,25 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   canonicalClaimChallengeBytes,
   canonicalClaimIntentBytes,
+  canonicalClaimSessionRecoveryIntentBytes,
+  canonicalPlayerDeletionIntentBytes,
   claimChallengeHashPreimage,
   claimIntentHashPreimage,
+  claimSessionRecoveryIntentHashPreimage,
   ClaimProtocolError,
   hashClaimChallenge,
   hashClaimIntent,
+  hashClaimSessionRecoveryIntent,
+  hashPlayerDeletionIntent,
   parseCanonicalClaimChallengeBytes,
   parseCanonicalClaimIntentBytes,
+  parseCanonicalClaimSessionRecoveryIntentBytes,
+  parseCanonicalPlayerDeletionIntentBytes,
   parseClaimChallenge,
   parseClaimIntent,
+  parseClaimSessionRecoveryIntent,
+  parsePlayerDeletionIntent,
+  playerDeletionIntentHashPreimage,
   walletSigningBytes,
   walletSigningHex,
 } from "./claim-protocol";
@@ -71,6 +81,60 @@ describe("account claim protocol", () => {
     expect(signingBytes.subarray(6)).toEqual(encoder.encode(fixture.challengeCanonicalJson));
     expect(() => parseClaimIntent({ ...fixture.intent, claimIntentHash: fixture.intentHash })).toThrow(ClaimProtocolError);
     expect(() => parseClaimChallenge({ ...fixture.challenge, challengeHash: fixture.challengeHash })).toThrow(ClaimProtocolError);
+  });
+
+  it("binds lost-response recovery to an exact signed issuance under a separate domain", async () => {
+    const recoveryIntent = {
+      recoverClaimId: "123e4567-e89b-42d3-a456-426614174000",
+      idempotencyKey: "323e4567-e89b-42d3-a456-426614174000",
+    };
+    const canonical = '{"idempotencyKey":"323e4567-e89b-42d3-a456-426614174000","recoverClaimId":"123e4567-e89b-42d3-a456-426614174000"}';
+    expect(decoder.decode(canonicalClaimSessionRecoveryIntentBytes(recoveryIntent))).toBe(canonical);
+    expect(decoder.decode(claimSessionRecoveryIntentHashPreimage(recoveryIntent))).toBe(
+      `samurai-sushi:claim-session-recovery-intent:v1\n${canonical}`,
+    );
+    expect(await hashClaimSessionRecoveryIntent(recoveryIntent)).toBe(
+      "sha256:6902b7b7348f93637eaefa6099caec0d1551aeba9b6557eafc23b39640f25634",
+    );
+    expect(await hashClaimSessionRecoveryIntent(recoveryIntent)).not.toBe(await hashClaimIntent(fixture.intent));
+    expect(parseCanonicalClaimSessionRecoveryIntentBytes(encoder.encode(canonical))).toEqual(
+      parseClaimSessionRecoveryIntent(recoveryIntent),
+    );
+    for (const hostile of [
+      { ...recoveryIntent, recoverClaimId: "223e4567-e89b-42d3-a456-426614174000" },
+      { ...recoveryIntent, idempotencyKey: "423e4567-e89b-42d3-a456-426614174000" },
+      { ...recoveryIntent, targetPlayerId: "attacker-secret" },
+    ]) {
+      if ("targetPlayerId" in hostile) expectInvalid(hostile, parseClaimSessionRecoveryIntent);
+      else expect(await hashClaimSessionRecoveryIntent(hostile)).not.toBe(await hashClaimSessionRecoveryIntent(recoveryIntent));
+    }
+  });
+
+  it("binds destructive player deletion under an independent signed operation domain", async () => {
+    const deletionIntent = {
+      deleteClaimId: "123e4567-e89b-42d3-a456-426614174000",
+      idempotencyKey: "323e4567-e89b-42d3-a456-426614174000",
+    };
+    const canonical = '{"deleteClaimId":"123e4567-e89b-42d3-a456-426614174000","idempotencyKey":"323e4567-e89b-42d3-a456-426614174000"}';
+    expect(decoder.decode(canonicalPlayerDeletionIntentBytes(deletionIntent))).toBe(canonical);
+    expect(decoder.decode(playerDeletionIntentHashPreimage(deletionIntent))).toBe(
+      `samurai-sushi:player-deletion-intent:v1\n${canonical}`,
+    );
+    expect(await hashPlayerDeletionIntent(deletionIntent)).toBe(
+      "sha256:7a6869f9743327134e0cab78f382ad17a3f0bb82dc4c7146161e21594e77506a",
+    );
+    const recoveryIntent = {
+      recoverClaimId: deletionIntent.deleteClaimId,
+      idempotencyKey: deletionIntent.idempotencyKey,
+    };
+    expect(await hashPlayerDeletionIntent(deletionIntent)).not.toBe(
+      await hashClaimSessionRecoveryIntent(recoveryIntent),
+    );
+    expect(parseCanonicalPlayerDeletionIntentBytes(encoder.encode(canonical))).toEqual(
+      parsePlayerDeletionIntent(deletionIntent),
+    );
+    expectInvalid(recoveryIntent, parsePlayerDeletionIntent);
+    expectInvalid(deletionIntent, parseClaimSessionRecoveryIntent);
   });
 
   it("binds every future intent mutation and every challenge context field", async () => {

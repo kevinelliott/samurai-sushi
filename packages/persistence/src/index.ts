@@ -1,3 +1,4 @@
+export * from "./account-claim";
 export * from "./command-executor";
 export * from "./crypto";
 export * from "./database";

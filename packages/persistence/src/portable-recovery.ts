@@ -1060,7 +1060,7 @@ export class PortableRecoveryService {
     id: string,
     now: Date,
   ): Promise<void> {
-    for (const candidate of this.persistence.tombstoneKeys.candidates(kind, replayKey(kind, id), now)) {
+    for (const candidate of this.persistence.tombstoneKeys.replayCandidates(kind, replayKey(kind, id), now)) {
       const found = await client.query<{ readonly found: number }>(
         `SELECT 1 AS found
            FROM samurai_persistence.deletion_tombstones
