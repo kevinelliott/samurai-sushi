@@ -1,4 +1,4 @@
-import { contentHashFor } from "./hash";
+import { contentHashFor, contentManifestHashFor } from "./hash";
 import { ContentValidationError, sortedIssues, type ContentIssue, type ContentIssueCode } from "./errors";
 import {
   type Allergen,
@@ -24,6 +24,10 @@ const RUNTIME_TZDB_VERSION = process.versions.tz;
 
 type IndexedKind = Exclude<ContentKind, "pack">;
 type EntityIndex = Map<string, VersionedEntity>;
+
+export interface CompileContentOptions {
+  readonly mode?: "activation" | "historical";
+}
 
 function refKey(ref: VersionedRef): string {
   return `${ref.id}@${ref.version}`;
@@ -96,12 +100,12 @@ function validateReview(reviewId: string, references: ReadonlySet<string>, path:
 }
 
 function deriveFacts(components: readonly PreparedComponent[]): DishFacts {
-  return {
+  return deepFreeze({
     containsAllergens: sortedUnique(components.flatMap((component) => component.containsAllergens)) as readonly Allergen[],
     mayContainAllergens: sortedUnique(components.flatMap((component) => component.mayContainAllergens)) as readonly Allergen[],
     crossContactTags: sortedUnique(components.flatMap((component) => component.crossContactTags)),
     rawProfile: components.some((component) => component.rawNotice === "required") ? "notice-required" : "none",
-  };
+  });
 }
 
 function componentSignature(role: string, ref: VersionedRef): string {
@@ -155,7 +159,7 @@ function readonlyMap<K, V>(source: ReadonlyMap<K, V>): ReadonlyMap<K, V> {
   return Object.freeze(view);
 }
 
-export function compileContentPack(input: unknown): CompiledContentPack {
+export function compileContentPack(input: unknown, options: CompileContentOptions = {}): CompiledContentPack {
   const cloned = structuredClone(input) as unknown;
   const bundle = decodeContentBundle(cloned);
   const issues: ContentIssue[] = [];
@@ -286,6 +290,9 @@ export function compileContentPack(input: unknown): CompiledContentPack {
       [dish.crossContactTags, "crossContactTags"],
       [dish.dietaryTags, "dietaryTags"],
     ] as const) assertCanonicalSet(values, `${path}.${name}`, issues);
+    if (dish.dietaryTags.length > 0) {
+      addIssue(issues, "RECIPE_INVALID", `${path}.dietaryTags`, "Schema v1 rejects dietary claims until exact derivation is modeled.");
+    }
     if (!sameStrings(dish.containsAllergens, facts.containsAllergens) ||
         !sameStrings(dish.mayContainAllergens, facts.mayContainAllergens) ||
         !sameStrings(dish.crossContactTags, facts.crossContactTags)) {
@@ -301,12 +308,18 @@ export function compileContentPack(input: unknown): CompiledContentPack {
     }
     const ingredients = components.map((component) => indexes.ingredient.get(refKey(component.ingredientRef)) as IngredientDefinition | undefined);
     const hasRice = ingredients.some((ingredient) => ingredient?.roles.includes("sushi-rice"));
-    const noriSlots = dish.componentSlots.filter((slot, slotIndex) => ingredients[slotIndex]?.roles.includes("nori"));
+    const noriSlots = dish.componentSlots.filter((_slot, slotIndex) => ingredients[slotIndex]?.roles.includes("nori"));
     if (family.form === "sashimi" && hasRice) {
       addIssue(issues, "FAMILY_GRAMMAR_VIOLATION", `${path}.componentSlots`, "Sashimi must not contain a sushi-rice component.");
     }
-    if (family.noriPlacement === "none" ? noriSlots.length > 0 : !noriSlots.some((slot) => slot.role === "wrapper")) {
-      addIssue(issues, "FAMILY_GRAMMAR_VIOLATION", `${path}.componentSlots`, "Nori presence and wrapper role must match the family placement policy.");
+    const invalidNoriSlot = dish.componentSlots.some((slot, slotIndex) => {
+      const isNori = ingredients[slotIndex]?.roles.includes("nori") ?? false;
+      if (!isNori) return slot.noriPlacement !== undefined;
+      return slot.role !== "wrapper" || family.noriPlacement === "none" || slot.noriPlacement !== family.noriPlacement;
+    });
+    const noriCountInvalid = family.noriPlacement === "none" ? noriSlots.length !== 0 : noriSlots.length !== 1;
+    if (invalidNoriSlot || noriCountInvalid) {
+      addIssue(issues, "FAMILY_GRAMMAR_VIOLATION", `${path}.componentSlots`, "Nori slots must pin the family placement exactly and use the wrapper role.");
     }
     if (["gunkan", "hosomaki", "futomaki", "uramaki", "temaki"].includes(family.form) && !roles.includes("filling")) {
       addIssue(issues, "FAMILY_GRAMMAR_VIOLATION", `${path}.componentSlots`, "Gunkan and roll families require an exact filling role.");
@@ -324,6 +337,10 @@ export function compileContentPack(input: unknown): CompiledContentPack {
     if (dish) {
       const dishSignature = dish.componentSlots.map((slot) => componentSignature(slot.role, slot.componentRef)).sort(compare);
       if (!sameStrings(recipeSignature, dishSignature)) addIssue(issues, "DISH_COMPONENT_MISMATCH", `${path}.exactComponentAmounts`, "Recipe inputs must exactly match the pinned dish component slots.");
+    }
+    const result = resolve<DishDefinition>(indexes.dish, recipe.deterministicResult, `${path}.deterministicResult`, "dish", issues);
+    if (result && dish && refKey(result) !== refKey(dish)) {
+      addIssue(issues, "RECIPE_INVALID", `${path}.deterministicResult`, "Recipe result must resolve to its exact pinned dish.");
     }
     if (recipe.stationSequence.length === 0) addIssue(issues, "RECIPE_INVALID", `${path}.stationSequence`, "Playable recipes require at least one station step.");
     recipe.exactComponentAmounts.forEach((amount, amountIndex) => {
@@ -398,8 +415,10 @@ export function compileContentPack(input: unknown): CompiledContentPack {
     } catch {
       addIssue(issues, "SEASONALITY_UNRESOLVED", `${path}.ianaTimeZone`, "Unknown IANA time zone.");
     }
-    if (!RUNTIME_TZDB_VERSION || rule.tzdbVersion !== RUNTIME_TZDB_VERSION) {
+    if (options.mode !== "historical" && (!RUNTIME_TZDB_VERSION || rule.tzdbVersion !== RUNTIME_TZDB_VERSION)) {
       addIssue(issues, "SEASONALITY_UNRESOLVED", `${path}.tzdbVersion`, `tzdbVersion must match the compiler runtime${RUNTIME_TZDB_VERSION ? ` (${RUNTIME_TZDB_VERSION})` : ""}.`);
+    } else if (!/^\d{4}[a-z]$/.test(rule.tzdbVersion)) {
+      addIssue(issues, "SEASONALITY_UNRESOLVED", `${path}.tzdbVersion`, "Historical tzdbVersion must remain pinned as YYYYx.");
     }
     if (strictDateOrdinal(rule.reviewedAt) === undefined) addIssue(issues, "SEASONALITY_UNRESOLVED", `${path}.reviewedAt`, "reviewedAt must be a real ISO local date.");
     let previousStart: number | undefined;
@@ -439,10 +458,13 @@ export function compileContentPack(input: unknown): CompiledContentPack {
     assertCanonicalSet(actual, `$.pack.${name}`, issues);
     if (!sameStrings(actual, expected)) addIssue(issues, "PACK_MEMBERSHIP_MISMATCH", `$.pack.${name}`, "Pack membership must exactly and atomically enumerate the supplied definitions.");
   }
-  assertCanonicalSet(bundle.pack.artAssetDigests, "$.pack.artAssetDigests", issues);
-  const expectedArtDigests = bundle.artAssets.map((asset) => asset.digest).sort(compare);
-  if (!sameStrings(bundle.pack.artAssetDigests, expectedArtDigests)) {
-    addIssue(issues, "PACK_MEMBERSHIP_MISMATCH", "$.pack.artAssetDigests", "Pack membership must pin every immutable art digest exactly once.");
+  const artKeys = bundle.artAssets.map((asset) => asset.key);
+  assertCanonicalSet(artKeys, "$.artAssets", issues);
+  if (bundle.pack.artAssetMapHash !== contentHashFor(bundle.artAssets)) {
+    addIssue(issues, "PACK_MEMBERSHIP_MISMATCH", "$.pack.artAssetMapHash", "Pack must hash-bind the exact art key, digest, and non-color identity mapping.");
+  }
+  if (bundle.pack.contentManifestHash !== contentManifestHashFor(bundle)) {
+    addIssue(issues, "PACK_MEMBERSHIP_MISMATCH", "$.pack.contentManifestHash", "Pack must hash-bind every versioned row and content hash.");
   }
 
   if (issues.length > 0) throw new ContentValidationError(sortedIssues(issues));

@@ -1,4 +1,4 @@
-import { contentHashFor } from "../hash";
+import { contentHashFor, contentManifestHashFor } from "../hash";
 import {
   CONTENT_SCHEMA_VERSION,
   type ContentBundle,
@@ -121,9 +121,9 @@ const salmonSashimiRecipe = hashed<RecipeVersion>({
     { station: "prep-sashimi-board", action: "arrange" },
     { station: "prep-sashimi-board", action: "plate" },
   ],
-  deterministicResult: "atlantic-salmon-sashimi@1",
+  deterministicResult: { id: salmonSashimi.id, version: salmonSashimi.version },
   unlockRule: "first-service-settled",
-  recovery: "retry-with-corrective-cue-or-staff-meal",
+  recovery: "retry-with-corrective-cue",
   seasonalityRuleRefs: [],
   status: "draft",
   reviewId,
@@ -160,7 +160,18 @@ const pack = hashed<ContentPack>({
   recipeRefs: [{ id: salmonSashimiRecipe.id, version: salmonSashimiRecipe.version }],
   variantRefs: [],
   seasonalityRuleRefs: [],
-  artAssetDigests: artAssets.map((asset) => asset.digest).sort(),
+  contentManifestHash: contentManifestHashFor({
+    species: [salmon],
+    ingredients: [salmonFlesh],
+    cutStyles: [sashimiSlice],
+    components: [rawSalmonSlice],
+    families: [sashimiFamily],
+    dishes: [salmonSashimi],
+    recipes: [salmonSashimiRecipe],
+    variants: [],
+    seasonalityRules: [],
+  }),
+  artAssetMapHash: contentHashFor(artAssets),
   archivePolicy: "append-only",
   reviewerSignoffs: [reviewId],
   reviewId,

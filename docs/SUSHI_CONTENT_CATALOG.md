@@ -161,13 +161,16 @@ DishFamily {
   noriPlacement, namingRules, platingRules, reviewId
 }
 DishDefinition {
-  id, version, contentHash, familyRef, names, componentSlots,
+  id, version, contentHash, familyRef, names, glossary,
+  componentSlots:{role,componentRef,noriPlacement?},
   containsAllergens, mayContainAllergens, crossContactTags, rawProfile,
   dietaryTags, presentationRules, nonColorIdentity, artKey, reviewId
 }
 RecipeVersion {
   id, version, dishRef, exactComponentAmounts:{componentRef,quantity,unit,role},
-  stationSequence, deterministicResult, unlockRule, recovery,
+  stationSequence, deterministicResult:VersionedRef,
+  unlockRule: available-at-start|first-service-settled,
+  recovery: retry-with-corrective-cue|staff-meal|return-components,
   seasonalityRuleRefs, contentHash, reviewId, status
 }
 RecipeVariant {
@@ -196,8 +199,8 @@ AssetBinding {
 ContentPack {
   id, version, contentHash, reviewId, schemaVersion, speciesRefs,
   ingredientRefs, cutStyleRefs, componentRefs, familyRefs, dishRefs,
-  recipeRefs, variantRefs, seasonalityRuleRefs, artAssetDigests, archivePolicy,
-  reviewerSignoffs
+  recipeRefs, variantRefs, seasonalityRuleRefs, contentManifestHash,
+  artAssetMapHash, archivePolicy, reviewerSignoffs
 }
 ```
 
@@ -205,9 +208,10 @@ Commercial/display names are labels, not identity. Species, culinary product,
 prepared component, dish, recipe, provenance claim, and asset binding remain
 distinct, versioned, and append-only once published. Every transitive reference
 is `{id, version}`; editing content creates a new version and hash rather than
-reinterpreting historical orders. Art keys resolve to immutable content digests
-pinned by the row and content-pack hashes. Game-content identity also does not
-authorize an onchain asset:
+reinterpreting historical orders. `contentManifestHash` binds every supplied
+row key to its exact row hash, and `artAssetMapHash` binds every art key to its
+digest and non-color identity. Game-content identity also does not authorize an
+onchain asset:
 foreign compatibility still requires the
 full chain/contract/token registry defined in
 [`ECONOMY_AND_INTEROPERABILITY.md`](ECONOMY_AND_INTEROPERABILITY.md).
@@ -215,7 +219,8 @@ full chain/contract/token registry defined in
 ## 7. Validation invariants
 
 1. Sashimi recipes contain no sushi-rice component.
-2. Gunkan and roll subtypes declare nori placement and exact filling roles.
+2. Gunkan and roll subtypes declare nori placement on the family and the exact
+   nori wrapper slot; the two placements must agree.
 3. Every aquatic ingredient references exactly one reviewed species; every roe
    ingredient declares `productKind = roe` and its source species.
 4. Every recipe input references a `PreparedComponent`, never a species,
@@ -232,20 +237,27 @@ full chain/contract/token registry defined in
    variants, never automatic fuzzy matches.
 9. Variant expansion is finite, acyclic, duplicate-free, and points to a
    concrete resulting dish; runtime wildcards such as “any fish” are invalid.
-10. Every playable dish has a glossary, station sequence, deterministic result,
-   recovery outcome, non-color visual identity, and required reviewer signoff.
+10. Every playable dish has a glossary, station sequence, exact pinned dish
+    result, closed unlock and recovery outcomes, non-color visual identity, and
+    required reviewer signoff. Schema v1 rejects non-empty dietary claims until
+    they can be derived rather than asserted.
 11. Every sprite depicts the actual component roles; garnish cannot imply an
    ingredient absent from the recipe.
 12. Every recipe and order pins all transitive `{id, version}` references.
    Updating a component cannot change historical allergens, raw notice,
    recovery, art, or content hash.
-13. Content-pack activation is atomic and version-pinned; broken references,
-   duplicate IDs, missing art, or missing review reject the whole pack.
+13. Content-pack activation is atomic and version-pinned; the content manifest
+   binds every row to its hash and the art map binds key, digest, and non-color
+   identity. Broken references, duplicate IDs, missing art, or missing review
+   reject the whole pack.
 14. Seasonality uses ISO-8601 local dates in a pinned IANA zone/tzdb version and
    half-open `[start, end)` windows. The service pins its derived local date at
    open. Exact subject-version and region rules only; no match means valid
-   `unspecified`. Invalid windows, unknown zones, or overlapping contradictory
-   availability produce `SEASONALITY_UNRESOLVED` and reject the pack.
+   `unspecified`. Activation also requires the pinned tzdb version to match the
+   compiler runtime. Historical replay validates the archived `YYYYx` pin but
+   does not re-activate it against a newer host tzdb. Invalid windows, unknown
+   zones, or overlapping contradictory availability produce
+   `SEASONALITY_UNRESOLVED` and reject the pack.
 15. Only the manifest-verified `AssetBinding` registry can authorize
    recognition, escrow, or consumption. A projection disagreement fails closed.
 16. No content term, species name, or culinary equivalence authorizes foreign

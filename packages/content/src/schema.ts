@@ -118,7 +118,8 @@ const PACK_KEYS = [
   "recipeRefs",
   "variantRefs",
   "seasonalityRuleRefs",
-  "artAssetDigests",
+  "contentManifestHash",
+  "artAssetMapHash",
   "archivePolicy",
   "reviewerSignoffs",
 ] as const;
@@ -291,9 +292,10 @@ function decodeRows(bundle: UnknownRecord, key: keyof typeof ROW_KEYS, issues: C
           const slotPath = `${path}.componentSlots[${slotIndex}]`;
           const slotRecord = record(slot, slotPath, issues);
           if (!slotRecord) return;
-          exactKeys(slotRecord, ["role", "componentRef"], ["role", "componentRef"], slotPath, issues);
+          exactKeys(slotRecord, ["role", "componentRef", "noriPlacement"], ["role", "componentRef"], slotPath, issues);
           enumValue(slotRecord.role, ["binding", "filling", "garnish", "rice", "topping", "wrapper"], `${slotPath}.role`, issues);
           ref(slotRecord.componentRef, `${slotPath}.componentRef`, issues);
+          if (slotRecord.noriPlacement !== undefined) enumValue(slotRecord.noriPlacement, ["outer-wrapper", "inner-layer", "rice-wrapper"], `${slotPath}.noriPlacement`, issues);
         });
         enumArray(item.containsAllergens, ["egg", "fish", "mollusk", "crustacean", "sesame", "soy", "wheat-gluten"], `${path}.containsAllergens`, issues);
         enumArray(item.mayContainAllergens, ["egg", "fish", "mollusk", "crustacean", "sesame", "soy", "wheat-gluten"], `${path}.mayContainAllergens`, issues);
@@ -318,9 +320,9 @@ function decodeRows(bundle: UnknownRecord, key: keyof typeof ROW_KEYS, issues: C
           enumValue(amountRecord.role, ["binding", "filling", "garnish", "rice", "topping", "wrapper"], `${amountPath}.role`, issues);
         });
         stationSteps(item.stationSequence, `${path}.stationSequence`, issues);
-        nonEmptyString(item.deterministicResult, `${path}.deterministicResult`, issues);
-        nonEmptyString(item.unlockRule, `${path}.unlockRule`, issues);
-        nonEmptyString(item.recovery, `${path}.recovery`, issues);
+        ref(item.deterministicResult, `${path}.deterministicResult`, issues);
+        enumValue(item.unlockRule, ["available-at-start", "first-service-settled"], `${path}.unlockRule`, issues);
+        enumValue(item.recovery, ["retry-with-corrective-cue", "staff-meal", "return-components"], `${path}.recovery`, issues);
         refArray(item.seasonalityRuleRefs, `${path}.seasonalityRuleRefs`, issues);
         enumValue(item.status, ["draft", "published", "retired"], `${path}.status`, issues);
         break;
@@ -379,7 +381,8 @@ export function decodeContentBundle(input: unknown): ContentBundle {
     for (const key of ["speciesRefs", "ingredientRefs", "cutStyleRefs", "componentRefs", "familyRefs", "dishRefs", "recipeRefs", "variantRefs", "seasonalityRuleRefs"] as const) {
       refArray(pack[key], `$.pack.${key}`, issues);
     }
-    stringArray(pack.artAssetDigests, "$.pack.artAssetDigests", issues);
+    nonEmptyString(pack.contentManifestHash, "$.pack.contentManifestHash", issues);
+    nonEmptyString(pack.artAssetMapHash, "$.pack.artAssetMapHash", issues);
     enumValue(pack.archivePolicy, ["append-only"], "$.pack.archivePolicy", issues);
     stringArray(pack.reviewerSignoffs, "$.pack.reviewerSignoffs", issues, false);
   }

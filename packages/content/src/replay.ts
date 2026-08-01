@@ -14,7 +14,7 @@ function required<T extends VersionedEntity>(rows: readonly T[], ref: VersionedR
 }
 
 export function recipeSnapshot(input: unknown, recipeRef: VersionedRef): string {
-  const bundle = compileContentPack(input).bundle;
+  const bundle = compileContentPack(input, { mode: "historical" }).bundle;
   const recipe = required(bundle.recipes, recipeRef, "$.recipeRef");
   const dish = required(bundle.dishes, recipe.dishRef, "$.recipe.dishRef");
   const art = new Map(bundle.artAssets.map((asset) => [asset.key, asset]));

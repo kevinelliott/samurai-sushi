@@ -78,10 +78,12 @@ pnpm validate
 
 `@samurai-sushi/content` is the pure Phase 0 content boundary. It decodes exact
 schema-v1 bundles, verifies domain-separated hashes and atomic pack membership,
-derives allergen/raw facts, rejects wildcard variants and family violations,
-evaluates pinned regional seasonality, and emits byte-stable historical recipe
-snapshots. Its salmon-sashimi bundle is development fixture data with synthetic
-review references; it is not production culinary or cultural approval.
+binds the exact row manifest and art map, derives immutable allergen/raw facts,
+rejects wildcard variants and family violations, evaluates pinned regional
+seasonality at activation, and emits byte-stable historical recipe snapshots
+without making archived playback depend on the host's newer tzdb. Its
+salmon-sashimi bundle is development fixture data with synthetic review
+references; it is not production culinary or cultural approval.
 
 Ordinary `dev`, `build`, `start`, and `test:integration` commands first verify
 the exact shared runtime revision in `.tezos-runtime.json`, require its worktree
