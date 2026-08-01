@@ -94,9 +94,11 @@ and service under pressure—not combat, costume, faux-feudal ranks, or weaponry
   product, design, gameplay, economy, security, engineering, formal
   specification, and skeptical scope.
 
-A Phase 0 walletless counter shell and fail-closed network policy now exist. No
-complete service implementation, art library, production contract, deployment,
-audit, user research, commercial proof, or cultural signoff exists yet.
+A Phase 0 walletless counter shell, fail-closed network policy, and versioned
+content compiler now exist. The compiler's salmon-sashimi data is synthetic
+fixture evidence, not culinary or cultural approval. No complete service
+implementation, art library, production contract, deployment, audit, user
+research, commercial proof, or cultural signoff exists yet.
 
 ## Product Principles
 

@@ -1,5 +1,5 @@
 {
-  "name": "@samurai-sushi/network",
+  "name": "@samurai-sushi/content",
   "version": "0.0.0",
   "private": true,
   "type": "module",
@@ -7,7 +7,7 @@
     ".": "./src/index.ts"
   },
   "scripts": {
-    "test": "vitest run --root ../.. packages/network/src",
+    "test": "vitest run --root ../.. packages/content/src",
     "typecheck": "tsc --noEmit"
   }
 }

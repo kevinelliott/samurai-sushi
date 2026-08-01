@@ -7,10 +7,11 @@ record a non-financial service keepsake on Tezos. Development and ordinary
 testing use the shared loopback-only Localnet; Shadownet is reserved for an
 explicit final rehearsal of the exact candidate.
 
-> **Phase 0 status:** the repository now contains a walletless counter shell and
-> a fail-closed network-environment spine. It is not the playable three-order
-> service. No deployed contract, compatible Dos Esposas asset, DER utility,
-> mainnet path, cultural approval, or public availability is claimed.
+> **Phase 0 status:** the repository now contains a walletless counter shell, a
+> fail-closed network-environment spine, and a pure versioned content compiler.
+> It is not the playable three-order service. No deployed contract, compatible
+> Dos Esposas asset, DER utility, mainnet path, cultural approval, or public
+> availability is claimed.
 
 ## Product promise
 
@@ -40,6 +41,7 @@ reskin and does not inherit Dos Esposas assets or token behavior by name.
 - [Decision register](docs/DECISIONS.md)
 - [Source and evidence notes](docs/SOURCE_NOTES.md)
 - [Application stack and network authority ADR](docs/ADR/0001_APPLICATION_STACK_AND_NETWORK_AUTHORITY.md)
+- [Versioned content compiler ADR](docs/ADR/0002_VERSIONED_CONTENT_COMPILER.md)
 
 ## MVP in one line
 
@@ -73,6 +75,13 @@ Install dependencies with Node 22+ and pnpm 10:
 pnpm install
 pnpm validate
 ```
+
+`@samurai-sushi/content` is the pure Phase 0 content boundary. It decodes exact
+schema-v1 bundles, verifies domain-separated hashes and atomic pack membership,
+derives allergen/raw facts, rejects wildcard variants and family violations,
+evaluates pinned regional seasonality, and emits byte-stable historical recipe
+snapshots. Its salmon-sashimi bundle is development fixture data with synthetic
+review references; it is not production culinary or cultural approval.
 
 Ordinary `dev`, `build`, `start`, and `test:integration` commands first verify
 the exact shared runtime revision in `.tezos-runtime.json`, require its worktree

@@ -51,19 +51,19 @@ operation, event, projection, and receipt.
 ```text
 AssetRef { chainId, contractAddress, tokenId, standard, decimals, metadataDigest }
 VersionedRef { id, version }
-SpeciesDefinition { id, version, contentHash, scientificName, localizedCommonNames, marketNames, group, culinaryReviewId }
-IngredientDefinition { id, version, contentHash, kind, speciesRef?, productKind?, names, glossary, baseContainsAllergens, baseMayContainAllergens, baseCrossContactTags, artKey, reviewId }
+SpeciesDefinition { id, version, contentHash, reviewId, scientificName, localizedCommonNames, marketNames, group }
+IngredientDefinition { id, version, contentHash, reviewId, kind, speciesRef?, productKind?, roles, names, glossary, baseContainsAllergens, baseMayContainAllergens, baseCrossContactTags, artKey }
 CutStyle { id, version, contentHash, names, glossary, compatibleProductKinds, presentationClass, reviewId }
 PreparedComponent { id, version, contentHash, ingredientRef, cutStyleRef?, treatment, rawNotice, containsAllergens, mayContainAllergens, crossContactTags, stationSteps, artKey, reviewId }
-DishFamily { id, version, contentHash, structuralSlots, forbiddenSlots, namingRules, platingRules, reviewId }
-DishDefinition { id, version, contentHash, familyRef, names, componentSlots, rawProfile, containsAllergens, mayContainAllergens, crossContactTags, dietaryTags, presentationRules, artKey, reviewId }
-ComponentAmount { componentRef:VersionedRef, quantity, role }
-RecipeVariant { id, version, contentHash, baseRecipeRef, substitutions, resultingDishRef, reviewIds, status }
+DishFamily { id, version, contentHash, reviewId, form, requiredRoles, allowedRoles, noriPlacement, namingRules, platingRules }
+DishDefinition { id, version, contentHash, reviewId, familyRef, names, glossary, componentSlots, rawProfile, containsAllergens, mayContainAllergens, crossContactTags, dietaryTags, presentationRules, nonColorIdentity, artKey }
+ComponentAmount { componentRef:VersionedRef, quantity, unit:portion, role }
+RecipeVariant { id, version, contentHash, reviewId, baseRecipeRef, substitutions, resultingDishRef, reason, reviewIds, status }
 SeasonWindow { startLocalDateInclusive, endLocalDateExclusive, availability }
-SeasonalityRule { id, version, contentHash, subjectRef, regionId, ianaTimeZone, calendar, tzdbVersion, windows:[SeasonWindow], sourceRef, reviewedAt }
+SeasonalityRule { id, version, contentHash, reviewId, subjectRef:{kind,id,version}, regionId, ianaTimeZone, calendar, tzdbVersion, windows:[SeasonWindow], sourceRef, reviewedAt }
 ProvenanceProfile { id, version, contentHash, semanticSubjectRef, claimType, claimValue, evidenceRef, validFrom?, validUntil?, reviewStatus }
 AssetBinding { id, version, semanticSubjectRef, assetRef, use, policyVersion, manifestHash, reviewIds, enabled }
-ContentPack { id, version, contentHash, speciesRefs, ingredientRefs, componentRefs, dishRefs, recipeRefs, seasonalityRuleRefs, archivePolicy, reviewSignoffs }
+ContentPack { id, version, contentHash, reviewId, schemaVersion, speciesRefs, ingredientRefs, cutStyleRefs, componentRefs, familyRefs, dishRefs, recipeRefs, variantRefs, seasonalityRuleRefs, artAssetDigests, archivePolicy, reviewerSignoffs }
 GuestSession { id, resumeSecretHash, state, createdAt, lastSeenAt, expiresAt, consentVersion }
 Player { id, linkedWallets, tutorialState, createdAt }
 SubjectRef = GuestSubject { guestSessionId } | PlayerSubject { playerId }
@@ -72,7 +72,7 @@ ProgressMerge { idempotencyKey, guestId, playerId, guestRevision, playerRevision
 ServiceSession { id, subject:SubjectRef, originKind, originSubjectCommitment, contentVersion, state, openedAt, closedAt }
 OrderTicket { id, sessionId, recipeRef, dishRef, modifiers, deadline, state }
 Preparation { orderId, requiredSteps, completedSteps, mistakes, state }
-RecipeVersion { id, version, dishRef, exactComponentAmounts:[ComponentAmount], stationSequence, output, disposition, unlock, recovery, seasonalityRuleRefs, contentHash, policyHash, status }
+RecipeVersion { id, version, contentHash, reviewId, dishRef, exactComponentAmounts:[ComponentAmount], stationSequence, deterministicResult, unlockRule, recovery, seasonalityRuleRefs, status }
 CraftIntent { id, account, chainId, recipeVersion, quantity, expectedDeltas, expiry }
 ReceiptIntent { id, subject:SubjectRef, account, serviceCommitment, payloadHash, manifestHash, state, expiresAt, createdAt }
 OperationAttempt { id, intentId, chainId, hash, source, counter, state, replacesAttemptId, replacedByAttemptId, includedLevel, includedBlockHash, orphanedBlockHash, confirmations, submittedAt, includedAt, confirmedAt, finalizedAt, lastObservedAt, errorCode }
