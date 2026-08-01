@@ -174,8 +174,11 @@ record and emits `service_receipt(owner, service_commitment, content_version,
 nonce, payload_hash)`. Issuer key rotation, pause, and revocation are
 manifest-bound privileged actions. The manifest carries a typed
 `IssuerKeyPolicy` registry. The contract requires `issuedAt` to fall between the
-key's activation and retirement, `expiry - issuedAt <= 15 minutes`, bounded
-clock skew, and verification no later than `verifyUntil`. The issuer service
+key's activation and retirement, `expiry - issuedAt <= 15 minutes`, a
+manifest-pinned `maxClockSkewSeconds = 30`, and verification before
+`verifyUntil`. Time windows are half-open: `activatesAt <= issuedAt < retiresAt`,
+`issuedAt <= now + maxClockSkewSeconds`, `issuedAt < expiry`, `now < expiry`, and
+`now < verifyUntil`. A negative or zero permit duration is invalid. The issuer service
 stops old-key issuance at retirement. During a routine overlap, the contract
 cannot prove when an old-key signature was physically produced, so it accepts
 any otherwise valid, pre-retirement-dated old-key permit until `verifyUntil`;
@@ -191,9 +194,10 @@ with zero accepted record. The local `intentId` remains part of the final
 dispatch tuple and durable correlation, but is not a public service identifier
 or a signed receipt field.
 
-Rotation tests cover an old-key permit immediately before, at, and after its
-verification cutoff; new-key activation; a payload dated after old-key retirement;
-emergency revocation of an outstanding permit; clock skew; overlong lifetime;
+Rotation tests cover immediately below, at, and above every activation,
+retirement, expiry, verification-cutoff, maximum-lifetime, and clock-skew
+boundary; negative and zero duration; new-key activation; a payload dated after
+old-key retirement; emergency revocation of an outstanding permit;
 cross-key/policy substitution; and manifest/key-registry drift. Every invalid
 case records no receipt and emits no accepted result.
 
@@ -213,11 +217,10 @@ The receipt-specific deployment manifest contains chain ID, origination
 operation, contract address, admin/issuer/pause roles, issuer key-policy
 registry, code hash, schema/entrypoints, initial empty receipt/nonce state, and
 receipt policy hash. The receipt policy pins the confirmation threshold, the
-distinct
-finality/cemented-block policy identifier, maximum permit lifetime, and issuer
-key rotation/revocation policy. FA2 ledger/supply, token metadata, recipe, and
-kitchen policy fields are not applicable. Future asset/kitchen contracts have
-separate typed manifests.
+distinct finality/cemented-block policy identifier, maximum permit lifetime,
+issuer key rotation/revocation policy, and `maxClockSkewSeconds = 30`. FA2
+ledger/supply, token metadata, recipe, and kitchen policy fields are not
+applicable. Future asset/kitchen contracts have separate typed manifests.
 
 ### Future assets/kitchen
 
