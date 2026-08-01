@@ -1856,8 +1856,8 @@ describe("PostgreSQL persistence spine", () => {
       .rejects.toMatchObject({ code: "KEY_VERSION_UNAVAILABLE" });
     await rawPool.query(
       `UPDATE samurai_persistence.guest_sessions
-          SET expires_at = clock_timestamp() - interval '1 millisecond',
-              rotate_after = clock_timestamp() - interval '1 millisecond'
+          SET expires_at = statement_timestamp() - interval '1 millisecond',
+              rotate_after = statement_timestamp() - interval '1 millisecond'
         WHERE id = $1`,
       [live.session.id],
     );
@@ -2007,8 +2007,8 @@ describe("PostgreSQL persistence spine", () => {
     await expect(cleanupService.resume(compromisedSecret)).rejects.toMatchObject({ code: "KEY_VERSION_COMPROMISED" });
     await rawPool.query(
       `UPDATE samurai_persistence.guest_sessions
-          SET expires_at = clock_timestamp() - interval '1 millisecond',
-              rotate_after = clock_timestamp() - interval '1 millisecond'
+          SET expires_at = statement_timestamp() - interval '1 millisecond',
+              rotate_after = statement_timestamp() - interval '1 millisecond'
         WHERE id = $1`,
       ["compromised-cleanup-subject"],
     );
