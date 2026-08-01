@@ -52,19 +52,22 @@ AssetRef { chainId, contractAddress, tokenId, standard, decimals, metadataDigest
 AcceptedAssetRef { semanticAssetKey, assetRef, policyVersion, enabled }
 GuestSession { id, resumeSecretHash, state, createdAt, lastSeenAt, expiresAt, consentVersion }
 Player { id, linkedWallets, tutorialState, createdAt }
+SubjectRef = GuestSubject { guestSessionId } | PlayerSubject { playerId }
 PlayerProgress { subjectType, subjectId, revision, contentVersion, services, mastery, cosmetics }
 ProgressMerge { idempotencyKey, guestId, playerId, guestRevision, playerRevision, resultDigest }
-ServiceSession { id, playerId, contentVersion, state, openedAt, closedAt }
+ServiceSession { id, subject:SubjectRef, originKind, originSubjectCommitment, contentVersion, state, openedAt, closedAt }
 OrderTicket { id, sessionId, recipeId, modifiers, deadline, state }
 Preparation { orderId, requiredSteps, completedSteps, mistakes, state }
 RecipeVersion { id, version, stations, inputs, output, disposition, policyHash }
 CraftIntent { id, account, chainId, recipeVersion, quantity, expectedDeltas, expiry }
-ChainOperation { intentId, chainId, hash, source, status, confirmations, error }
+ReceiptIntent { id, subject:SubjectRef, account, serviceCommitment, payloadHash, manifestHash, state, expiresAt, createdAt }
+OperationAttempt { id, intentId, chainId, hash, source, counter, state, replacesAttemptId, replacedByAttemptId, includedLevel, includedBlockHash, orphanedBlockHash, confirmations, submittedAt, includedAt, confirmedAt, finalizedAt, lastObservedAt, errorCode }
 InventoryProjection { account, assetRef, rawBalance, level, observedAt }
-ReceiptDeploymentManifest { chain, operation, address, roles, issuerKey, code, schema, emptyState, receiptPolicy }
+IssuerKeyPolicy { keyId, policyVersion, publicKey, status, activatesAt, retiresAt, verifyUntil }
+ReceiptDeploymentManifest { chain, operation, address, roles, issuerKeyRegistry, code, schema, emptyState, receiptPolicy }
 AssetDeploymentManifest { chain, operation, addresses, roles, code, ledger, supply, metadata, economicPolicy }
-ReceiptPayload { domain, schemaVersion, chainId, account, destination, entrypoint, mutezAmount, serviceCommitment, contentVersion, nonce, expiry, manifestHash }
-ReceiptPermit { payload, payloadHash, issuerKeyId, issuerPolicyVersion, issuerSignature }
+ReceiptPayload { domain, schemaVersion, chainId, account, destination, entrypoint, mutezAmount, serviceCommitment, contentVersion, nonce, issuedAt, expiry, manifestHash, issuerKeyId, issuerPolicyVersion }
+ReceiptPermit { payload, payloadHash, issuerSignature }
 ServiceReceipt { chainId, contract, owner, serviceCommitment, contentVersion, nonce, payloadHash, operationHash, state }
 ```
 
@@ -88,6 +91,21 @@ single-choice cosmetics require explicit player selection. Success writes a
 already claimed by another wallet, stale revision, reused challenge, duplicate
 idempotency key with different payload, or partial write fails without mutation.
 Wallet linking never automatically merges two existing player identities.
+
+Every `ServiceSession` has exactly one `SubjectRef`: an unclaimed guest session
+or a player. On a successful claim, the same transaction rewrites the guest's
+service sessions and progress to the player subject while preserving immutable
+origin provenance as `originKind = guest` plus a salted, unlinkable
+`originSubjectCommitment`; it then destroys the commitment salt. No raw guest ID
+is retained in public data or exposed as a reversible provenance link. Deleting
+an unclaimed guest deletes its private sessions and progress; after a claim,
+player deletion follows the adopted retention policy while any optional public
+receipt remains irreversible and opaque.
+
+Persistence tests cover a claim attempted by a second wallet, an expired or
+deleted guest, stale guest/player revisions, a partial subject rewrite, a
+repeated merge, merge after save export, and replay with a changed payload. Each
+failure leaves both subjects and all service ownership unchanged.
 
 ## 4. Service commands
 
@@ -118,6 +136,15 @@ Wallet linking never automatically merges two existing player identities.
 Transaction and attempt transitions, confirmation/finality policy, replacement,
 drop, and reorg compensation are normative in `DOMAIN_SPEC.md`.
 
+`ReceiptIntent.id` is the durable local correlation key and parent of one or
+more `OperationAttempt` rows. `(chainId, hash)` and `(intentId, id)` are unique.
+A replacement creates a new attempt under the same intent and links both rows;
+it never overwrites the prior hash or evidence. Inclusion and reorg processing
+records canonical and orphaned block identities and timestamps. Exactly one
+accepted canonical attempt may populate `ServiceReceipt.operationHash`; all
+other attempts remain durable history. Re-inclusion updates the same attempt
+idempotently rather than creating a new receipt or attempt.
+
 ### Canonical receipt
 
 The MVP representation is a non-transferable contract ledger record, not FA2.
@@ -127,7 +154,9 @@ player submits it from the bound wallet.
 The canonical `ReceiptPayload` fields are `domain =
 SAMURAI_SUSHI_RECEIPT_V1`, schema version, chain ID, wallet account, destination
 contract, entrypoint, attached mutez amount (zero), opaque service commitment,
-content version, one-time nonce, permit expiry, and deployment manifest hash.
+content version, one-time nonce, issuance time, permit expiry, deployment
+manifest hash, issuer key ID, and issuer policy version. Key selection and
+rotation policy are therefore signed rather than supplied out of band.
 `payloadBytes = Michelson PACK(ReceiptPayload)` and
 `payloadHash = BLAKE2b-256(payloadBytes)`. The issuer signature covers
 `payloadHash`; TypeScript and SmartPy golden fixtures MUST produce identical
@@ -140,14 +169,19 @@ not an availability promise.
 
 The contract verifies an active manifest-pinned issuer key/policy, sender/account
 binding, expiry, destination, entrypoint, zero mutez, manifest hash, and
-uniqueness of
-`(owner, serviceCommitment)` and nonce;
-then stores the minimal record and emits `service_receipt(owner,
-service_commitment, content_version, nonce, payload_hash)`. Issuer key rotation,
-pause, and revocation are manifest-bound privileged actions. Permit lifetime is
-at most 15 minutes. Routine rotation stops issuance from the old key but retains
-verification for 15 minutes; emergency revocation invalidates outstanding old-
-key permits immediately. Exactly-once means
+uniqueness of `(owner, serviceCommitment)` and nonce; then stores the minimal
+record and emits `service_receipt(owner, service_commitment, content_version,
+nonce, payload_hash)`. Issuer key rotation, pause, and revocation are
+manifest-bound privileged actions. The manifest carries a typed
+`IssuerKeyPolicy` registry. The contract requires `issuedAt` to fall between the
+key's activation and retirement, `expiry - issuedAt <= 15 minutes`, bounded
+clock skew, and verification no later than `verifyUntil`. The issuer service
+stops old-key issuance at retirement. During a routine overlap, the contract
+cannot prove when an old-key signature was physically produced, so it accepts
+any otherwise valid, pre-retirement-dated old-key permit until `verifyUntil`;
+the 15-minute maximum lifetime bounds that exposure. Suspected compromise uses
+emergency revocation, which invalidates outstanding old-key permits immediately.
+Exactly-once means
 one accepted record for the uniqueness key under duplicate wallet/API/indexer
 events.
 
@@ -157,11 +191,17 @@ with zero accepted record. The local `intentId` remains part of the final
 dispatch tuple and durable correlation, but is not a public service identifier
 or a signed receipt field.
 
+Rotation tests cover an old-key permit immediately before, at, and after its
+verification cutoff; new-key activation; a payload dated after old-key retirement;
+emergency revocation of an outstanding permit; clock skew; overlong lifetime;
+cross-key/policy substitution; and manifest/key-registry drift. Every invalid
+case records no receipt and emits no accepted result.
+
 ## 6. Contract boundaries
 
 ### MVP receipt contract
 
-- Accepts a content-addressed summary of a completed service.
+- Accepts an issuer-attested typed payload for a completed service.
 - Binds account, unlinkable service commitment, nonce, content version, and
   manifest version.
 - Enforces exactly-once issuance.
@@ -170,10 +210,14 @@ or a signed receipt field.
 - It is a non-transferable ledger record, not an FA2 token.
 
 The receipt-specific deployment manifest contains chain ID, origination
-operation, contract address, admin/issuer/pause roles, issuer verification key,
-code hash, schema/entrypoints, initial empty receipt/nonce state, and receipt
-policy hash. FA2 ledger/supply, token metadata, recipe, and kitchen policy fields
-are not applicable. Future asset/kitchen contracts have separate typed manifests.
+operation, contract address, admin/issuer/pause roles, issuer key-policy
+registry, code hash, schema/entrypoints, initial empty receipt/nonce state, and
+receipt policy hash. The receipt policy pins the confirmation threshold, the
+distinct
+finality/cemented-block policy identifier, maximum permit lifetime, and issuer
+key rotation/revocation policy. FA2 ledger/supply, token metadata, recipe, and
+kitchen policy fields are not applicable. Future asset/kitchen contracts have
+separate typed manifests.
 
 ### Future assets/kitchen
 

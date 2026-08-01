@@ -133,7 +133,8 @@ replace stable, user-safe failure codes.
 - Lifecycle tests cover included→reorged, confirmed→reorged, re-inclusion,
   dropped, replaced, replacement collision, and exactly-once projection.
 - Receipt-manifest verification reconstructs indexed origination, roles,
-  issuer key, code/schema, receipt policy, and initial empty nonce/record state.
+  issuer key-policy registry, code/schema, receipt policy, and initial empty
+  nonce/record state.
   Future FA2 manifests separately verify complete ledger/supply equality,
   metadata, and economic policy.
 - End-to-end rehearsal reloads at every state boundary without false success or
