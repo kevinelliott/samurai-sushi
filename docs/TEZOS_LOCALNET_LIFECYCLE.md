@@ -82,7 +82,7 @@ identity and manifest fresh. Reset makes all earlier addresses and manifests
 stale before Docker state changes.
 
 The application adapter is registered as integrated in shared runtime revision
-`617eb06a8a5a04b6c0b2446ac1f19764fb30de66`, but address-bearing readiness is
+`62c2abce341118a119a7eaebff2376ab8b91f01c`, but address-bearing readiness is
 intentionally false while no contract exists. Before any such command ships,
 run `node scripts/consumers.mjs ready samurai-sushi` from that exact clean
 shared-runtime checkout; it must pass against the live loopback chain.
