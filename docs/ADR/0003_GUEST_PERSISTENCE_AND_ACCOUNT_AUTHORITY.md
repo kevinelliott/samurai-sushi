@@ -153,9 +153,41 @@ a guest, but never link a wallet, overwrite newer progress, or authorize an
 onchain receipt. The implementation must publish exact crypto parameters,
 upgrade behavior, and lost-passphrase copy before export is enabled.
 
-The integrity key version is embedded in the envelope. Verification-only keys
-remain available through the maximum export horizon; retirement rejects later
-imports, and compromise revokes every unimported envelope under that key with a
+Stage 2 narrows version 1 to same-subject resume only: an import resumes the
+original active, unclaimed authoritative guest and never creates a parallel
+guest or accepts browser checkpoint state. The locked server revision must
+equal the exported revision. A newer server revision makes the file stale; a
+lower server revision is an authority rollback and fails closed. Successful
+import consumes the selected export, revokes sibling exports and every prior
+guest credential without predecessor grace, and writes non-reversible
+export/import replay tombstones. Import, guest deletion, and the later claim
+transaction use the same guest-first lock order so exactly one can commit.
+
+The version 1 browser file is canonical JSON with the exact outer fields
+`{format,formatVersion,suite,salt,nonce,ciphertext}`. Its fixed suite is
+`PBKDF2-SHA256-A256GCM-v1`: PBKDF2-HMAC-SHA-256 with 600,000 iterations and a
+fresh 16-byte salt derives a non-extractable 256-bit AES-GCM key; encryption
+uses a fresh 12-byte nonce and a 128-bit tag. The canonical header is AEAD
+additional authenticated data. The writer accepts no caller-selected crypto
+parameters. The file is capped at 360 KiB, decrypted canonical envelope bytes
+at 256 KiB, and passphrases at 256 UTF-8 bytes. Creation requires at least 12
+Unicode scalars and 16 UTF-8 bytes. Passphrases are encoded exactly as entered:
+no trimming, case folding, or Unicode normalization. Unknown fields, nonfatal
+UTF-8, noncanonical JSON, padded or non-round-tripping base64url, unknown
+suites, and out-of-bound values fail before the KDF where possible.
+
+Wrong passphrase, AEAD failure, and encrypted payload tamper share the local
+copy: “Couldn’t unlock this save. The passphrase or file may be incorrect.”
+Creation states: “This passphrase encrypts your save. Samurai Sushi cannot
+recover or reset it. Store it in your password manager. If you lose it, create
+a new export from the original device before this save expires.” The
+passphrase, plaintext envelope, ciphertext, capability IDs, commitments, and
+integrity tags are excluded from telemetry and logs.
+
+The integrity key version and identity are MAC-bound in the envelope.
+Retirement stops new exports while verification-only keys continue accepting
+pre-retirement envelopes through their recorded `verifyUntil` horizon;
+compromise immediately revokes every unimported envelope under that key with a
 clear re-export path. Export/import replay tombstones live for at least the
 maximum 29-day export validity plus one day of clock skew. Claim challenges
 expire in five minutes, so no challenge or idempotency horizon may exceed its

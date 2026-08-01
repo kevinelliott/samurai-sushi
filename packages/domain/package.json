@@ -4,7 +4,10 @@
   "private": true,
   "type": "module",
   "exports": {
-    ".": "./src/index.ts"
+    ".": "./src/index.ts",
+    "./canonical-json": "./src/canonical-json.ts",
+    "./portable-recovery": "./src/portable-recovery.ts",
+    "./portable-save-crypto": "./src/portable-save-crypto.ts"
   },
   "scripts": {
     "test": "vitest run --root ../.. packages/domain/src",
