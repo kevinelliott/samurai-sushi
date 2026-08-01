@@ -100,19 +100,29 @@ public profile, or wallet prompt before the first settled service.
 
 Session, receipt, predecessor-grace, tombstone, lease, and cleanup boundaries
 use the authoritative PostgreSQL clock. Process clocks never decide whether a
-credential, response, tombstone, or worker claim remains valid. Startup and
-retention jobs inventory every key version referenced by a live resume digest
-or tombstone and fail closed if its version, key identity, lifecycle state, or
-required horizon is unavailable. The sole persistence bootstrap first runs the
-production bundled migration and exact live-catalog attestation, then performs
-this inventory; session, command, retention, and outbox services cannot operate
-before it passes.
+credential, response, tombstone, or worker claim remains valid. A transaction
+samples that clock again after acquiring its session, idempotency, or lease
+locks, and a command samples it again after its handler before any durable
+write. Thus lock waits and slow decisions cannot cross an expiry, compromise,
+rotation, or receipt boundary using stale authority time.
+
+The sole persistence bootstrap first runs the production bundled migration and
+exact live-catalog attestation and verifies the active tombstone writer. That
+establishes retention-only readiness. It then inventories every key version
+referenced by a live resume digest or tombstone. Session, command, and outbox
+serving remain fail-closed if a version, key identity, lifecycle state, or
+required horizon is unavailable, while retention remains able to delete or age
+out affected rows after an emergency-compromise or key-loss restart. Serving
+readiness may recover only after cleanup and a fresh successful inventory.
 
 Guest deletion creates a tombstone for every stored resume digest. Before issue,
 resume, command, or recovery acceptance, the server derives candidate resume
 digests across every unexpired resume verification key, then derives deletion
 tombstones across every unexpired tombstone verification key. Any exact live
-match rejects the capability. Tombstones are live only while `expires_at` is
+match rejects the capability. Issue and deletion acquire the same sorted,
+digest-derived advisory replay fences before changing a credential or its
+tombstone, so a forced repeated secret cannot pass a precheck and resurrect
+after concurrent deletion. Tombstones are live only while `expires_at` is
 strictly greater than PostgreSQL time; equality is expired. Unauthenticated
 commands are iteratively bounded by depth, node count, string size, and total
 canonical bytes before recursive parsing or validation.

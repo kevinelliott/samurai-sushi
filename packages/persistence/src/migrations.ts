@@ -32,8 +32,8 @@ interface CatalogRow {
 const MIGRATION_MANIFEST = [
   {
     name: "0001_persistence_spine.sql",
-    checksumHex: "de98235dd3097c4f046ff9ced25e8f862412503f6d85ba9faf01374c1dda91c9",
-    catalogChecksumHex: "a5d2cbd2f5e659af3b38c7e43fa7091d3b3f297c06ef26931898fa13d57b3ea8",
+    checksumHex: "00d95adda1af34ed05a5e9477d597455af9d53ded2c09f86452e9cb1a13eff1f",
+    catalogChecksumHex: "e87504aa545ecd7c5758049ec2dd5b60a7c026ab0e9f8f5f6775a232fa1f2382",
   },
 ] as const;
 
@@ -222,6 +222,20 @@ async function catalogChecksum(client: SqlClient): Promise<Uint8Array> {
              COALESCE(coll.collicurules, '') || '|' || COALESCE(coll.collversion, '')
         FROM pg_collation coll
         JOIN pg_namespace n ON n.oid = coll.collnamespace
+       WHERE n.nspname = 'samurai_persistence'
+      UNION ALL
+      SELECT 'schema_object_inventory',
+             identified.type || '|' || COALESCE(identified.schema, '') || '|' || COALESCE(identified.name, ''),
+             identified.identity || '|' || dependency.classid::regclass::text || '|' || dependency.deptype::text
+        FROM pg_depend dependency
+        JOIN pg_namespace n
+          ON dependency.refclassid = 'pg_namespace'::regclass
+         AND dependency.refobjid = n.oid
+       CROSS JOIN LATERAL pg_identify_object(
+         dependency.classid,
+         dependency.objid,
+         dependency.objsubid
+       ) identified
        WHERE n.nspname = 'samurai_persistence'
     )
     SELECT kind, identity, definition FROM catalog_rows ORDER BY kind, identity, definition

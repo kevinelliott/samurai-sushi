@@ -1,5 +1,5 @@
 import type { HmacKeyMetadata, HmacKeyring, HmacKeyPurpose, TombstoneKeyring } from "./crypto";
-import { keyIdentityBytes, keyIdentityFromBytes } from "./crypto";
+import { KeyLifecycleError, keyIdentityBytes, keyIdentityFromBytes } from "./crypto";
 import type { SqlClient, SqlPool } from "./database";
 import { TransactionRunner } from "./database";
 import { PersistenceError } from "./errors";
@@ -112,12 +112,33 @@ async function assertInventory(
   }
 }
 
+const CAPABILITY_BLOCKER_CODES = new Set([
+  "ACTIVE_KEY_UNAVAILABLE",
+  "KEY_IDENTITY_MISMATCH",
+  "KEY_VERIFY_HORIZON_TOO_SHORT",
+  "KEY_VERSION_COMPROMISED",
+  "KEY_VERSION_NOT_ACTIVE",
+  "KEY_VERSION_UNAVAILABLE",
+]);
+
+function capabilityBlockerCode(error: unknown): string | undefined {
+  if (error instanceof KeyLifecycleError) return error.code;
+  if (error instanceof PersistenceError && CAPABILITY_BLOCKER_CODES.has(error.code)) return error.code;
+  return undefined;
+}
+
+export interface PersistenceBootstrapReadiness {
+  readonly retentionReady: true;
+  readonly capabilityServingReady: boolean;
+  readonly capabilityBlockerCode?: string;
+}
+
 export class PersistenceAuthority {
   readonly resumeKeys: HmacKeyring;
   readonly tombstoneKeys: TombstoneKeyring;
   readonly #runner: TransactionRunner;
   readonly #pool: SqlPool;
-  #bootstrapped = false;
+  #retentionReady = false;
 
   constructor(pool: SqlPool, resumeKeys: HmacKeyring, tombstoneKeys: TombstoneKeyring) {
     this.#pool = pool;
@@ -126,17 +147,32 @@ export class PersistenceAuthority {
     this.tombstoneKeys = tombstoneKeys;
   }
 
-  async bootstrap(): Promise<void> {
+  async bootstrap(): Promise<PersistenceBootstrapReadiness> {
     await applyMigrations(this.#pool);
     await this.#runner.run(async (client) => {
       const now = await databaseNow(client);
-      await assertInventory(client, now, this.resumeKeys, this.tombstoneKeys);
+      this.tombstoneKeys.assertActive(now);
     });
-    this.#bootstrapped = true;
+    this.#retentionReady = true;
+    try {
+      await this.#runner.run(async (client) => {
+        const now = await databaseNow(client);
+        await assertInventory(client, now, this.resumeKeys, this.tombstoneKeys);
+      });
+      return { retentionReady: true, capabilityServingReady: true };
+    } catch (error) {
+      const blocker = capabilityBlockerCode(error);
+      if (!blocker) throw error;
+      return {
+        retentionReady: true,
+        capabilityServingReady: false,
+        capabilityBlockerCode: blocker,
+      };
+    }
   }
 
   async assertRetentionTransactionReady(client: SqlClient): Promise<Date> {
-    if (!this.#bootstrapped) {
+    if (!this.#retentionReady) {
       throw new PersistenceError("PERSISTENCE_NOT_READY", "Persistence key authority must pass bootstrap before retention runs.");
     }
     const now = await databaseNow(client);
@@ -145,12 +181,23 @@ export class PersistenceAuthority {
   }
 
   async assertTransactionReady(client: SqlClient): Promise<Date> {
-    if (!this.#bootstrapped) {
+    if (!this.#retentionReady) {
       throw new PersistenceError("PERSISTENCE_NOT_READY", "Persistence key authority must pass bootstrap before serving requests.");
     }
     const now = await databaseNow(client);
     await assertInventory(client, now, this.resumeKeys, this.tombstoneKeys);
     return now;
+  }
+
+  async lockGuestSecretReplayFence(client: SqlClient, secret: string, now: Date): Promise<void> {
+    const scopes = this.resumeKeys.tombstoneCandidates(secret, now)
+      .map((candidate) => (
+        `guest-resume-replay:v${candidate.keyVersion}:${candidate.keyIdentity}:${Buffer.from(candidate.digest).toString("base64url")}`
+      ))
+      .sort();
+    for (const scope of scopes) {
+      await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [scope]);
+    }
   }
 
   async assertGuestSecretNotTombstoned(client: SqlClient, secret: string, now: Date): Promise<void> {

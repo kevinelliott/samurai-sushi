@@ -89,17 +89,20 @@ CREATE TABLE samurai_persistence.outbox_deliveries (
   CHECK ((state = 'dead-letter') = (dead_lettered_at IS NOT NULL)),
   CHECK (state = 'processing' OR (claim_token IS NULL AND claim_expires_at IS NULL)),
   CHECK (claim_token IS NULL OR length(claim_token) > 0),
+  CHECK (claim_generation = attempt_count),
   CHECK (
     state NOT IN ('processing', 'delivered', 'dead-letter') OR
     (attempt_count > 0 AND claim_generation > 0 AND last_attempt_at IS NOT NULL)
   ),
   CHECK (state <> 'processing' OR claim_expires_at > last_attempt_at),
   CHECK (state <> 'dead-letter' OR last_error_code IS NOT NULL),
+  CHECK (state <> 'delivered' OR last_error_code IS NULL),
   CHECK (
     state <> 'pending' OR
     (attempt_count = 0 AND claim_generation = 0 AND last_attempt_at IS NULL) OR
     (attempt_count > 0 AND claim_generation > 0 AND last_attempt_at IS NOT NULL)
   ),
+  CHECK (state <> 'pending' OR attempt_count = 0 OR last_error_code IS NOT NULL),
   CHECK (last_error_code IS NULL OR last_error_code ~ '^[A-Z][A-Z0-9_]{0,127}$')
 );
 

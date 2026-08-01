@@ -93,16 +93,16 @@ export class GuestCommandExecutor {
     const guestSessionId = subject.subjectId;
     const payloadHash = digestFromDomainHash(command.payloadHash, "payloadHash");
     return this.runner.run(async (client) => {
-      const now = await this.authority.assertTransactionReady(client);
+      const initialNow = await this.authority.assertTransactionReady(client);
       let candidates;
       try {
-        candidates = this.authority.resumeKeys.candidates(resumeSecret, now);
+        candidates = this.authority.resumeKeys.candidates(resumeSecret, initialNow);
       } catch (error) {
         if (error instanceof GuestSecretFormatError) throw new CommandAuthenticationError();
         throw error;
       }
       try {
-        await this.authority.assertGuestSecretNotTombstoned(client, resumeSecret, now);
+        await this.authority.assertGuestSecretNotTombstoned(client, resumeSecret, initialNow);
       } catch (error) {
         if (error instanceof PersistenceError && error.code === "GUEST_SECRET_TOMBSTONED") {
           throw new CommandAuthenticationError();
@@ -110,18 +110,43 @@ export class GuestCommandExecutor {
         throw error;
       }
       const session = await this.sessions.findResumeMatchForUpdate(client, candidates);
-      const authenticatedCandidate = session
-        ? candidates.find((candidate) => candidate.keyVersion === session.digestKeyVersion)
+      const initialCandidate = session
+        ? candidates.find((candidate) => (
+          candidate.keyVersion === session.digestKeyVersion
+          && candidate.keyIdentity === session.digestKeyIdentity
+        ))
         : undefined;
+      if (
+        !session
+        || session.id !== guestSessionId
+        || !initialCandidate
+        || !constantTimeDigestEqual(initialCandidate.digest, session.digest)
+      ) throw new CommandAuthenticationError();
+      const lockScope = `guest:${guestSessionId}:${command.idempotencyKey}`;
+      await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [lockScope]);
+
+      const now = await this.authority.assertTransactionReady(client);
+      try {
+        candidates = this.authority.resumeKeys.candidates(resumeSecret, now);
+        await this.authority.assertGuestSecretNotTombstoned(client, resumeSecret, now);
+      } catch (error) {
+        if (
+          error instanceof GuestSecretFormatError
+          || (error instanceof PersistenceError && error.code === "GUEST_SECRET_TOMBSTONED")
+        ) throw new CommandAuthenticationError();
+        throw error;
+      }
+      const authenticatedCandidate = candidates.find((candidate) => (
+        candidate.keyVersion === session.digestKeyVersion
+        && candidate.keyIdentity === session.digestKeyIdentity
+      ));
       const authenticated = Boolean(
-        session
-        && session.id === guestSessionId
+        session.id === guestSessionId
         && authenticatedCandidate
         && constantTimeDigestEqual(authenticatedCandidate.digest, session.digest),
       );
       if (
         !authenticated
-        || !session
         || session.expiresAt.getTime() <= now.getTime()
         || (session.slot === "predecessor"
           && (!session.digestValidUntil || session.digestValidUntil.getTime() <= now.getTime()))
@@ -132,11 +157,6 @@ export class GuestCommandExecutor {
         session.rotateAfter.getTime() <= now.getTime()
         || (session.slot === "current" && session.digestKeyVersion !== this.authority.resumeKeys.active.version)
       ) throw new GuestRotationRequiredError();
-      await this.sessions.touch(client, guestSessionId, now);
-
-      const lockScope = `guest:${guestSessionId}:${command.idempotencyKey}`;
-      await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [lockScope]);
-
       const receipt = await client.query<ReceiptRow>(
         `SELECT command_name, expected_revision, content_version, payload_hash,
                 response_schema_version, response_payload, result_hash, committed_revision, expires_at
@@ -160,6 +180,7 @@ export class GuestCommandExecutor {
         if (!sameDigest(digestFromDomainHash(replayResultHash, "replayResultHash"), stored.result_hash)) {
           throw new PersistenceError("RECEIPT_INTEGRITY_FAILURE", "The stored response no longer matches its canonical result hash.");
         }
+        await this.sessions.touch(client, guestSessionId, now);
         return {
           disposition: "replayed",
           responseSchemaVersion: stored.response_schema_version,
@@ -180,6 +201,35 @@ export class GuestCommandExecutor {
       const canonical = canonicalizeDecision<Checkpoint, ResponsePayload>(rawDecision);
       const decision = canonical.decision;
       const committedRevision = command.expectedRevision + 1;
+      const writeNow = await this.authority.assertTransactionReady(client);
+      try {
+        candidates = this.authority.resumeKeys.candidates(resumeSecret, writeNow);
+        await this.authority.assertGuestSecretNotTombstoned(client, resumeSecret, writeNow);
+      } catch (error) {
+        if (
+          error instanceof GuestSecretFormatError
+          || (error instanceof PersistenceError && error.code === "GUEST_SECRET_TOMBSTONED")
+        ) throw new CommandAuthenticationError();
+        throw error;
+      }
+      const writeCandidate = candidates.find((candidate) => (
+        candidate.keyVersion === session.digestKeyVersion
+        && candidate.keyIdentity === session.digestKeyIdentity
+      ));
+      if (
+        !writeCandidate
+        || !constantTimeDigestEqual(writeCandidate.digest, session.digest)
+        || session.expiresAt.getTime() <= writeNow.getTime()
+        || (session.slot === "predecessor"
+          && (!session.digestValidUntil || session.digestValidUntil.getTime() <= writeNow.getTime()))
+      ) {
+        throw new CommandAuthenticationError();
+      }
+      if (
+        session.rotateAfter.getTime() <= writeNow.getTime()
+        || (session.slot === "current" && session.digestKeyVersion !== this.authority.resumeKeys.active.version)
+      ) throw new GuestRotationRequiredError();
+      await this.sessions.touch(client, guestSessionId, writeNow);
       const updated = await client.query<RevisionRow>(
         `UPDATE samurai_persistence.guest_progress
             SET revision = revision + 1,
@@ -195,7 +245,7 @@ export class GuestCommandExecutor {
           command.contentVersion,
           decision.checkpointSchemaVersion,
           JSON.stringify(decision.checkpoint),
-          now,
+          writeNow,
         ],
       );
       if (updated.rowCount !== 1) {
@@ -214,14 +264,14 @@ export class GuestCommandExecutor {
           decision.event.schemaVersion,
           JSON.stringify(decision.event.payload),
           committedRevision,
-          now,
+          writeNow,
         ],
       );
       await client.query(
         `INSERT INTO samurai_persistence.outbox_deliveries
           (event_id, state, attempt_count, available_at)
          VALUES ($1, 'pending', 0, $2)`,
-        [decision.event.eventId, now],
+        [decision.event.eventId, writeNow],
       );
       const resultHash = digestFromDomainHash(canonical.resultHash, "resultHash");
       await client.query(
@@ -240,8 +290,8 @@ export class GuestCommandExecutor {
           JSON.stringify(decision.response.payload),
           resultHash,
           committedRevision,
-          now,
-          addMilliseconds(now, ADR_0003_PERSISTENCE_LIFECYCLE.receiptLifetimeMs),
+          writeNow,
+          addMilliseconds(writeNow, ADR_0003_PERSISTENCE_LIFECYCLE.receiptLifetimeMs),
         ],
       );
       return {

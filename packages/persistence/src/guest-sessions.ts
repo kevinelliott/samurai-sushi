@@ -116,6 +116,7 @@ export class GuestSessionService {
     const secret = this.createSecret();
     return this.runner.run(async (client) => {
       const now = await this.authority.assertTransactionReady(client);
+      await this.authority.lockGuestSecretReplayFence(client, secret, now);
       await this.authority.assertGuestSecretNotTombstoned(client, secret, now);
       const session: GuestSessionRecord = {
         id: this.createId(),
@@ -135,28 +136,40 @@ export class GuestSessionService {
         updatedAt: now,
       };
       await this.repository.insert(client, session, this.authority.resumeKeys.digest(secret, now), progress);
+      await this.authority.assertGuestSecretNotTombstoned(client, secret, now);
       return { session, progress, resumeSecret: secret };
     });
   }
 
   async resume(secret: string): Promise<ResumedGuest> {
     return this.runner.run(async (client) => {
-      const now = await this.authority.assertTransactionReady(client);
+      const initialNow = await this.authority.assertTransactionReady(client);
       let candidates;
       try {
-        candidates = this.authority.resumeKeys.candidates(secret, now);
+        candidates = this.authority.resumeKeys.candidates(secret, initialNow);
       } catch (error) {
         if (error instanceof GuestSecretFormatError) throw new GuestResumeError("GUEST_RESUME_INVALID");
         throw error;
       }
       try {
-        await this.authority.assertGuestSecretNotTombstoned(client, secret, now);
+        await this.authority.assertGuestSecretNotTombstoned(client, secret, initialNow);
       } catch (error) {
         mapDeletedSecretToInvalid(error);
       }
       const match = await this.repository.findResumeMatchForUpdate(client, candidates);
+      const now = await this.authority.assertTransactionReady(client);
+      try {
+        candidates = this.authority.resumeKeys.candidates(secret, now);
+        await this.authority.assertGuestSecretNotTombstoned(client, secret, now);
+      } catch (error) {
+        if (error instanceof GuestSecretFormatError) throw new GuestResumeError("GUEST_RESUME_INVALID");
+        mapDeletedSecretToInvalid(error);
+      }
       if (!match) throw new GuestResumeError("GUEST_RESUME_INVALID");
-      const candidate = candidates.find((item) => item.keyVersion === match.digestKeyVersion);
+      const candidate = candidates.find((item) => (
+        item.keyVersion === match.digestKeyVersion
+        && item.keyIdentity === match.digestKeyIdentity
+      ));
       if (!candidate || !constantTimeDigestEqual(candidate.digest, match.digest)) {
         throw new GuestResumeError("GUEST_RESUME_INVALID");
       }
@@ -198,22 +211,33 @@ export class GuestSessionService {
 
   async rotate(secret: string): Promise<ResumedGuest & { readonly rotatedResumeSecret: string }> {
     return this.runner.run(async (client) => {
-      const now = await this.authority.assertTransactionReady(client);
+      const initialNow = await this.authority.assertTransactionReady(client);
       try {
-        await this.authority.assertGuestSecretNotTombstoned(client, secret, now);
+        await this.authority.assertGuestSecretNotTombstoned(client, secret, initialNow);
       } catch (error) {
         mapDeletedSecretToInvalid(error);
       }
       let candidates;
       try {
-        candidates = this.authority.resumeKeys.candidates(secret, now);
+        candidates = this.authority.resumeKeys.candidates(secret, initialNow);
       } catch (error) {
         if (error instanceof GuestSecretFormatError) throw new GuestResumeError("GUEST_RESUME_INVALID");
         throw error;
       }
       const match = await this.repository.findResumeMatchForUpdate(client, candidates);
+      const now = await this.authority.assertTransactionReady(client);
+      try {
+        candidates = this.authority.resumeKeys.candidates(secret, now);
+        await this.authority.assertGuestSecretNotTombstoned(client, secret, now);
+      } catch (error) {
+        if (error instanceof GuestSecretFormatError) throw new GuestResumeError("GUEST_RESUME_INVALID");
+        mapDeletedSecretToInvalid(error);
+      }
       if (!match) throw new GuestResumeError("GUEST_RESUME_INVALID");
-      const candidate = candidates.find((item) => item.keyVersion === match.digestKeyVersion);
+      const candidate = candidates.find((item) => (
+        item.keyVersion === match.digestKeyVersion
+        && item.keyIdentity === match.digestKeyIdentity
+      ));
       if (!candidate || !constantTimeDigestEqual(candidate.digest, match.digest)) {
         throw new GuestResumeError("GUEST_RESUME_INVALID");
       }
@@ -244,22 +268,34 @@ export class GuestSessionService {
 
   async delete(secret: string): Promise<void> {
     await this.runner.run(async (client) => {
-      const now = await this.authority.assertTransactionReady(client);
+      const initialNow = await this.authority.assertTransactionReady(client);
       let candidates;
       try {
-        candidates = this.authority.resumeKeys.candidates(secret, now);
+        candidates = this.authority.resumeKeys.candidates(secret, initialNow);
       } catch (error) {
         if (error instanceof GuestSecretFormatError) throw new GuestResumeError("GUEST_RESUME_INVALID");
         throw error;
       }
+      await this.authority.lockGuestSecretReplayFence(client, secret, initialNow);
       try {
-        await this.authority.assertGuestSecretNotTombstoned(client, secret, now);
+        await this.authority.assertGuestSecretNotTombstoned(client, secret, initialNow);
       } catch (error) {
         mapDeletedSecretToInvalid(error);
       }
       const match = await this.repository.findResumeMatchForUpdate(client, candidates);
+      const now = await this.authority.assertTransactionReady(client);
+      try {
+        candidates = this.authority.resumeKeys.candidates(secret, now);
+        await this.authority.assertGuestSecretNotTombstoned(client, secret, now);
+      } catch (error) {
+        if (error instanceof GuestSecretFormatError) throw new GuestResumeError("GUEST_RESUME_INVALID");
+        mapDeletedSecretToInvalid(error);
+      }
       if (!match) throw new GuestResumeError("GUEST_RESUME_INVALID");
-      const candidate = candidates.find((item) => item.keyVersion === match.digestKeyVersion);
+      const candidate = candidates.find((item) => (
+        item.keyVersion === match.digestKeyVersion
+        && item.keyIdentity === match.digestKeyIdentity
+      ));
       if (!candidate || !constantTimeDigestEqual(candidate.digest, match.digest)) {
         throw new GuestResumeError("GUEST_RESUME_INVALID");
       }

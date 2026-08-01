@@ -26,6 +26,7 @@ import {
 } from "../src/errors";
 import { GuestSessionService } from "../src/guest-sessions";
 import { PersistenceAuthority } from "../src/key-inventory";
+import { ADR_0003_PERSISTENCE_LIFECYCLE } from "../src/lifecycle";
 import { applyMigrations, bundledMigrations } from "../src/migrations";
 import { OutboxDeliveryService } from "../src/outbox";
 
@@ -145,6 +146,97 @@ class ObservedAdvisoryLockPool implements SqlPool {
   }
 }
 
+class ObservedSessionLockClient implements ConnectedSqlClient {
+  constructor(
+    private readonly delegate: ConnectedSqlClient,
+    private readonly attempted: Deferred<number>,
+    private readonly acquired: Deferred<number>,
+  ) {}
+
+  async query<Row extends object>(text: string, values?: readonly SqlValue[]): Promise<QueryResult<Row>> {
+    if (!text.includes("FOR UPDATE OF s")) return this.delegate.query<Row>(text, values);
+    const backend = await this.delegate.query<{ readonly pid: string }>("SELECT pg_backend_pid()::text AS pid");
+    const pid = Number(backend.rows[0]?.pid);
+    this.attempted.resolve(pid);
+    const result = await this.delegate.query<Row>(text, values);
+    this.acquired.resolve(pid);
+    return result;
+  }
+
+  release(): void {
+    this.delegate.release();
+  }
+}
+
+class ObservedSessionLockPool implements SqlPool {
+  constructor(
+    private readonly delegate: SqlPool,
+    readonly attempted: Deferred<number>,
+    readonly acquired: Deferred<number>,
+  ) {}
+
+  query<Row extends object>(text: string, values?: readonly SqlValue[]): Promise<QueryResult<Row>> {
+    return this.delegate.query<Row>(text, values);
+  }
+
+  async connect(): Promise<ConnectedSqlClient> {
+    return new ObservedSessionLockClient(
+      await this.delegate.connect(),
+      this.attempted,
+      this.acquired,
+    );
+  }
+}
+
+class ObservedReplayFenceClient implements ConnectedSqlClient {
+  constructor(
+    private readonly delegate: ConnectedSqlClient,
+    private readonly attempted: Deferred<number>,
+    private readonly acquired: Deferred<number>,
+    private readonly releaseFence?: Promise<void>,
+  ) {}
+
+  async query<Row extends object>(text: string, values?: readonly SqlValue[]): Promise<QueryResult<Row>> {
+    const scope = values?.[0];
+    if (!text.includes("pg_advisory_xact_lock") || typeof scope !== "string" || !scope.startsWith("guest-resume-replay:")) {
+      return this.delegate.query<Row>(text, values);
+    }
+    const backend = await this.delegate.query<{ readonly pid: string }>("SELECT pg_backend_pid()::text AS pid");
+    const pid = Number(backend.rows[0]?.pid);
+    this.attempted.resolve(pid);
+    const result = await this.delegate.query<Row>(text, values);
+    this.acquired.resolve(pid);
+    await this.releaseFence;
+    return result;
+  }
+
+  release(): void {
+    this.delegate.release();
+  }
+}
+
+class ObservedReplayFencePool implements SqlPool {
+  constructor(
+    private readonly delegate: SqlPool,
+    readonly attempted: Deferred<number>,
+    readonly acquired: Deferred<number>,
+    private readonly releaseFence?: Promise<void>,
+  ) {}
+
+  query<Row extends object>(text: string, values?: readonly SqlValue[]): Promise<QueryResult<Row>> {
+    return this.delegate.query<Row>(text, values);
+  }
+
+  async connect(): Promise<ConnectedSqlClient> {
+    return new ObservedReplayFenceClient(
+      await this.delegate.connect(),
+      this.attempted,
+      this.acquired,
+      this.releaseFence,
+    );
+  }
+}
+
 async function expectAdvisoryWait(rawPool: Pool, pid: number): Promise<void> {
   const deadline = Date.now() + 5_000;
   while (Date.now() < deadline) {
@@ -156,6 +248,19 @@ async function expectAdvisoryWait(rawPool: Pool, pid: number): Promise<void> {
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
   throw new Error(`Backend ${pid} did not block on the migration advisory lock.`);
+}
+
+async function expectLockWait(rawPool: Pool, pid: number): Promise<void> {
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline) {
+    const activity = await rawPool.query<{ readonly wait_event_type: string | null }>(
+      "SELECT wait_event_type FROM pg_stat_activity WHERE pid = $1",
+      [pid],
+    );
+    if (activity.rows[0]?.wait_event_type === "Lock") return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(`Backend ${pid} did not block on a row lock.`);
 }
 
 class AfterCommitClient implements ConnectedSqlClient {
@@ -264,7 +369,7 @@ describe("PostgreSQL persistence spine", () => {
   it("migrates an empty PostgreSQL database and cleanly reapplies forward migrations", async () => {
     const migration = (await bundledMigrations())[0];
     expect(Buffer.from(migration?.checksum ?? []).toString("hex")).toBe(
-      "de98235dd3097c4f046ff9ced25e8f862412503f6d85ba9faf01374c1dda91c9",
+      "00d95adda1af34ed05a5e9477d597455af9d53ded2c09f86452e9cb1a13eff1f",
     );
     await applyMigrations(pool);
     const result = await rawPool.query<CountRow>("SELECT count(*)::text AS count FROM samurai_persistence.schema_migrations");
@@ -366,7 +471,7 @@ describe("PostgreSQL persistence spine", () => {
     expect(result.rows[0]?.count).toBe("1");
   });
 
-  it("canonicalizes caller search_path and rejects column ACL, standalone type/domain, and collation drift", async () => {
+  it("canonicalizes caller search_path and rejects ACL, type, collation, and generic schema-object drift", async () => {
     const alternateSearchPathPool = new Pool({
       connectionString: databaseUrl,
       options: "-c search_path=samurai_persistence,public",
@@ -401,6 +506,26 @@ describe("PostgreSQL persistence spine", () => {
     await applyMigrations(pool);
 
     await rawPool.query("CREATE COLLATION samurai_persistence.unexpected_collation FROM pg_catalog.\"C\"");
+    await expect(applyMigrations(pool)).rejects.toBeInstanceOf(MigrationSchemaDriftError);
+    await rawPool.query("DROP SCHEMA samurai_persistence CASCADE");
+    await applyMigrations(pool);
+
+    await rawPool.query(`
+      CREATE OPERATOR samurai_persistence.=== (
+        LEFTARG = integer,
+        RIGHTARG = integer,
+        FUNCTION = pg_catalog.int4eq
+      )
+    `);
+    await expect(applyMigrations(pool)).rejects.toBeInstanceOf(MigrationSchemaDriftError);
+    await rawPool.query("DROP SCHEMA samurai_persistence CASCADE");
+    await applyMigrations(pool);
+
+    await rawPool.query(`
+      CREATE STATISTICS samurai_persistence.unexpected_stats (dependencies)
+        ON consent_version, state
+      FROM samurai_persistence.guest_sessions
+    `);
     await expect(applyMigrations(pool)).rejects.toBeInstanceOf(MigrationSchemaDriftError);
     await rawPool.query("DROP SCHEMA samurai_persistence CASCADE");
     await applyMigrations(pool);
@@ -645,6 +770,193 @@ describe("PostgreSQL persistence spine", () => {
         throw new Error("must not run");
       }),
     ).rejects.toBeInstanceOf(CommandAuthenticationError);
+  });
+
+  it("rechecks receipt expiry after waiting on the guest-session row lock", async () => {
+    const issued = await sessionService.issue({
+      consentVersion: "privacy-v1",
+      contentVersion: "content-v1",
+      checkpointSchemaVersion: 1,
+      checkpoint: { step: 0 },
+    });
+    const envelope = command(issued.session.id, "018f47fe-347b-4dac-8f45-a6f3f43bd603", 0);
+    await executor.execute(issued.resumeSecret, envelope, () => ({
+      checkpointSchemaVersion: 1,
+      checkpoint: { step: 1 },
+      event: {
+        eventId: "018f47fe-347b-4dac-8f45-a6f3f43bd604",
+        eventType: "checkpoint.advanced",
+        schemaVersion: 1,
+        payload: { step: 1 },
+      },
+      response: { schemaVersion: 1, payload: true },
+    }));
+    const attempted = deferred<number>();
+    const acquired = deferred<number>();
+    const observedPool = new ObservedSessionLockPool(pool, attempted, acquired);
+    const observedAuthority = new PersistenceAuthority(observedPool, resumeKeys, tombstoneKeys);
+    await observedAuthority.bootstrap();
+    const observedExecutor = new GuestCommandExecutor(observedPool, observedAuthority);
+    const blocker = await rawPool.connect();
+    try {
+      await blocker.query("BEGIN");
+      await blocker.query("SELECT id FROM samurai_persistence.guest_sessions WHERE id = $1 FOR UPDATE", [issued.session.id]);
+      const pending = observedExecutor.execute(issued.resumeSecret, envelope, () => {
+        throw new Error("the handler must not run for a durable retry");
+      });
+      const pid = await attempted.promise;
+      await expectLockWait(rawPool, pid);
+      await blocker.query(
+        "UPDATE samurai_persistence.command_receipts SET expires_at = clock_timestamp() + interval '100 milliseconds' WHERE guest_session_id = $1",
+        [issued.session.id],
+      );
+      await blocker.query("SELECT pg_sleep(0.2)");
+      await blocker.query("COMMIT");
+      await acquired.promise;
+      await expect(pending).rejects.toBeInstanceOf(IdempotencyReceiptExpiredError);
+    } finally {
+      await blocker.query("ROLLBACK").catch(() => undefined);
+      blocker.release();
+    }
+  });
+
+  it("rechecks session expiry after resume waits on the guest-session row lock", async () => {
+    const issued = await sessionService.issue({
+      consentVersion: "privacy-v1",
+      contentVersion: "content-v1",
+      checkpointSchemaVersion: 1,
+      checkpoint: { step: 0 },
+    });
+    const attempted = deferred<number>();
+    const acquired = deferred<number>();
+    const observedPool = new ObservedSessionLockPool(pool, attempted, acquired);
+    const observedAuthority = new PersistenceAuthority(observedPool, resumeKeys, tombstoneKeys);
+    await observedAuthority.bootstrap();
+    const observedService = new GuestSessionService(observedPool, observedAuthority);
+    const blocker = await rawPool.connect();
+    try {
+      await blocker.query("BEGIN");
+      await blocker.query("SELECT id FROM samurai_persistence.guest_sessions WHERE id = $1 FOR UPDATE", [issued.session.id]);
+      const pending = observedService.resume(issued.resumeSecret);
+      const pid = await attempted.promise;
+      await expectLockWait(rawPool, pid);
+      await blocker.query(
+        `UPDATE samurai_persistence.guest_sessions
+            SET rotate_after = clock_timestamp() + interval '50 milliseconds',
+                expires_at = clock_timestamp() + interval '100 milliseconds'
+          WHERE id = $1`,
+        [issued.session.id],
+      );
+      await blocker.query("SELECT pg_sleep(0.2)");
+      await blocker.query("COMMIT");
+      await acquired.promise;
+      await expect(pending).rejects.toMatchObject({ code: "GUEST_RESUME_EXPIRED" });
+    } finally {
+      await blocker.query("ROLLBACK").catch(() => undefined);
+      blocker.release();
+    }
+  });
+
+  it("starts the full receipt lifetime from a fresh post-handler database timestamp", async () => {
+    const issued = await sessionService.issue({
+      consentVersion: "privacy-v1",
+      contentVersion: "content-v1",
+      checkpointSchemaVersion: 1,
+      checkpoint: { step: 0 },
+    });
+    let handlerFinishedAt: Date | undefined;
+    await executor.execute(
+      issued.resumeSecret,
+      command(issued.session.id, "018f47fe-347b-4dac-8f45-a6f3f43bd605", 0),
+      async () => {
+        await rawPool.query("SELECT pg_sleep(0.2)");
+        const clock = await rawPool.query<{ readonly now: Date }>("SELECT clock_timestamp() AS now");
+        handlerFinishedAt = clock.rows[0]!.now;
+        return {
+          checkpointSchemaVersion: 1,
+          checkpoint: { step: 1 },
+          event: {
+            eventId: "018f47fe-347b-4dac-8f45-a6f3f43bd606",
+            eventType: "checkpoint.advanced",
+            schemaVersion: 1,
+            payload: { step: 1 },
+          },
+          response: { schemaVersion: 1, payload: true },
+        };
+      },
+    );
+    const receipt = await rawPool.query<{ readonly created_at: Date; readonly expires_at: Date }>(
+      `SELECT created_at, expires_at
+         FROM samurai_persistence.command_receipts
+        WHERE guest_session_id = $1 AND idempotency_key = $2`,
+      [issued.session.id, "018f47fe-347b-4dac-8f45-a6f3f43bd605"],
+    );
+    expect(handlerFinishedAt).toBeDefined();
+    expect(receipt.rows[0]!.created_at.getTime()).toBeGreaterThanOrEqual(handlerFinishedAt!.getTime());
+    expect(receipt.rows[0]!.expires_at.getTime() - receipt.rows[0]!.created_at.getTime())
+      .toBe(ADR_0003_PERSISTENCE_LIFECYCLE.receiptLifetimeMs);
+  });
+
+  it("rolls back when a handler crosses the locked session authority boundary", async () => {
+    const issued = await sessionService.issue({
+      consentVersion: "privacy-v1",
+      contentVersion: "content-v1",
+      checkpointSchemaVersion: 1,
+      checkpoint: { step: 0 },
+    });
+    await rawPool.query(
+      `UPDATE samurai_persistence.guest_sessions
+          SET rotate_after = clock_timestamp() + interval '400 milliseconds',
+              expires_at = clock_timestamp() + interval '500 milliseconds'
+        WHERE id = $1`,
+      [issued.session.id],
+    );
+    let handled = false;
+    await expect(executor.execute(
+      issued.resumeSecret,
+      command(issued.session.id, "018f47fe-347b-4dac-8f45-a6f3f43bd607", 0),
+      async () => {
+        handled = true;
+        await rawPool.query("SELECT pg_sleep(0.6)");
+        return {
+          checkpointSchemaVersion: 1,
+          checkpoint: { step: 1 },
+          event: {
+            eventId: "018f47fe-347b-4dac-8f45-a6f3f43bd608",
+            eventType: "checkpoint.advanced",
+            schemaVersion: 1,
+            payload: { step: 1 },
+          },
+          response: { schemaVersion: 1, payload: true },
+        };
+      },
+    )).rejects.toBeInstanceOf(CommandAuthenticationError);
+    expect(handled).toBe(true);
+
+    const state = await rawPool.query<{
+      readonly revision: string;
+      readonly receipt_count: string;
+      readonly event_count: string;
+      readonly outbox_count: string;
+    }>(
+      `SELECT progress.revision::text,
+              (SELECT count(*) FROM samurai_persistence.command_receipts
+                WHERE guest_session_id = $1)::text AS receipt_count,
+              (SELECT count(*) FROM samurai_persistence.domain_events
+                WHERE guest_session_id = $1)::text AS event_count,
+              (SELECT count(*) FROM samurai_persistence.outbox_deliveries delivery
+                 JOIN samurai_persistence.domain_events event ON event.event_id = delivery.event_id
+                WHERE event.guest_session_id = $1)::text AS outbox_count
+         FROM samurai_persistence.guest_progress progress
+        WHERE progress.guest_session_id = $1`,
+      [issued.session.id],
+    );
+    expect(state.rows[0]).toEqual({
+      revision: "0",
+      receipt_count: "0",
+      event_count: "0",
+      outbox_count: "0",
+    });
   });
 
   it("detaches canonical command, checkpoint, decision, and response values", async () => {
@@ -1136,6 +1448,36 @@ describe("PostgreSQL persistence spine", () => {
     ]) {
       await expect(rawPool.query(statement, [eventId])).rejects.toMatchObject({ code: "23514" });
     }
+
+    const hostileEvents = [
+      ["018f47fe-347b-4dac-8f45-a6f3f43bd603", 2],
+      ["018f47fe-347b-4dac-8f45-a6f3f43bd604", 3],
+      ["018f47fe-347b-4dac-8f45-a6f3f43bd605", 4],
+    ] as const;
+    for (const [hostileEventId, revision] of hostileEvents) {
+      await rawPool.query(
+        `INSERT INTO samurai_persistence.domain_events
+          (event_id, guest_session_id, event_type, schema_version, payload, committed_revision, created_at)
+         VALUES ($1, $2, 'hostile.outbox-state', 1, '{}'::jsonb, $3, clock_timestamp())`,
+        [hostileEventId, issued.session.id, revision],
+      );
+    }
+
+    const hostileInserts = [
+      `INSERT INTO samurai_persistence.outbox_deliveries
+        (event_id, state, attempt_count, available_at, last_attempt_at, claim_token, claim_generation, claim_expires_at)
+       VALUES ($1, 'processing', 1, clock_timestamp(), clock_timestamp(), 'token', 2,
+               clock_timestamp() + interval '1 minute')`,
+      `INSERT INTO samurai_persistence.outbox_deliveries
+        (event_id, state, attempt_count, available_at, last_attempt_at, claim_generation)
+       VALUES ($1, 'pending', 1, clock_timestamp(), clock_timestamp(), 1)`,
+      `INSERT INTO samurai_persistence.outbox_deliveries
+        (event_id, state, attempt_count, available_at, last_attempt_at, claim_generation, delivered_at, last_error_code)
+       VALUES ($1, 'delivered', 1, clock_timestamp(), clock_timestamp(), 1, clock_timestamp(), 'STALE')`,
+    ] as const;
+    for (const [index, statement] of hostileInserts.entries()) {
+      await expect(rawPool.query(statement, [hostileEvents[index]![0]])).rejects.toMatchObject({ code: "23514" });
+    }
   });
 
   it("serializes command execution against deletion without resurrection", async () => {
@@ -1257,6 +1599,63 @@ describe("PostgreSQL persistence spine", () => {
       checkpointSchemaVersion: 1,
       checkpoint: { step: 0 },
     })).resolves.toHaveProperty("resumeSecret", secret);
+  });
+
+  it("serializes forced-secret issue and delete in both lock orders without resurrecting guest state", async () => {
+    const input = {
+      consentVersion: "privacy-v1",
+      contentVersion: "content-v1",
+      checkpointSchemaVersion: 1,
+      checkpoint: { step: 0 },
+    } as const;
+    const secret = issueResumeSecret();
+    const fixedService = new GuestSessionService(pool, authority, { issueSecret: () => secret });
+    await fixedService.issue(input);
+
+    const deleteRelease = deferred<void>();
+    const deletePool = new ObservedReplayFencePool(pool, deferred<number>(), deferred<number>(), deleteRelease.promise);
+    const blockedIssuePool = new ObservedReplayFencePool(pool, deferred<number>(), deferred<number>());
+    const deleteAuthority = new PersistenceAuthority(deletePool, resumeKeys, tombstoneKeys);
+    const blockedIssueAuthority = new PersistenceAuthority(blockedIssuePool, resumeKeys, tombstoneKeys);
+    await deleteAuthority.bootstrap();
+    await blockedIssueAuthority.bootstrap();
+    const deleting = new GuestSessionService(deletePool, deleteAuthority).delete(secret);
+    await deletePool.acquired.promise;
+    const issuingAfterDelete = new GuestSessionService(blockedIssuePool, blockedIssueAuthority, {
+      issueSecret: () => secret,
+    }).issue(input);
+    const blockedIssuePid = await blockedIssuePool.attempted.promise;
+    await expectLockWait(rawPool, blockedIssuePid);
+    deleteRelease.resolve();
+    await expect(deleting).resolves.toBeUndefined();
+    await blockedIssuePool.acquired.promise;
+    await expect(issuingAfterDelete).rejects.toMatchObject({ code: "GUEST_SECRET_TOMBSTONED" });
+
+    await rawPool.query("DELETE FROM samurai_persistence.deletion_tombstones");
+    const issueRelease = deferred<void>();
+    const issuePool = new ObservedReplayFencePool(pool, deferred<number>(), deferred<number>(), issueRelease.promise);
+    const blockedDeletePool = new ObservedReplayFencePool(pool, deferred<number>(), deferred<number>());
+    const issueAuthority = new PersistenceAuthority(issuePool, resumeKeys, tombstoneKeys);
+    const blockedDeleteAuthority = new PersistenceAuthority(blockedDeletePool, resumeKeys, tombstoneKeys);
+    await issueAuthority.bootstrap();
+    await blockedDeleteAuthority.bootstrap();
+    const issuingFirst = new GuestSessionService(issuePool, issueAuthority, {
+      issueSecret: () => secret,
+    }).issue(input);
+    await issuePool.acquired.promise;
+    const deletingAfterIssue = new GuestSessionService(blockedDeletePool, blockedDeleteAuthority).delete(secret);
+    const blockedDeletePid = await blockedDeletePool.attempted.promise;
+    await expectLockWait(rawPool, blockedDeletePid);
+    issueRelease.resolve();
+    await expect(issuingFirst).resolves.toHaveProperty("resumeSecret", secret);
+    await blockedDeletePool.acquired.promise;
+    await expect(deletingAfterIssue).resolves.toBeUndefined();
+
+    const remaining = await rawPool.query<{ readonly sessions: string; readonly progress: string }>(
+      `SELECT (SELECT count(*)::text FROM samurai_persistence.guest_sessions) AS sessions,
+              (SELECT count(*)::text FROM samurai_persistence.guest_progress) AS progress`,
+    );
+    expect(remaining.rows[0]).toEqual({ sessions: "0", progress: "0" });
   });
 
   it("preserves the single predecessor through overlapping use and defers further rotation", async () => {
@@ -1416,7 +1815,11 @@ describe("PostgreSQL persistence spine", () => {
     const missingTombstoneKeys = new TombstoneKeyring(hmacKey("tombstone", 4, 4));
     let missingAuthority = new PersistenceAuthority(pool, resumeKeys, missingTombstoneKeys);
     let missingTombstoneKeyService = new GuestSessionService(pool, missingAuthority);
-    await expect(missingAuthority.bootstrap()).rejects.toMatchObject({ code: "KEY_VERSION_UNAVAILABLE" });
+    await expect(missingAuthority.bootstrap()).resolves.toEqual({
+      retentionReady: true,
+      capabilityServingReady: false,
+      capabilityBlockerCode: "KEY_VERSION_UNAVAILABLE",
+    });
     await expect(
       missingTombstoneKeyService.issue({
         consentVersion: "privacy-v1",
@@ -1424,11 +1827,11 @@ describe("PostgreSQL persistence spine", () => {
         checkpointSchemaVersion: 1,
         checkpoint: { step: 0 },
       }),
-    ).rejects.toMatchObject({ code: "PERSISTENCE_NOT_READY" });
+    ).rejects.toMatchObject({ code: "KEY_VERSION_UNAVAILABLE" });
     await rawPool.query(
       "UPDATE samurai_persistence.deletion_tombstones SET expires_at = clock_timestamp() - interval '1 millisecond'",
     );
-    await expect(sessionService.deleteExpired()).resolves.toBe(0);
+    await expect(missingTombstoneKeyService.deleteExpired()).resolves.toBe(0);
     missingAuthority = new PersistenceAuthority(pool, resumeKeys, missingTombstoneKeys);
     await missingAuthority.bootstrap();
     missingTombstoneKeyService = new GuestSessionService(pool, missingAuthority);
@@ -1438,14 +1841,38 @@ describe("PostgreSQL persistence spine", () => {
       checkpointSchemaVersion: 1,
       checkpoint: { step: 0 },
     });
-    await expect(
-      new PersistenceAuthority(
-        pool,
-        new HmacKeyring(hmacKey("resume", 9, 9)),
-        missingTombstoneKeys,
-      ).bootstrap(),
-    ).rejects.toMatchObject({ code: "KEY_VERSION_UNAVAILABLE" });
-    await missingTombstoneKeyService.delete(live.resumeSecret);
+    const missingResumeAuthority = new PersistenceAuthority(
+      pool,
+      new HmacKeyring(hmacKey("resume", 9, 9)),
+      missingTombstoneKeys,
+    );
+    await expect(missingResumeAuthority.bootstrap()).resolves.toEqual({
+      retentionReady: true,
+      capabilityServingReady: false,
+      capabilityBlockerCode: "KEY_VERSION_UNAVAILABLE",
+    });
+    const missingResumeService = new GuestSessionService(pool, missingResumeAuthority);
+    await expect(missingResumeService.resume(live.resumeSecret))
+      .rejects.toMatchObject({ code: "KEY_VERSION_UNAVAILABLE" });
+    await rawPool.query(
+      `UPDATE samurai_persistence.guest_sessions
+          SET expires_at = clock_timestamp() - interval '1 millisecond',
+              rotate_after = clock_timestamp() - interval '1 millisecond'
+        WHERE id = $1`,
+      [live.session.id],
+    );
+    await expect(missingResumeService.deleteExpired()).resolves.toBe(1);
+    const recoveredAuthority = new PersistenceAuthority(pool, resumeKeys, missingTombstoneKeys);
+    await expect(recoveredAuthority.bootstrap()).resolves.toEqual({
+      retentionReady: true,
+      capabilityServingReady: true,
+    });
+    await expect(new GuestSessionService(pool, recoveredAuthority).issue({
+      consentVersion: "privacy-v1",
+      contentVersion: "content-v1",
+      checkpointSchemaVersion: 1,
+      checkpoint: { step: 0 },
+    })).resolves.toHaveProperty("resumeSecret");
   });
 
   it("requires the production bootstrap and attests same-version key identity", async () => {
@@ -1470,8 +1897,18 @@ describe("PostgreSQL persistence spine", () => {
       "UPDATE samurai_persistence.guest_resume_digests SET digest_key_identity = decode(repeat('ab', 32), 'hex') WHERE guest_session_id = $1",
       [issued.session.id],
     );
-    await expect(new PersistenceAuthority(pool, resumeKeys, tombstoneKeys).bootstrap())
-      .rejects.toMatchObject({ code: "KEY_IDENTITY_MISMATCH" });
+    const driftedAuthority = new PersistenceAuthority(pool, resumeKeys, tombstoneKeys);
+    await expect(driftedAuthority.bootstrap()).resolves.toEqual({
+      retentionReady: true,
+      capabilityServingReady: false,
+      capabilityBlockerCode: "KEY_IDENTITY_MISMATCH",
+    });
+    await expect(new GuestSessionService(pool, driftedAuthority).issue({
+      consentVersion: "privacy-v1",
+      contentVersion: "content-v1",
+      checkpointSchemaVersion: 1,
+      checkpoint: { step: 0 },
+    })).rejects.toMatchObject({ code: "KEY_IDENTITY_MISMATCH" });
   });
 
   it("retains a deleted session's source resume key dependency through the tombstone horizon", async () => {
@@ -1492,7 +1929,11 @@ describe("PostgreSQL persistence spine", () => {
         new HmacKeyring(hmacKey("resume", 17, 17)),
         tombstoneKeys,
       ).bootstrap(),
-    ).rejects.toMatchObject({ code: "KEY_VERSION_UNAVAILABLE" });
+    ).resolves.toEqual({
+      retentionReady: true,
+      capabilityServingReady: false,
+      capabilityBlockerCode: "KEY_VERSION_UNAVAILABLE",
+    });
   });
 
   it("enforces verify horizons and safe destruction against authoritative database time", async () => {
@@ -1502,7 +1943,11 @@ describe("PostgreSQL persistence spine", () => {
       { ...tooShort, verifyUntil: new Date("2026-06-02T00:00:00.000Z") },
     );
     await expect(new PersistenceAuthority(pool, shortRing, tombstoneKeys).bootstrap())
-      .rejects.toMatchObject({ code: "KEY_VERIFY_HORIZON_TOO_SHORT" });
+      .resolves.toEqual({
+        retentionReady: true,
+        capabilityServingReady: false,
+        capabilityBlockerCode: "KEY_VERIFY_HORIZON_TOO_SHORT",
+      });
 
     const clock = await rawPool.query<{ readonly now: Date }>("SELECT clock_timestamp() AS now");
     const boundary = clock.rows[0]!.now;
@@ -1532,9 +1977,6 @@ describe("PostgreSQL persistence spine", () => {
       hmacKey("resume", 15, 15),
       { ...compromised, compromisedAt: new Date("2026-07-01T00:00:00.000Z") },
     );
-    const cleanupAuthority = new PersistenceAuthority(pool, compromisedRing, tombstoneKeys);
-    await cleanupAuthority.bootstrap();
-    const cleanupService = new GuestSessionService(pool, cleanupAuthority);
     const compromisedSecret = issueResumeSecret();
     const digestClock = await rawPool.query<{ readonly now: Date }>("SELECT clock_timestamp() AS now");
     const digest = new HmacKeyring(
@@ -1555,6 +1997,13 @@ describe("PostgreSQL persistence spine", () => {
        VALUES ($1, 'current', $2, $3, $4, NULL)`,
       ["compromised-cleanup-subject", digest.keyVersion, keyIdentityBytes(digest.keyIdentity), digest.digest],
     );
+    const cleanupAuthority = new PersistenceAuthority(pool, compromisedRing, tombstoneKeys);
+    await expect(cleanupAuthority.bootstrap()).resolves.toEqual({
+      retentionReady: true,
+      capabilityServingReady: false,
+      capabilityBlockerCode: "KEY_VERSION_COMPROMISED",
+    });
+    const cleanupService = new GuestSessionService(pool, cleanupAuthority);
     await expect(cleanupService.resume(compromisedSecret)).rejects.toMatchObject({ code: "KEY_VERSION_COMPROMISED" });
     await rawPool.query(
       `UPDATE samurai_persistence.guest_sessions
@@ -1588,8 +2037,11 @@ describe("PostgreSQL persistence spine", () => {
       resumeKeys,
       new TombstoneKeyring(hmacKey("tombstone", 17, 17), [compromisedTombstone]),
     );
-    await expect(compromisedTombstoneAuthority.bootstrap())
-      .rejects.toMatchObject({ code: "KEY_VERSION_COMPROMISED" });
+    await expect(compromisedTombstoneAuthority.bootstrap()).resolves.toEqual({
+      retentionReady: true,
+      capabilityServingReady: false,
+      capabilityBlockerCode: "KEY_VERSION_COMPROMISED",
+    });
   });
 
   it("deletes the complete stage-1 subject matrix and leaves only irreversible tombstones", async () => {
