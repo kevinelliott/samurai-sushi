@@ -137,40 +137,41 @@ stable reviewed dish ID and version.
 
 ```text
 SpeciesDefinition {
-  speciesId, version, contentHash, scientificName, localizedCommonNames,
-  marketNames, group, culinaryReviewId
+  id, version, contentHash, scientificName, localizedCommonNames,
+  marketNames, group, reviewId
 }
 IngredientDefinition {
-  ingredientId, version, contentHash, kind, speciesRef?,
-  productKind?: flesh|roe|shellfish|other, names, glossary,
+  id, version, contentHash, kind, speciesRef?,
+  productKind?: flesh|roe|shellfish|other, roles, names, glossary,
   baseContainsAllergens, baseMayContainAllergens, baseCrossContactTags,
-  artKey, culturalReviewId
+  artKey, reviewId
 }
 CutStyle {
-  cutStyleId, version, contentHash, names, glossary, compatibleProductKinds,
-  presentationClass, culturalReviewId
+  id, version, contentHash, names, glossary, compatibleProductKinds,
+  presentationClass, reviewId
 }
 PreparedComponent {
-  componentId, version, contentHash, ingredientRef, cutStyleRef?,
-  treatment: raw|cooked|cured|smoked|surfaceSeared|seasoned|plant,
-  requiresRawFoodNotice, containsAllergens, mayContainAllergens,
-  crossContactTags, stationSteps, artKey, culturalReviewId
+  id, version, contentHash, ingredientRef, cutStyleRef?,
+  treatment: raw|cooked|cured|smoked|surface-seared|seasoned|plant,
+  rawNotice, containsAllergens, mayContainAllergens,
+  crossContactTags, stationSteps, artKey, reviewId
 }
 DishFamily {
-  familyId, version, contentHash, structuralSlots, forbiddenSlots,
-  namingRules, platingRules, culturalReviewId
+  id, version, contentHash, form, requiredRoles, allowedRoles,
+  noriPlacement, namingRules, platingRules, reviewId
 }
 DishDefinition {
-  dishId, version, contentHash, familyRef, names, componentSlots,
-  containsAllergens, mayContainAllergens, crossContactTags, rawFoodProfile,
-  dietaryTags, presentationRules, artKey, culturalReviewId
+  id, version, contentHash, familyRef, names, componentSlots,
+  containsAllergens, mayContainAllergens, crossContactTags, rawProfile,
+  dietaryTags, presentationRules, nonColorIdentity, artKey, reviewId
 }
 RecipeVersion {
-  recipeId, version, dishRef, exactComponentAmounts, stationSequence,
-  unlockRule, recovery, seasonalityRuleRefs, contentHash, status
+  id, version, dishRef, exactComponentAmounts:{componentRef,quantity,unit,role},
+  stationSequence, deterministicResult, unlockRule, recovery,
+  seasonalityRuleRefs, contentHash, reviewId, status
 }
 RecipeVariant {
-  variantId, version, contentHash, baseRecipeRef, exactSubstitutions,
+  id, version, contentHash, reviewId, baseRecipeRef, substitutions,
   resultingDishRef, reason, reviewIds, status
 }
 SeasonWindow {
@@ -178,12 +179,13 @@ SeasonWindow {
   availability: available|limited|unavailable
 }
 SeasonalityRule {
-  ruleId, version, contentHash, subjectRef, regionId, ianaTimeZone,
-  calendar: iso8601Gregorian, tzdbVersion, windows:[SeasonWindow],
+  id, version, contentHash, reviewId, subjectRef:{kind,id,version},
+  regionId, ianaTimeZone, calendar: iso8601-gregorian,
+  tzdbVersion, windows:[SeasonWindow],
   sourceRef, reviewedAt
 }
 ProvenanceProfile {
-  profileId, version, contentHash, semanticSubjectRef, claimType, claimValue,
+  id, version, contentHash, semanticSubjectRef, claimType, claimValue,
   evidenceRef, validFrom?, validUntil?, reviewStatus
 }
 AssetBinding {
@@ -192,9 +194,10 @@ AssetBinding {
   enabledFrom?, disabledAt?, reviewIds, enabled
 }
 ContentPack {
-  packId, version, contentHash, speciesRefs, ingredientRefs, componentRefs,
-  dishRefs, recipeRefs, seasonalityRuleRefs, availabilityWindow?,
-  archivePolicy, reviewerSignoffs
+  id, version, contentHash, reviewId, schemaVersion, speciesRefs,
+  ingredientRefs, cutStyleRefs, componentRefs, familyRefs, dishRefs,
+  recipeRefs, variantRefs, seasonalityRuleRefs, artAssetDigests, archivePolicy,
+  reviewerSignoffs
 }
 ```
 

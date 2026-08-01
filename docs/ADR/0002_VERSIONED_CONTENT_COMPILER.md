@@ -1,0 +1,59 @@
+# ADR 0002: Versioned Content Compiler
+
+- Status: adopted for Phase 0
+- Date: 2026-07-31
+- Scope: authored sushi content before persistence or asset interoperability
+
+## Decision
+
+`@samurai-sushi/content` is the sole Phase 0 compiler for playable culinary
+content. Its TypeScript model is the executable field-name authority for schema
+version 1 and the matching entity summaries in `TECHNICAL_SPEC.md` and
+`SUSHI_CONTENT_CATALOG.md` use those names.
+
+The compiler accepts unknown input, rejects unknown or missing fields, and
+validates the complete bundle before returning any content. Every row carries
+`{id, version, contentHash, reviewId}`. References always carry `{id, version}`;
+the pack enumerates every supplied row exactly once. Hashes use canonical JSON
+under the domain `samurai-sushi:content-row:v1` so repeated builds are byte
+stable and a field change cannot masquerade as the same version.
+
+The package derives dish allergen and raw profiles from exact prepared-component
+versions, validates typed family roles and nori placement, rejects wildcard or
+cyclic variants, requires immutable art digests and non-color identities, and
+uses pinned subject, region, IANA zone, tzdb version, and half-open dates for
+seasonality; compilation rejects rules whose tzdb version differs from the
+compiler runtime. Historical recipe snapshots contain their transitive component,
+ingredient, cut, family, seasonality, art-key, recovery, and result meaning.
+
+Diagnostic issue codes remain precise for authors. `ContentValidationError`
+also exposes one existing stable domain failure code: structural/hash/atomicity
+issues map to `CONTENT_VERSION_DRIFT`; species/roe/cut issues to
+`UNKNOWN_SPECIES`; family and dish-input issues to `DISH_FAMILY_MISMATCH`;
+variant issues to `AMBIGUOUS_VARIANT`; allergen/raw/seasonality/review issues to
+their corresponding stable codes; and invalid quantities to
+`INVALID_QUANTITY`. No new public failure vocabulary is introduced.
+
+## Boundaries
+
+This pure package does not authorize tokens, custody, escrow, consumption, or a
+deployment. `AssetBinding` remains the only future semantic-to-onchain bridge
+and belongs behind the separately reviewed interoperability boundary.
+`reviewReferences` prove only that a named record is present. The bundled
+salmon-sashimi data uses explicit `fixture-*` review references and is not
+evidence of production culinary, cultural, sourcing, or food-safety approval.
+
+`ProvenanceProfile` remains a documented later boundary rather than being
+silently collapsed into ingredient identity. Production activation that makes
+origin, tradition, sourcing, or seasonality claims must add evidence-backed
+provenance records and named review before release.
+
+## Consequences
+
+- Persistence and guest/account decisions remain outside this slice.
+- The walletless tutorial still has exactly three orders; the fixture exercises
+  the immediate post-service salmon-sashimi unlock schema only.
+- Pack compilation is all-or-nothing and returns a deeply frozen result.
+- New content versions cannot reinterpret historical orders.
+- Cultural approval, live network readiness, and onchain manifests remain
+  separate evidence categories.
