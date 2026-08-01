@@ -4,6 +4,12 @@
   "private": true,
   "type": "module",
   "packageManager": "pnpm@10.13.1",
+  "pnpm": {
+    "overrides": {
+      "postcss": "8.5.25",
+      "sharp": "0.35.3"
+    }
+  },
   "engines": {
     "node": ">=22"
   },
@@ -38,6 +44,6 @@
     "typescript": "5.9.2",
     "tsx": "4.20.5",
     "typescript-eslint": "8.42.0",
-    "vitest": "3.2.4"
+    "vitest": "3.2.7"
   }
 }
