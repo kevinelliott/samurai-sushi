@@ -203,7 +203,11 @@ ContentPack {
   recipeRefs, variantRefs, seasonalityRuleRefs, contentManifestHash,
   artAssetMapHash, archivePolicy, reviewerSignoffs
 }
-ContentBundle { schemaVersion, pack, versioned definition arrays, artAssets:[ArtAsset], reviewReferences }
+ContentBundle {
+  schemaVersion, pack, species, ingredients, cutStyles, components, families,
+  dishes, recipes, variants, seasonalityRules, artAssets:[ArtAsset],
+  reviewReferences
+}
 ```
 
 Commercial/display names are labels, not identity. Species, culinary product,

@@ -66,7 +66,7 @@ ProvenanceProfile { id, version, contentHash, semanticSubjectRef, claimType, cla
 AssetBinding { id, version, semanticSubjectRef, assetRef, use, policyVersion, manifestHash, reviewIds, enabled }
 ArtAsset { key, digest, nonColorIdentity }
 ContentPack { id, version, contentHash, reviewId, schemaVersion, speciesRefs, ingredientRefs, cutStyleRefs, componentRefs, familyRefs, dishRefs, recipeRefs, variantRefs, seasonalityRuleRefs, contentManifestHash, artAssetMapHash, archivePolicy, reviewerSignoffs }
-ContentBundle { schemaVersion, pack, versioned definition arrays, artAssets:[ArtAsset], reviewReferences }
+ContentBundle { schemaVersion, pack, species, ingredients, cutStyles, components, families, dishes, recipes, variants, seasonalityRules, artAssets:[ArtAsset], reviewReferences }
 GuestSession { id, resumeSecretHash, state, createdAt, lastSeenAt, expiresAt, consentVersion }
 Player { id, linkedWallets, tutorialState, createdAt }
 SubjectRef = GuestSubject { guestSessionId } | PlayerSubject { playerId }
