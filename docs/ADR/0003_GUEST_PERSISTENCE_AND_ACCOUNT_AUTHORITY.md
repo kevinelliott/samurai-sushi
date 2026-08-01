@@ -50,6 +50,13 @@ monotonic generation under `FOR UPDATE SKIP LOCKED`; an expired lease loses
 authority at the exact PostgreSQL-clock boundary, retry uses bounded backoff,
 and terminal attempts become dead letters.
 
+Stage 1 outbox claims expose only the opaque event ID and lease fence, never a
+domain-event payload or subject identity. Guest deletion cascades the durable
+event and claim, so a leased worker can neither retrieve nor acknowledge it
+after deletion. A later payload-bearing delivery protocol requires a separately
+reviewed authorization-aware final-dispatch boundary and an explicit resolution
+of the fetch/send privacy race; this persistence spine does not authorize one.
+
 ### Guest identity
 
 The server issues a random 256-bit resume secret only in a host-only
@@ -60,13 +67,30 @@ credentialed foreign origins. Persistence-enabled local development uses
 loopback HTTPS rather than weakening production cookie attributes.
 
 The database stores `HMAC-SHA-256(digestKey[keyVersion], secret)` plus the key
-version for each current or predecessor digest and compares digests in constant
-time. Cookie-secret rotation accepts the predecessor digest for at most 60
-seconds for in-flight requests. Digest-key rotation is separate: a retired key
-remains verification-only for the maximum 30-day session horizon plus the grace
-window, and successful authentication rotates the cookie secret onto the active
-key. Emergency compromise revokes every session under that key and requires
-fresh guest recovery or wallet proof; it never extends verification. Guest
+version and a domain-separated SHA-256 identity of the exact private key bytes
+for each current or predecessor digest and compares digests in constant time.
+Key rings defensively own their key bytes and expose immutable epoch metadata:
+activation, retirement, verification horizon, and compromise. Startup attests
+both version and key identity, and requires every verification horizon to cover
+the maximum live database dependency, including expired-session cleanup delay
+and guest-deletion tombstones. Compromise rejects capability use immediately;
+retention may still transform an expired subject into a tombstone using the
+active tombstone writer so privacy cleanup cannot deadlock.
+
+Cookie-secret rotation accepts the single predecessor digest for at most 60
+seconds for in-flight requests. While that row is live, predecessor requests
+authenticate without recursive rotation, current automatic rotation is
+deferred, and explicit rotation returns a stable retry-at-grace-boundary error.
+At equality the predecessor is expired and may be replaced. Command admission
+requires rotation before receipt access when PostgreSQL time is at or beyond
+`rotate_after`, or when a current digest uses a verification-only key;
+predecessor requests inside grace remain admissible. Every committed or exact
+replayed command updates `last_seen_at` under the session lock.
+
+Digest-key rotation is separate: a retired key remains verification-only through
+the session, cleanup, and tombstone horizons. Emergency compromise revokes every
+session under that key and requires fresh guest recovery or wallet proof; it
+never extends verification. Guest
 sessions have a 30-day idle and absolute maximum and rotate at least every seven
 active days, on recovery/export-import, or on a security event. Raw cookie
 headers and secrets are redacted before application,
@@ -78,7 +102,20 @@ Session, receipt, predecessor-grace, tombstone, lease, and cleanup boundaries
 use the authoritative PostgreSQL clock. Process clocks never decide whether a
 credential, response, tombstone, or worker claim remains valid. Startup and
 retention jobs inventory every key version referenced by a live resume digest
-or tombstone and fail closed if its verification-only key is unavailable.
+or tombstone and fail closed if its version, key identity, lifecycle state, or
+required horizon is unavailable. The sole persistence bootstrap first runs the
+production bundled migration and exact live-catalog attestation, then performs
+this inventory; session, command, retention, and outbox services cannot operate
+before it passes.
+
+Guest deletion creates a tombstone for every stored resume digest. Before issue,
+resume, command, or recovery acceptance, the server derives candidate resume
+digests across every unexpired resume verification key, then derives deletion
+tombstones across every unexpired tombstone verification key. Any exact live
+match rejects the capability. Tombstones are live only while `expires_at` is
+strictly greater than PostgreSQL time; equality is expired. Unauthenticated
+commands are iteratively bounded by depth, node count, string size, and total
+canonical bytes before recursive parsing or validation.
 
 Unclaimed guests expire after 30 days of inactivity; a retention job must run
 the same deletion matrix within 24 hours. Explicit guest deletion

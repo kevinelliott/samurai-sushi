@@ -1,5 +1,6 @@
 import type { SqlClient } from "./database";
-import type { VersionedDigest } from "./crypto";
+import { keyIdentityBytes } from "./crypto";
+import type { KeyIdentity, VersionedDigest } from "./crypto";
 
 export interface GuestSessionRecord {
   readonly id: string;
@@ -42,6 +43,7 @@ interface GuestProgressRow {
 export interface ResumeMatch extends GuestSessionRecord {
   readonly slot: "current" | "predecessor";
   readonly digestKeyVersion: number;
+  readonly digestKeyIdentity: KeyIdentity;
   readonly digest: Uint8Array;
   readonly digestValidUntil: Date | null;
 }
@@ -49,6 +51,7 @@ export interface ResumeMatch extends GuestSessionRecord {
 interface ResumeMatchRow extends GuestSessionRow {
   readonly slot: "current" | "predecessor";
   readonly digest_key_version: number;
+  readonly digest_key_identity: Uint8Array;
   readonly digest: Uint8Array;
   readonly digest_valid_until: Date | null;
 }
@@ -79,9 +82,9 @@ export class GuestSessionRepository {
     );
     await client.query(
       `INSERT INTO samurai_persistence.guest_resume_digests
-        (guest_session_id, slot, digest_key_version, digest, valid_until)
-       VALUES ($1, 'current', $2, $3, NULL)`,
-      [session.id, currentDigest.keyVersion, currentDigest.digest],
+        (guest_session_id, slot, digest_key_version, digest_key_identity, digest, valid_until)
+       VALUES ($1, 'current', $2, $3, $4, NULL)`,
+      [session.id, currentDigest.keyVersion, keyIdentityBytes(currentDigest.keyIdentity), currentDigest.digest],
     );
     await client.query(
       `INSERT INTO samurai_persistence.guest_progress
@@ -108,12 +111,12 @@ export class GuestSessionRepository {
     const values: Array<number | Uint8Array> = [];
     for (const candidate of candidates) {
       const offset = values.length;
-      values.push(candidate.keyVersion, candidate.digest);
-      clauses.push(`(d.digest_key_version = $${offset + 1} AND d.digest = $${offset + 2})`);
+      values.push(candidate.keyVersion, keyIdentityBytes(candidate.keyIdentity), candidate.digest);
+      clauses.push(`(d.digest_key_version = $${offset + 1} AND d.digest_key_identity = $${offset + 2} AND d.digest = $${offset + 3})`);
     }
     const result = await client.query<ResumeMatchRow>(
       `SELECT s.id, s.consent_version, s.created_at, s.last_seen_at, s.expires_at, s.rotate_after,
-              d.slot, d.digest_key_version, d.digest, d.valid_until AS digest_valid_until
+              d.slot, d.digest_key_version, d.digest_key_identity, d.digest, d.valid_until AS digest_valid_until
          FROM samurai_persistence.guest_resume_digests d
          JOIN samurai_persistence.guest_sessions s ON s.id = d.guest_session_id
         WHERE ${clauses.join(" OR ")}
@@ -126,6 +129,7 @@ export class GuestSessionRepository {
       ...sessionFromRow(row),
       slot: row.slot,
       digestKeyVersion: row.digest_key_version,
+      digestKeyIdentity: `sha256:${Buffer.from(row.digest_key_identity).toString("hex")}`,
       digest: row.digest,
       digestValidUntil: row.digest_valid_until,
     };
@@ -147,9 +151,16 @@ export class GuestSessionRepository {
     now: Date,
   ): Promise<void> {
     await client.query(
-      "DELETE FROM samurai_persistence.guest_resume_digests WHERE guest_session_id = $1 AND slot = 'predecessor'",
-      [guestSessionId],
+      `DELETE FROM samurai_persistence.guest_resume_digests
+        WHERE guest_session_id = $1 AND slot = 'predecessor' AND valid_until <= $2`,
+      [guestSessionId, now],
     );
+    const live = await client.query<{ readonly valid_until: Date }>(
+      `SELECT valid_until FROM samurai_persistence.guest_resume_digests
+        WHERE guest_session_id = $1 AND slot = 'predecessor' AND valid_until > $2`,
+      [guestSessionId, now],
+    );
+    if (live.rows[0]) throw new Error("A live predecessor credential prevents rotation.");
     await client.query(
       `UPDATE samurai_persistence.guest_resume_digests
           SET slot = 'predecessor', valid_until = $2
@@ -158,9 +169,9 @@ export class GuestSessionRepository {
     );
     await client.query(
       `INSERT INTO samurai_persistence.guest_resume_digests
-        (guest_session_id, slot, digest_key_version, digest, valid_until)
-       VALUES ($1, 'current', $2, $3, NULL)`,
-      [guestSessionId, digest.keyVersion, digest.digest],
+        (guest_session_id, slot, digest_key_version, digest_key_identity, digest, valid_until)
+       VALUES ($1, 'current', $2, $3, $4, NULL)`,
+      [guestSessionId, digest.keyVersion, keyIdentityBytes(digest.keyIdentity), digest.digest],
     );
     await client.query(
       `UPDATE samurai_persistence.guest_sessions
@@ -168,6 +179,15 @@ export class GuestSessionRepository {
         WHERE id = $1`,
       [guestSessionId, now, rotateAfter],
     );
+  }
+
+  async livePredecessorUntil(client: SqlClient, guestSessionId: string, now: Date): Promise<Date | null> {
+    const result = await client.query<{ readonly valid_until: Date }>(
+      `SELECT valid_until FROM samurai_persistence.guest_resume_digests
+        WHERE guest_session_id = $1 AND slot = 'predecessor' AND valid_until > $2`,
+      [guestSessionId, now],
+    );
+    return result.rows[0]?.valid_until ?? null;
   }
 
   async lockById(client: SqlClient, guestSessionId: string): Promise<GuestSessionRecord | null> {

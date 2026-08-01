@@ -16,10 +16,11 @@ CREATE TABLE samurai_persistence.guest_resume_digests (
   guest_session_id text NOT NULL REFERENCES samurai_persistence.guest_sessions(id) ON DELETE CASCADE,
   slot text NOT NULL CHECK (slot IN ('current', 'predecessor')),
   digest_key_version integer NOT NULL CHECK (digest_key_version > 0),
+  digest_key_identity bytea NOT NULL CHECK (octet_length(digest_key_identity) = 32),
   digest bytea NOT NULL CHECK (octet_length(digest) = 32),
   valid_until timestamptz,
   PRIMARY KEY (guest_session_id, slot),
-  UNIQUE (digest_key_version, digest),
+  UNIQUE (digest_key_version, digest_key_identity, digest),
   CHECK (
     (slot = 'current' AND valid_until IS NULL) OR
     (slot = 'predecessor' AND valid_until IS NOT NULL)
@@ -27,7 +28,7 @@ CREATE TABLE samurai_persistence.guest_resume_digests (
 );
 
 CREATE INDEX guest_resume_digests_lookup
-  ON samurai_persistence.guest_resume_digests (digest_key_version, digest);
+  ON samurai_persistence.guest_resume_digests (digest_key_version, digest_key_identity, digest);
 
 CREATE TABLE samurai_persistence.guest_progress (
   guest_session_id text PRIMARY KEY REFERENCES samurai_persistence.guest_sessions(id) ON DELETE CASCADE,
@@ -87,7 +88,19 @@ CREATE TABLE samurai_persistence.outbox_deliveries (
   CHECK ((state = 'delivered') = (delivered_at IS NOT NULL)),
   CHECK ((state = 'dead-letter') = (dead_lettered_at IS NOT NULL)),
   CHECK (state = 'processing' OR (claim_token IS NULL AND claim_expires_at IS NULL)),
-  CHECK (last_error_code IS NULL OR length(last_error_code) <= 128)
+  CHECK (claim_token IS NULL OR length(claim_token) > 0),
+  CHECK (
+    state NOT IN ('processing', 'delivered', 'dead-letter') OR
+    (attempt_count > 0 AND claim_generation > 0 AND last_attempt_at IS NOT NULL)
+  ),
+  CHECK (state <> 'processing' OR claim_expires_at > last_attempt_at),
+  CHECK (state <> 'dead-letter' OR last_error_code IS NOT NULL),
+  CHECK (
+    state <> 'pending' OR
+    (attempt_count = 0 AND claim_generation = 0 AND last_attempt_at IS NULL) OR
+    (attempt_count > 0 AND claim_generation > 0 AND last_attempt_at IS NOT NULL)
+  ),
+  CHECK (last_error_code IS NULL OR last_error_code ~ '^[A-Z][A-Z0-9_]{0,127}$')
 );
 
 CREATE INDEX outbox_deliveries_claimable
@@ -97,10 +110,17 @@ CREATE INDEX outbox_deliveries_claimable
 CREATE TABLE samurai_persistence.deletion_tombstones (
   kind text NOT NULL CHECK (kind IN ('guest-session', 'command')),
   digest_key_version integer NOT NULL CHECK (digest_key_version > 0),
+  digest_key_identity bytea NOT NULL CHECK (octet_length(digest_key_identity) = 32),
   tombstone_digest bytea NOT NULL CHECK (octet_length(tombstone_digest) = 32),
+  resume_digest_key_version integer CHECK (resume_digest_key_version > 0),
+  resume_digest_key_identity bytea CHECK (octet_length(resume_digest_key_identity) = 32),
   created_at timestamptz NOT NULL,
   expires_at timestamptz NOT NULL,
-  PRIMARY KEY (kind, digest_key_version, tombstone_digest),
+  PRIMARY KEY (kind, digest_key_version, digest_key_identity, tombstone_digest),
+  CHECK (
+    (kind = 'guest-session' AND resume_digest_key_version IS NOT NULL AND resume_digest_key_identity IS NOT NULL) OR
+    (kind = 'command' AND resume_digest_key_version IS NULL AND resume_digest_key_identity IS NULL)
+  ),
   CHECK (expires_at > created_at)
 );
 

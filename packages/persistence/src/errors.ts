@@ -15,6 +15,20 @@ export class GuestResumeError extends PersistenceError {
   }
 }
 
+export class GuestRotationDeferredError extends PersistenceError {
+  constructor(readonly retryAtMs: number) {
+    super("GUEST_ROTATION_DEFERRED", "A predecessor credential is still inside its bounded grace window.");
+    this.name = "GuestRotationDeferredError";
+  }
+}
+
+export class GuestRotationRequiredError extends PersistenceError {
+  constructor() {
+    super("GUEST_ROTATION_REQUIRED", "The guest credential must be rotated before commands are admitted.");
+    this.name = "GuestRotationRequiredError";
+  }
+}
+
 export class CommandAuthenticationError extends PersistenceError {
   constructor() {
     super("COMMAND_AUTHENTICATION_FAILED", "The guest command credential is invalid or expired.");

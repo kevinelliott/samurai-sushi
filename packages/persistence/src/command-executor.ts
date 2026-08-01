@@ -3,7 +3,6 @@ import { canonicalJson, subjectIdentity, validateCommandEnvelope } from "@samura
 import type { JsonObject, JsonValue } from "@samurai-sushi/domain";
 import { canonicalizeDecision, hashPersistenceResponse } from "./canonical-decision";
 import { constantTimeDigestEqual, GuestSecretFormatError } from "./crypto";
-import type { HmacKeyring, TombstoneKeyring } from "./crypto";
 import type { SqlPool } from "./database";
 import { TransactionRunner } from "./database";
 import type {
@@ -14,11 +13,12 @@ import {
   CommandAuthenticationError,
   IdempotencyPayloadMismatchError,
   IdempotencyReceiptExpiredError,
+  GuestRotationRequiredError,
   PersistenceError,
   RevisionConflictError,
 } from "./errors";
 import { addMilliseconds, ADR_0003_PERSISTENCE_LIFECYCLE } from "./lifecycle";
-import { assertPersistenceKeyInventory } from "./key-inventory";
+import type { PersistenceAuthority } from "./key-inventory";
 import { GuestProgressRepository, GuestSessionRepository } from "./repositories";
 
 interface ReceiptRow {
@@ -35,10 +35,6 @@ interface ReceiptRow {
 
 interface RevisionRow {
   readonly revision: string;
-}
-
-interface DatabaseClockRow {
-  readonly now: Date;
 }
 
 export interface CommandExecutionResult<ResponsePayload> {
@@ -67,8 +63,7 @@ export class GuestCommandExecutor {
 
   constructor(
     pool: SqlPool,
-    private readonly resumeKeys: HmacKeyring,
-    private readonly tombstoneKeys: TombstoneKeyring,
+    private readonly authority: PersistenceAuthority,
   ) {
     this.runner = new TransactionRunner(pool);
   }
@@ -83,11 +78,12 @@ export class GuestCommandExecutor {
     handler: PersistenceCommandHandler<Payload, Checkpoint, ResponsePayload>,
   ): Promise<CommandExecutionResult<ResponsePayload>> {
     let command: PersistenceCommandEnvelope<Payload>;
-    let candidates;
     try {
-      const detached = JSON.parse(canonicalJson(commandInput)) as unknown;
+      assertBoundedUnauthenticatedCommand(commandInput);
+      const serialized = canonicalJson(commandInput);
+      if (Buffer.byteLength(serialized, "utf8") > MAX_COMMAND_BYTES) throw new CommandBoundsError();
+      const detached = JSON.parse(serialized) as unknown;
       command = deepFreeze(validateCommandEnvelope(detached)) as PersistenceCommandEnvelope<Payload>;
-      candidates = this.resumeKeys.candidates(resumeSecret);
     } catch (error) {
       if (error instanceof GuestSecretFormatError) throw new CommandAuthenticationError();
       throw error;
@@ -97,7 +93,22 @@ export class GuestCommandExecutor {
     const guestSessionId = subject.subjectId;
     const payloadHash = digestFromDomainHash(command.payloadHash, "payloadHash");
     return this.runner.run(async (client) => {
-      await assertPersistenceKeyInventory(client, this.resumeKeys, this.tombstoneKeys);
+      const now = await this.authority.assertTransactionReady(client);
+      let candidates;
+      try {
+        candidates = this.authority.resumeKeys.candidates(resumeSecret, now);
+      } catch (error) {
+        if (error instanceof GuestSecretFormatError) throw new CommandAuthenticationError();
+        throw error;
+      }
+      try {
+        await this.authority.assertGuestSecretNotTombstoned(client, resumeSecret, now);
+      } catch (error) {
+        if (error instanceof PersistenceError && error.code === "GUEST_SECRET_TOMBSTONED") {
+          throw new CommandAuthenticationError();
+        }
+        throw error;
+      }
       const session = await this.sessions.findResumeMatchForUpdate(client, candidates);
       const authenticatedCandidate = session
         ? candidates.find((candidate) => candidate.keyVersion === session.digestKeyVersion)
@@ -108,9 +119,6 @@ export class GuestCommandExecutor {
         && authenticatedCandidate
         && constantTimeDigestEqual(authenticatedCandidate.digest, session.digest),
       );
-      const clock = await client.query<DatabaseClockRow>("SELECT clock_timestamp() AS now");
-      const now = clock.rows[0]?.now;
-      if (!now) throw new PersistenceError("DATABASE_CLOCK_UNAVAILABLE", "PostgreSQL did not return its authoritative clock.");
       if (
         !authenticated
         || !session
@@ -120,6 +128,11 @@ export class GuestCommandExecutor {
       ) {
         throw new CommandAuthenticationError();
       }
+      if (
+        session.rotateAfter.getTime() <= now.getTime()
+        || (session.slot === "current" && session.digestKeyVersion !== this.authority.resumeKeys.active.version)
+      ) throw new GuestRotationRequiredError();
+      await this.sessions.touch(client, guestSessionId, now);
 
       const lockScope = `guest:${guestSessionId}:${command.idempotencyKey}`;
       await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [lockScope]);
@@ -239,6 +252,48 @@ export class GuestCommandExecutor {
         committedRevision,
       };
     });
+  }
+}
+
+const MAX_COMMAND_DEPTH = 32;
+const MAX_COMMAND_NODES = 2_048;
+const MAX_COMMAND_STRING_BYTES = 16 * 1_024;
+const MAX_COMMAND_BYTES = 256 * 1_024;
+
+export class CommandBoundsError extends PersistenceError {
+  constructor() {
+    super("COMMAND_BOUNDS_EXCEEDED", "The unauthenticated command exceeds structural resource limits.");
+    this.name = "CommandBoundsError";
+  }
+}
+
+function assertBoundedUnauthenticatedCommand(root: unknown): void {
+  const stack: Array<{ readonly value: unknown; readonly depth: number }> = [{ value: root, depth: 0 }];
+  let nodes = 0;
+  let stringBytes = 0;
+  while (stack.length > 0) {
+    const item = stack.pop()!;
+    nodes += 1;
+    if (nodes > MAX_COMMAND_NODES || item.depth > MAX_COMMAND_DEPTH) throw new CommandBoundsError();
+    if (typeof item.value === "string") {
+      const bytes = Buffer.byteLength(item.value, "utf8");
+      if (bytes > MAX_COMMAND_STRING_BYTES) throw new CommandBoundsError();
+      stringBytes += bytes;
+      if (stringBytes > MAX_COMMAND_BYTES) throw new CommandBoundsError();
+      continue;
+    }
+    if (item.value === null || typeof item.value !== "object") continue;
+    const descriptors = Object.getOwnPropertyDescriptors(item.value);
+    for (const key of Reflect.ownKeys(descriptors)) {
+      if (typeof key === "symbol") throw new CommandBoundsError();
+      const descriptor = descriptors[key]!;
+      if (!("value" in descriptor)) throw new CommandBoundsError();
+      const keyBytes = Buffer.byteLength(key, "utf8");
+      if (keyBytes > MAX_COMMAND_STRING_BYTES) throw new CommandBoundsError();
+      stringBytes += keyBytes;
+      if (stringBytes > MAX_COMMAND_BYTES) throw new CommandBoundsError();
+      stack.push({ value: descriptor.value, depth: item.depth + 1 });
+    }
   }
 }
 

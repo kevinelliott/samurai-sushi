@@ -1,20 +1,15 @@
 import { randomUUID } from "node:crypto";
-import type { JsonObject } from "@samurai-sushi/domain";
-import type { SqlPool } from "./database";
+import type { SqlClient, SqlPool } from "./database";
 import { TransactionRunner } from "./database";
 import { OutboxClaimLostError } from "./errors";
+import type { PersistenceAuthority } from "./key-inventory";
 
 export interface OutboxClaim {
   readonly eventId: string;
-  readonly eventType: string;
-  readonly schemaVersion: number;
-  readonly payload: JsonObject;
-  readonly committedRevision: number;
-  readonly createdAt: Date;
   readonly attemptCount: number;
   readonly claimToken: string;
   readonly claimGeneration: number;
-  readonly claimExpiresAt: Date;
+  readonly claimExpiresAt: string;
 }
 
 export interface OutboxDeliveryPolicy {
@@ -25,11 +20,6 @@ export const DEFAULT_OUTBOX_DELIVERY_POLICY: OutboxDeliveryPolicy = Object.freez
 
 interface OutboxClaimRow {
   readonly event_id: string;
-  readonly event_type: string;
-  readonly schema_version: number;
-  readonly payload: JsonObject;
-  readonly committed_revision: string;
-  readonly created_at: Date;
   readonly attempt_count: number;
   readonly claim_token: string;
   readonly claim_generation: string;
@@ -38,6 +28,15 @@ interface OutboxClaimRow {
 
 interface StateRow {
   readonly state: "pending" | "delivered" | "dead-letter";
+}
+
+interface ClaimFenceRow {
+  readonly attempt_count: number;
+  readonly claim_expires_at: Date;
+}
+
+interface DatabaseClockRow {
+  readonly now: Date;
 }
 
 function positiveInteger(value: number, name: string, maximum: number): void {
@@ -50,7 +49,11 @@ export class OutboxDeliveryService {
   private readonly runner: TransactionRunner;
   private readonly maxAttempts: number;
 
-  constructor(pool: SqlPool, policy: OutboxDeliveryPolicy = DEFAULT_OUTBOX_DELIVERY_POLICY) {
+  constructor(
+    pool: SqlPool,
+    private readonly authority: PersistenceAuthority,
+    policy: OutboxDeliveryPolicy = DEFAULT_OUTBOX_DELIVERY_POLICY,
+  ) {
     this.runner = new TransactionRunner(pool);
     positiveInteger(policy.maxAttempts, "Outbox maximum attempts", 100);
     this.maxAttempts = policy.maxAttempts;
@@ -61,6 +64,7 @@ export class OutboxDeliveryService {
     positiveInteger(leaseMs, "Outbox lease milliseconds", 15 * 60 * 1_000);
     const claimToken = randomUUID();
     return this.runner.run(async (client) => {
+      await this.authority.assertTransactionReady(client);
       const result = await client.query<OutboxClaimRow>(
         `WITH clock AS MATERIALIZED (
            SELECT clock_timestamp() AS now
@@ -95,41 +99,33 @@ export class OutboxDeliveryService {
             WHERE delivery.event_id = candidates.event_id
            RETURNING delivery.*
          )
-         SELECT event.event_id, event.event_type, event.schema_version, event.payload,
-                event.committed_revision, event.created_at, claimed.attempt_count,
-                claimed.claim_token, claimed.claim_generation, claimed.claim_expires_at
+         SELECT claimed.event_id, claimed.attempt_count, claimed.claim_token,
+                claimed.claim_generation, claimed.claim_expires_at
            FROM claimed
-           JOIN samurai_persistence.domain_events event ON event.event_id = claimed.event_id
-          ORDER BY event.created_at, event.event_id`,
+          ORDER BY claimed.available_at, claimed.event_id`,
         [limit, claimToken, leaseMs, this.maxAttempts],
       );
-      return result.rows.map((row) => ({
+      return Object.freeze(result.rows.map((row) => Object.freeze({
         eventId: row.event_id,
-        eventType: row.event_type,
-        schemaVersion: row.schema_version,
-        payload: row.payload,
-        committedRevision: Number(row.committed_revision),
-        createdAt: row.created_at,
         attemptCount: row.attempt_count,
         claimToken: row.claim_token,
         claimGeneration: Number(row.claim_generation),
-        claimExpiresAt: row.claim_expires_at,
-      }));
+        claimExpiresAt: row.claim_expires_at.toISOString(),
+      })));
     });
   }
 
   async markDelivered(eventId: string, claimToken: string, claimGeneration: number): Promise<void> {
     positiveInteger(claimGeneration, "Outbox claim generation", Number.MAX_SAFE_INTEGER);
     await this.runner.run(async (client) => {
+      await this.authority.assertTransactionReady(client);
+      const { now } = await this.lockLiveClaim(client, eventId, claimToken, claimGeneration);
       const result = await client.query(
-        `WITH clock AS MATERIALIZED (SELECT clock_timestamp() AS now)
-         UPDATE samurai_persistence.outbox_deliveries delivery
-            SET state = 'delivered', delivered_at = clock.now, claim_token = NULL,
+        `UPDATE samurai_persistence.outbox_deliveries
+            SET state = 'delivered', delivered_at = $4, claim_token = NULL,
                 claim_expires_at = NULL, last_error_code = NULL
-           FROM clock
-          WHERE event_id = $1 AND state = 'processing' AND claim_token = $2 AND claim_generation = $3
-            AND claim_expires_at > clock.now`,
-        [eventId, claimToken, claimGeneration],
+          WHERE event_id = $1 AND state = 'processing' AND claim_token = $2 AND claim_generation = $3`,
+        [eventId, claimToken, claimGeneration, now],
       );
       if (result.rowCount !== 1) throw new OutboxClaimLostError();
     });
@@ -147,27 +143,45 @@ export class OutboxDeliveryService {
     positiveInteger(backoffMs, "Outbox retry backoff milliseconds", 24 * 60 * 60 * 1_000);
     if (!/^[A-Z][A-Z0-9_]{0,127}$/.test(errorCode)) throw new Error("Outbox error codes must be stable uppercase identifiers.");
     return this.runner.run(async (client) => {
+      await this.authority.assertTransactionReady(client);
+      const { now, attemptCount } = await this.lockLiveClaim(client, eventId, claimToken, claimGeneration);
+      const terminal = (options.permanent ?? false) || attemptCount >= this.maxAttempts;
       const result = await client.query<StateRow>(
-        `WITH clock AS MATERIALIZED (SELECT clock_timestamp() AS now)
-         UPDATE samurai_persistence.outbox_deliveries delivery
-            SET state = CASE WHEN $4 OR attempt_count >= $5 THEN 'dead-letter' ELSE 'pending' END,
-                available_at = CASE
-                  WHEN $4 OR attempt_count >= $5 THEN available_at
-                  ELSE clock.now + ($6::text || ' milliseconds')::interval
-                END,
+        `UPDATE samurai_persistence.outbox_deliveries
+            SET state = CASE WHEN $4 THEN 'dead-letter' ELSE 'pending' END,
+                available_at = CASE WHEN $4 THEN available_at ELSE $5::timestamptz + ($6::text || ' milliseconds')::interval END,
                 claim_token = NULL,
                 claim_expires_at = NULL,
-                dead_lettered_at = CASE WHEN $4 OR attempt_count >= $5 THEN clock.now ELSE NULL END,
+                dead_lettered_at = CASE WHEN $4 THEN $5 ELSE NULL END,
                 last_error_code = $7
-           FROM clock
           WHERE event_id = $1 AND state = 'processing' AND claim_token = $2 AND claim_generation = $3
-            AND claim_expires_at > clock.now
         RETURNING state`,
-        [eventId, claimToken, claimGeneration, options.permanent ?? false, this.maxAttempts, backoffMs, errorCode],
+        [eventId, claimToken, claimGeneration, terminal, now, backoffMs, errorCode],
       );
       const state = result.rows[0]?.state;
       if (!state) throw new OutboxClaimLostError();
       return state === "dead-letter" ? state : "pending";
     });
+  }
+
+  private async lockLiveClaim(
+    client: SqlClient,
+    eventId: string,
+    claimToken: string,
+    claimGeneration: number,
+  ): Promise<{ readonly now: Date; readonly attemptCount: number }> {
+    const fence = await client.query<ClaimFenceRow>(
+      `SELECT attempt_count, claim_expires_at
+         FROM samurai_persistence.outbox_deliveries
+        WHERE event_id = $1 AND state = 'processing' AND claim_token = $2 AND claim_generation = $3
+        FOR UPDATE`,
+      [eventId, claimToken, claimGeneration],
+    );
+    const row = fence.rows[0];
+    if (!row) throw new OutboxClaimLostError();
+    const clock = await client.query<DatabaseClockRow>("SELECT clock_timestamp() AS now");
+    const now = clock.rows[0]?.now;
+    if (!now || row.claim_expires_at.getTime() <= now.getTime()) throw new OutboxClaimLostError();
+    return { now, attemptCount: row.attempt_count };
   }
 }

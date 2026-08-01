@@ -9,6 +9,7 @@ export interface Migration {
   readonly name: string;
   readonly sql: string;
   readonly checksum: Uint8Array;
+  readonly catalogChecksum: Uint8Array;
 }
 
 interface AppliedMigrationRow {
@@ -28,16 +29,39 @@ interface CatalogRow {
   readonly definition: string;
 }
 
-const MIGRATION_NAMES = ["0001_persistence_spine.sql"] as const;
+const MIGRATION_MANIFEST = [
+  {
+    name: "0001_persistence_spine.sql",
+    checksumHex: "de98235dd3097c4f046ff9ced25e8f862412503f6d85ba9faf01374c1dda91c9",
+    catalogChecksumHex: "a5d2cbd2f5e659af3b38c7e43fa7091d3b3f297c06ef26931898fa13d57b3ea8",
+  },
+] as const;
 
-export async function bundledMigrations(): Promise<readonly Migration[]> {
+type MigrationTextReader = (name: string) => Promise<string>;
+
+const readBundledMigration: MigrationTextReader = async (name) => {
+  const path = fileURLToPath(new URL(`../migrations/${name}`, import.meta.url));
+  return readFile(path, "utf8");
+};
+
+async function loadBundledMigrations(readMigration: MigrationTextReader): Promise<readonly Migration[]> {
   return Promise.all(
-    MIGRATION_NAMES.map(async (name) => {
-      const path = fileURLToPath(new URL(`../migrations/${name}`, import.meta.url));
-      const sql = await readFile(path, "utf8");
-      return { name, sql, checksum: createHash("sha256").update(sql).digest() };
+    MIGRATION_MANIFEST.map(async (manifest) => {
+      const sql = await readMigration(manifest.name);
+      const checksum = createHash("sha256").update(sql).digest();
+      if (checksum.toString("hex") !== manifest.checksumHex) throw new MigrationChangedError(manifest.name);
+      return {
+        name: manifest.name,
+        sql,
+        checksum,
+        catalogChecksum: Buffer.from(manifest.catalogChecksumHex, "hex"),
+      };
     }),
   );
+}
+
+export async function bundledMigrations(): Promise<readonly Migration[]> {
+  return loadBundledMigrations(readBundledMigration);
 }
 
 async function prepareMigrationLedger(client: SqlClient): Promise<void> {
@@ -67,14 +91,15 @@ async function catalogChecksum(client: SqlClient): Promise<Uint8Array> {
     WITH catalog_rows AS (
       SELECT 'schema'::text AS kind,
              n.nspname::text AS identity,
-             n.nspowner::regrole::text || '|' || COALESCE(n.nspacl::text, '') AS definition
+             (n.nspowner = current_user::regrole)::text || '|' || COALESCE(n.nspacl::text, '') AS definition
         FROM pg_namespace n
        WHERE n.nspname = 'samurai_persistence'
       UNION ALL
       SELECT 'relation'::text AS kind,
              c.relname::text AS identity,
              c.relkind::text || '|' || c.relpersistence::text || '|' || c.relrowsecurity::text || '|' ||
-             c.relforcerowsecurity::text || '|' || c.relreplident::text || '|' || c.relowner::regrole::text || '|' ||
+             c.relforcerowsecurity::text || '|' || c.relreplident::text || '|' ||
+             (c.relowner = current_user::regrole)::text || '|' ||
              COALESCE(c.relam::regclass::text, '') || '|' || COALESCE(c.reloptions::text, '') || '|' ||
              COALESCE(c.relacl::text, '') AS definition
         FROM pg_class c
@@ -82,10 +107,12 @@ async function catalogChecksum(client: SqlClient): Promise<Uint8Array> {
        WHERE n.nspname = 'samurai_persistence' AND c.relkind IN ('r', 'p', 'S', 'v', 'm')
       UNION ALL
       SELECT 'column', c.relname || '.' || a.attnum::text || '.' || a.attname,
+             a.atttypid::regtype::text || '|' || a.atttypmod::text || '|' ||
              format_type(a.atttypid, a.atttypmod) || '|' || a.attnotnull::text || '|' || a.attidentity::text || '|' ||
              a.attgenerated::text || '|' || a.attcollation::regcollation::text || '|' || a.attstorage::text || '|' ||
              a.attcompression::text || '|' ||
-             COALESCE(pg_get_expr(d.adbin, d.adrelid), '')
+             COALESCE(pg_get_expr(d.adbin, d.adrelid), '') || '|' || COALESCE(a.attacl::text, '') || '|' ||
+             COALESCE(a.attoptions::text, '') || '|' || COALESCE(a.attfdwoptions::text, '')
         FROM pg_attribute a
         JOIN pg_class c ON c.oid = a.attrelid
         JOIN pg_namespace n ON n.oid = c.relnamespace
@@ -99,6 +126,19 @@ async function catalogChecksum(client: SqlClient): Promise<Uint8Array> {
        WHERE n.nspname = 'samurai_persistence'
       UNION ALL
       SELECT 'index', table_class.relname || '.' || index_class.relname, pg_get_indexdef(index_class.oid)
+             || '|' || i.indisunique::text || '|' || i.indnullsnotdistinct::text
+             || '|' || i.indisprimary::text || '|' || i.indisexclusion::text
+             || '|' || i.indimmediate::text || '|' || i.indisclustered::text
+             || '|' || i.indisvalid::text || '|' || i.indcheckxmin::text
+             || '|' || i.indisready::text || '|' || i.indislive::text
+             || '|' || i.indisreplident::text || '|' || i.indnatts::text
+             || '|' || i.indnkeyatts::text || '|' || i.indkey::text
+             || '|' || i.indoption::text
+             || '|' || index_class.relpersistence::text
+             || '|' || (index_class.relowner = current_user::regrole)::text
+             || '|' || index_class.relam::regclass::text
+             || '|' || COALESCE(index_class.reloptions::text, '')
+             || '|' || COALESCE(index_class.relacl::text, '')
         FROM pg_index i
         JOIN pg_class table_class ON table_class.oid = i.indrelid
         JOIN pg_class index_class ON index_class.oid = i.indexrelid
@@ -113,6 +153,8 @@ async function catalogChecksum(client: SqlClient): Promise<Uint8Array> {
        WHERE n.nspname = 'samurai_persistence' AND NOT trigger.tgisinternal
       UNION ALL
       SELECT 'function', procedure.oid::regprocedure::text, pg_get_functiondef(procedure.oid)
+             || '|' || (procedure.proowner = current_user::regrole)::text
+             || '|' || COALESCE(procedure.proacl::text, '')
         FROM pg_proc procedure
        JOIN pg_namespace n ON n.oid = procedure.pronamespace
        WHERE n.nspname = 'samurai_persistence'
@@ -131,20 +173,67 @@ async function catalogChecksum(client: SqlClient): Promise<Uint8Array> {
         FROM pg_class c
         JOIN pg_namespace n ON n.oid = c.relnamespace
        WHERE n.nspname = 'samurai_persistence' AND c.relkind IN ('v', 'm')
+      UNION ALL
+      SELECT 'type', t.typname,
+             t.typtype::text || '|' || t.typcategory::text || '|' || t.typispreferred::text || '|' ||
+             t.typisdefined::text || '|' || t.typdelim::text || '|' || t.typlen::text || '|' ||
+             t.typbyval::text || '|' || t.typalign::text || '|' || t.typstorage::text || '|' ||
+             t.typnotnull::text || '|' || t.typtypmod::text || '|' || t.typndims::text || '|' ||
+             COALESCE(NULLIF(t.typelem, 0)::regtype::text, '') || '|' ||
+             COALESCE(NULLIF(t.typarray, 0)::regtype::text, '') || '|' ||
+             COALESCE(NULLIF(t.typbasetype, 0)::regtype::text, '') || '|' ||
+             t.typcollation::regcollation::text || '|' ||
+             (t.typowner = current_user::regrole)::text || '|' || COALESCE(t.typacl::text, '') || '|' ||
+             COALESCE(t.typdefault, '')
+        FROM pg_type t
+        JOIN pg_namespace n ON n.oid = t.typnamespace
+       WHERE n.nspname = 'samurai_persistence' AND t.typrelid = 0
+      UNION ALL
+      SELECT 'enum', t.typname || '.' || e.enumsortorder::text, e.enumlabel
+        FROM pg_enum e
+        JOIN pg_type t ON t.oid = e.enumtypid
+        JOIN pg_namespace n ON n.oid = t.typnamespace
+       WHERE n.nspname = 'samurai_persistence'
+      UNION ALL
+      SELECT 'type_constraint', t.typname || '.' || con.conname, pg_get_constraintdef(con.oid, true)
+        FROM pg_constraint con
+        JOIN pg_type t ON t.oid = con.contypid
+        JOIN pg_namespace n ON n.oid = t.typnamespace
+       WHERE n.nspname = 'samurai_persistence'
+      UNION ALL
+      SELECT 'range', range_type.typname,
+             r.rngsubtype::regtype::text || '|' || r.rngcollation::regcollation::text || '|' ||
+             operator_namespace.nspname || '.' || operator_class.opcname || '|' ||
+             COALESCE(NULLIF(r.rngcanonical, 0)::regprocedure::text, '') || '|' ||
+             COALESCE(NULLIF(r.rngsubdiff, 0)::regprocedure::text, '') || '|' ||
+             r.rngmultitypid::regtype::text
+        FROM pg_range r
+        JOIN pg_type range_type ON range_type.oid = r.rngtypid
+        JOIN pg_namespace n ON n.oid = range_type.typnamespace
+        JOIN pg_opclass operator_class ON operator_class.oid = r.rngsubopc
+        JOIN pg_namespace operator_namespace ON operator_namespace.oid = operator_class.opcnamespace
+       WHERE n.nspname = 'samurai_persistence'
+      UNION ALL
+      SELECT 'collation', coll.collname || '.' || coll.collencoding::text,
+             (coll.collowner = current_user::regrole)::text || '|' ||
+             coll.collprovider::text || '|' || coll.collisdeterministic::text || '|' ||
+             coll.collencoding::text || '|' || COALESCE(coll.collcollate, '') || '|' ||
+             COALESCE(coll.collctype, '') || '|' || COALESCE(coll.colllocale, '') || '|' ||
+             COALESCE(coll.collicurules, '') || '|' || COALESCE(coll.collversion, '')
+        FROM pg_collation coll
+        JOIN pg_namespace n ON n.oid = coll.collnamespace
+       WHERE n.nspname = 'samurai_persistence'
     )
     SELECT kind, identity, definition FROM catalog_rows ORDER BY kind, identity, definition
   `);
   return createHash("sha256").update(JSON.stringify(result.rows)).digest();
 }
 
-export async function applyMigrations(pool: SqlPool): Promise<void> {
-  const selected = await bundledMigrations();
-  for (const migration of selected) {
-    const computed = createHash("sha256").update(migration.sql).digest();
-    if (!Buffer.from(computed).equals(Buffer.from(migration.checksum))) throw new MigrationChangedError(migration.name);
-  }
+async function applyMigrationsWithReader(pool: SqlPool, readMigration: MigrationTextReader): Promise<void> {
+  const selected = await loadBundledMigrations(readMigration);
   const runner = new TransactionRunner(pool);
   await runner.run(async (client) => {
+    await client.query("SET LOCAL search_path = pg_catalog");
     await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", ["samurai-sushi:persistence:migrations:v1"]);
     const state = await namespaceState(client);
     const freshBootstrap = !state.namespace_exists;
@@ -171,11 +260,20 @@ export async function applyMigrations(pool: SqlPool): Promise<void> {
       const recorded = ledger.rows.find((row) => row.name === migration.name);
       if (recorded) {
         if (!Buffer.from(recorded.checksum).equals(Buffer.from(migration.checksum))) throw new MigrationChangedError(migration.name);
-        expectedCatalogChecksum = recorded.catalog_checksum;
+        if (!Buffer.from(recorded.catalog_checksum).equals(Buffer.from(migration.catalogChecksum))) {
+          throw new MigrationSchemaDriftError("The migration ledger catalog checksum is not the code-known schema attestation.");
+        }
+        expectedCatalogChecksum = migration.catalogChecksum;
         continue;
       }
       await client.query(migration.sql);
-      expectedCatalogChecksum = await catalogChecksum(client);
+      const installedCatalogChecksum = await catalogChecksum(client);
+      if (!Buffer.from(installedCatalogChecksum).equals(Buffer.from(migration.catalogChecksum))) {
+        throw new MigrationSchemaDriftError(
+          `The installed persistence catalog ${Buffer.from(installedCatalogChecksum).toString("hex")} does not match the code-known schema attestation.`,
+        );
+      }
+      expectedCatalogChecksum = migration.catalogChecksum;
       await client.query(
         "INSERT INTO samurai_persistence.schema_migrations (name, checksum, catalog_checksum) VALUES ($1, $2, $3)",
         [migration.name, migration.checksum, expectedCatalogChecksum],
@@ -189,3 +287,12 @@ export async function applyMigrations(pool: SqlPool): Promise<void> {
     }
   });
 }
+
+export async function applyMigrations(pool: SqlPool): Promise<void> {
+  return applyMigrationsWithReader(pool, readBundledMigration);
+}
+
+/** @internal Test seam proving bundled-byte rejection occurs before database access. */
+export const migrationTestOnly = {
+  applyMigrationsWithReader,
+} as const;
