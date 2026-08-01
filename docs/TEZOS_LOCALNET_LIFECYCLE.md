@@ -2,9 +2,10 @@
 
 This is the normative network-development contract for Samurai Sushi. The
 shared runtime lives in the sibling workspace repository
-`REPOS/project-crypt-tezos-localnet`. Samurai Sushi is currently specification
-only, so the command names below are implementation acceptance requirements,
-not claims that an application or contract already exists.
+`REPOS/project-crypt-tezos-localnet`. Samurai Sushi pins its accepted runtime
+commit and entrypoint in `.tezos-runtime.json`; the application refuses to run
+an unapproved or dirty sibling checkout. The walletless Phase 0 shell exists,
+but no application contract or deployment manifest exists yet.
 
 ## Environment boundary
 
@@ -19,6 +20,11 @@ chain IDs, non-loopback Localnet RPCs, competing environment files, and any
 server/browser-visible mismatch. Localnet indexer-dependent features must
 return a controlled unavailable state unless a genuinely local indexer is
 added and independently validated.
+
+Project `.env*` files may hold unrelated application values but must not define
+`TEZOS_*` or `NEXT_PUBLIC_TEZOS_*`; `.env.example` is documentation only. The
+project runner scans the repository and app root before every raw child and
+revalidates the injected profile in application code.
 
 ## One-time workstation setup
 
@@ -40,19 +46,21 @@ Never fund or import the sandbox fixture keys on Shadownet or Mainnet.
 
 ## Required implementation commands
 
-When the Samurai Sushi application is scaffolded, preserve the framework
-commands behind explicit raw names and wrap every ordinary chain-aware command:
+Framework commands remain behind raw names. Every public project command first
+checks the exact clean runtime pin, then invokes the shared profile wrapper;
+every raw child performs the project-side validation again:
 
 ```json
 {
   "scripts": {
-    "dev": "node ../project-crypt-tezos-localnet/scripts/profile.mjs localnet -- npm run dev:raw",
-    "build": "node ../project-crypt-tezos-localnet/scripts/profile.mjs localnet -- npm run build:raw",
-    "start": "node ../project-crypt-tezos-localnet/scripts/profile.mjs localnet -- npm run start:raw",
-    "test:integration": "node ../project-crypt-tezos-localnet/scripts/profile.mjs localnet -- npm run test:integration:raw",
-    "dev:shadownet": "node ../project-crypt-tezos-localnet/scripts/profile.mjs shadownet -- npm run dev:raw",
-    "build:shadownet": "node ../project-crypt-tezos-localnet/scripts/profile.mjs shadownet -- npm run build:raw",
-    "test:shadownet": "node ../project-crypt-tezos-localnet/scripts/profile.mjs shadownet -- npm run test:shadownet:raw"
+    "dev": "tsx scripts/run-network-command.ts localnet dev",
+    "build": "tsx scripts/run-network-command.ts localnet build",
+    "start": "tsx scripts/run-network-command.ts localnet start",
+    "test:integration": "tsx scripts/run-network-command.ts localnet test:integration",
+    "dev:shadownet": "tsx scripts/run-network-command.ts shadownet dev",
+    "build:shadownet": "tsx scripts/run-network-command.ts shadownet build",
+    "start:shadownet": "tsx scripts/run-network-command.ts shadownet start",
+    "test:shadownet": "tsx scripts/run-network-command.ts shadownet test:integration"
   }
 }
 ```
@@ -60,6 +68,13 @@ commands behind explicit raw names and wrap every ordinary chain-aware command:
 There must be no Mainnet development script. Contract origination and migration
 commands follow the same split: Localnet by default, Shadownet only by an
 explicit final-test name.
+
+No contract/address command may be added until the shared consumer registry
+marks Samurai Sushi integrated, `namespace-init samurai-sushi` has bound its
+identity to the current Localnet generation, and `manifest-register` has
+recorded an immutable project manifest. Runtime readiness must report that
+identity and manifest fresh. Reset makes all earlier addresses and manifests
+stale before Docker state changes.
 
 ## Daily development
 
@@ -98,14 +113,18 @@ operations. Coordinate first, then use:
 ./scripts/localnet verify-genesis
 ```
 
-After reset, re-originate Samurai Sushi contracts and regenerate its Localnet
-manifest. Never reuse discarded addresses as current evidence.
+After reset, the shared generation authority first invalidates every prior
+consumer identity and manifest. Reinitialize the Samurai Sushi namespace,
+re-originate its contracts, and register a new manifest for the new generation.
+Never reuse discarded addresses as current evidence.
 
 ## Promote an exact candidate to Shadownet
 
 1. Record the exact Samurai Sushi commit and require a clean worktree.
-2. Run its full local tests, build, contract scenarios, and Localnet journey.
-3. Verify the shared Localnet and the read-only Shadownet identity:
+2. Record the `.tezos-runtime.json` commit, require that sibling checkout exact
+   and clean, and include both commits in candidate evidence.
+3. Run its full local tests, build, contract scenarios, and Localnet journey.
+4. Verify the shared Localnet and the read-only Shadownet identity:
 
    ```bash
    cd REPOS/project-crypt-tezos-localnet
@@ -114,10 +133,12 @@ manifest. Never reuse discarded addresses as current evidence.
    npm run shadownet:verify
    ```
 
-4. Run only the explicit Samurai Sushi Shadownet commands. Supply a separate
-   test-only wallet to the individual command that needs it.
-5. Record chain ID `NetXsqzbfFenSTS`, the exact deployment manifest, contract
-   addresses, operation hashes, tests, and authenticated wallet journey.
+5. Run only the explicit Samurai Sushi Shadownet commands. Supply signing input
+   only as `SAMURAI_SHADOWNET_SIGNER_*` to the individual command. The runner
+   rejects Localnet signer variables and known sandbox fixture keys.
+6. Record chain ID `NetXsqzbfFenSTS`, both source/runtime commits, the exact
+   deployment manifest, contract addresses, operation hashes, tests, and
+   authenticated wallet journey.
 
 A local green build, read-only chain check, source commit, deployed runtime,
 and authenticated wallet journey are different evidence. Report each
@@ -125,8 +146,10 @@ separately. Never infer Mainnet readiness from Shadownet success.
 
 ## Return to Localnet
 
-Stop the explicit Shadownet process, remove command-scoped test credentials
-from the shell, resume the shared chain, and launch the ordinary command:
+Stop the explicit Shadownet process, remove command-scoped
+`SAMURAI_SHADOWNET_SIGNER_*` values from the shell, resume the shared chain, and
+launch the ordinary command. A Localnet command rejects any remaining
+Shadownet signer variable before the shared runner or app starts:
 
 ```bash
 cd REPOS/project-crypt-tezos-localnet
@@ -145,11 +168,18 @@ Implementation is not considered adopted until tests prove:
 
 - ordinary `dev`, `build`, `start`, deployment, and integration commands select
   Localnet;
-- explicit final-test commands select the pinned Shadownet profile;
+- explicit `dev`, `build`, `start`, and test final-test commands select the
+  pinned Shadownet profile;
 - Mainnet, missing, unknown, or mismatched configuration stops before startup;
 - server/browser-visible environment values match exactly;
+- an unapproved or dirty shared runtime revision stops before its profile code
+  runs, and candidate evidence records that runtime revision;
+- project `.env*` Tezos keys stop the raw child; cross-profile signers, browser
+  secrets, and Localnet fixture material on Shadownet fail before spawn;
 - every Localnet indexer-backed path fails closed and leaks no public endpoint;
-- stop/resume preserves Samurai Sushi state and a coordinated reset regenerates
-  its exact Localnet manifest; and
+- before contract work, integrated consumer readiness requires a current
+  generation identity plus fresh registered manifest; a coordinated reset
+  invalidates every earlier manifest/address and only reinitialization plus a
+  re-originated registered manifest restores readiness; and
 - returning from Shadownet restores the Localnet identity without copied public
   addresses or credentials.

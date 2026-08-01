@@ -7,9 +7,10 @@ record a non-financial service keepsake on Tezos. Development and ordinary
 testing use the shared loopback-only Localnet; Shadownet is reserved for an
 explicit final rehearsal of the exact candidate.
 
-> **Foundation status:** specification only. No playable build, deployed
-> contract, compatible Dos Esposas asset, DER utility, mainnet path, or public
-> availability is claimed by this repository yet.
+> **Phase 0 status:** the repository now contains a walletless counter shell and
+> a fail-closed network-environment spine. It is not the playable three-order
+> service. No deployed contract, compatible Dos Esposas asset, DER utility,
+> mainnet path, cultural approval, or public availability is claimed.
 
 ## Product promise
 
@@ -38,6 +39,7 @@ reskin and does not inherit Dos Esposas assets or token behavior by name.
 - [Research and metrics protocol](docs/RESEARCH_AND_METRICS.md)
 - [Decision register](docs/DECISIONS.md)
 - [Source and evidence notes](docs/SOURCE_NOTES.md)
+- [Application stack and network authority ADR](docs/ADR/0001_APPLICATION_STACK_AND_NETWORK_AUTHORITY.md)
 
 ## MVP in one line
 
@@ -62,3 +64,25 @@ Mainnet, chain mismatches, mixed server/browser values, and a public indexer in
 Localnet mode must stop startup. Shadownet commands are explicit final-test
 commands and do not replace local development. See the
 [complete lifecycle](docs/TEZOS_LOCALNET_LIFECYCLE.md).
+
+## Phase 0 commands
+
+Install dependencies with Node 22+ and pnpm 10:
+
+```bash
+pnpm install
+pnpm validate
+```
+
+Ordinary `dev`, `build`, `start`, and `test:integration` commands first verify
+the exact shared runtime revision in `.tezos-runtime.json`, require its worktree
+to be clean, load the Localnet profile, and revalidate the resulting values in
+the project before a child becomes ready. Shadownet has explicit
+`dev:shadownet`, `build:shadownet`, `start:shadownet`, and `test:shadownet`
+counterparts. There is no Mainnet command.
+
+The app rejects Tezos keys in project `.env*` files. Profile values come from
+the shared runtime only. If signing is later needed, use the profile-specific
+`SAMURAI_LOCALNET_SIGNER_*` or `SAMURAI_SHADOWNET_SIGNER_*` namespace for the
+single command; the runner rejects cross-profile material and never maps signer
+values to `NEXT_PUBLIC_*`.

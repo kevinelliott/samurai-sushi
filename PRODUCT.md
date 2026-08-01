@@ -8,10 +8,10 @@ web
 
 ## Stack
 
-Working assumption: Next.js, React, and TypeScript on Tezos. Kevin explicitly
-set the network lifecycle on 2026-07-31: ordinary development and testing use
-the shared loopback-only Localnet, while Shadownet is an explicit final-test
-environment. The application stack remains reversible until implementation.
+Adopted Phase 0 stack: a pnpm workspace with Next.js, React, and strict
+TypeScript on Tezos. Kevin explicitly set the network lifecycle on 2026-07-31:
+ordinary development and testing use the shared loopback-only Localnet, while
+Shadownet is an explicit final-test environment.
 
 ## Users
 
@@ -94,7 +94,8 @@ and service under pressure—not combat, costume, faux-feudal ranks, or weaponry
   product, design, gameplay, economy, security, engineering, formal
   specification, and skeptical scope.
 
-No Samurai Sushi implementation, art library, production contract, deployment,
+A Phase 0 walletless counter shell and fail-closed network policy now exist. No
+complete service implementation, art library, production contract, deployment,
 audit, user research, commercial proof, or cultural signoff exists yet.
 
 ## Product Principles
