@@ -163,6 +163,62 @@ guest credential without predecessor grace, and writes non-reversible
 export/import replay tombstones. Import, guest deletion, and the later claim
 transaction use the same guest-first lock order so exactly one can commit.
 
+The persistence implementation resolves an export only far enough to discover
+its private owner, then locks the guest parent before any export, import
+receipt, progress, credential, or tombstone row. It resamples PostgreSQL time
+after every potentially blocking parent, advisory, export, or idempotency lock.
+Expiry equality is expired. Import accepts no current resume secret and no
+browser checkpoint bytes: the authenticated envelope is the recovery
+capability for the original still-active guest. Export creation does require a
+live guest credential, and every content pack, reference, and payload hash in
+the server MAC is derived from server-owned progress and content authority.
+Caller-provided content assertions are never signed.
+
+The server integrity tag is HMAC-SHA-256 over the exact UTF-8 bytes
+`samurai-sushi:portable-save-integrity:v1\n` followed by canonical JSON of
+`portableSaveClaims(envelope)`. That claims object excludes only
+`integrity.tag`. Integrity keys use the separate `portable-integrity` purpose;
+their identity is SHA-256 over the existing key-identity domain, the exact
+bytes `portable-integrity\n`, and the private key bytes. Verification selects
+the exact version-and-identity pair and compares decoded 32-byte tags in
+constant time. Activation is inclusive; compromise, retirement for writing,
+and `verifyUntil` are exclusive boundaries. Portable-integrity inventory and
+serving readiness are recovery-local: a missing or compromised recovery key
+fails portable export/import closed without blocking ordinary guest issue,
+resume, or commands. Retention and deletion remain available so affected
+private records can be removed.
+
+Serving checks are selected-key scoped. A compromised verification-only key
+rejects only envelopes and receipts bound to that exact version-and-identity
+pair; it does not prevent a still-authenticated guest from exporting a
+replacement under a healthy active key or prevent unrelated healthy-key
+imports. A bounded retention operation locates missing, identity-mismatched,
+compromised, or verification-expired private references without locking them,
+then locks the guest parent first, refreshes PostgreSQL time, re-locks and
+rechecks the child, deletes it, and writes the corresponding replay tombstone.
+Integrity-key destruction remains forbidden until its last private export or
+receipt reference is gone.
+
+Each export receives a fresh random 256-bit unlinkable commitment. The private
+record stores only its domain-separated hash and enforces uniqueness. It never
+reuses a guest ID, session digest, stable claim commitment, or deterministic
+subject HMAC. The envelope therefore contains no raw subject identifier, but
+identical revisions or content hashes can still correlate files and must not
+be described as whole-file anonymity.
+
+Import idempotency stores a canonical non-secret request hash and the currently
+issued credential digest, never a raw bearer secret. The first successful
+import generates a fresh random resume secret. An exact retry before the
+original envelope expiry revokes and tombstones the possibly undelivered
+credential, generates a fresh random replacement, and updates the bounded
+receipt in the same guest-first transaction. Changed input fails. At or after
+the original envelope expiry even an exact retry is rejected; the additional
+one-day receipt and replay-tombstone lifetime is rejection evidence only, not
+an extension of capability authority. Receipt timestamps are finite; the
+MAC-bound original expiry is strictly after every receipt update and at most
+29 days after receipt creation, with exact 29-day equality accepted. Concurrent
+exact retries serialize and leave exactly one durable current credential.
+
 The version 1 browser file is canonical JSON with the exact outer fields
 `{format,formatVersion,suite,salt,nonce,ciphertext}`. Its fixed suite is
 `PBKDF2-SHA256-A256GCM-v1`: PBKDF2-HMAC-SHA-256 with 600,000 iterations and a

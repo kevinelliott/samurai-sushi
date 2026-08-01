@@ -8,4 +8,5 @@ export * from "./key-inventory";
 export * from "./lifecycle";
 export * from "./migrations";
 export * from "./outbox";
+export * from "./portable-recovery";
 export * from "./repositories";
