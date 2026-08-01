@@ -26,6 +26,11 @@ Project `.env*` files may hold unrelated application values but must not define
 project runner scans the repository and app root before every raw child and
 revalidates the injected profile in application code.
 
+The web route renders dynamically from the validated start-process environment.
+A production artifact built under one supported profile must display the other
+profile when explicitly started there; a baked build-time network identity is a
+release-blocking profile mismatch.
+
 ## One-time workstation setup
 
 ```bash
@@ -173,7 +178,11 @@ Implementation is not considered adopted until tests prove:
 - Mainnet, missing, unknown, or mismatched configuration stops before startup;
 - server/browser-visible environment values match exactly;
 - an unapproved or dirty shared runtime revision stops before its profile code
-  runs, and candidate evidence records that runtime revision;
+  runs; approved code executes from an archived exact-commit tree so checkout
+  drift after validation cannot change it; candidate evidence records that
+  runtime revision;
+- production build/start pairs in both cross-profile directions render only the
+  start-time network and chain identity;
 - project `.env*` Tezos keys stop the raw child; cross-profile signers, browser
   secrets, and Localnet fixture material on Shadownet fail before spawn;
 - every Localnet indexer-backed path fails closed and leaks no public endpoint;

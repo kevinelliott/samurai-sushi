@@ -1,5 +1,6 @@
 import { execFile, spawn } from "node:child_process";
-import { readFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import { promisify } from "node:util";
 import {
@@ -11,6 +12,7 @@ import {
   validateRuntimePin,
   type NetworkEnvironment,
   type NetworkName,
+  type RuntimePin,
 } from "@samurai-sushi/network";
 
 const execFileAsync = promisify(execFile);
@@ -71,6 +73,36 @@ export async function runProfiledCommand(
   return runner(command, args, environment);
 }
 
+export async function materializeApprovedRuntime(
+  runtimeRoot: string,
+  pin: RuntimePin,
+): Promise<{ readonly root: string; cleanup(): Promise<void> }> {
+  const temporaryRoot = await mkdtemp(resolve(tmpdir(), "samurai-sushi-runtime-"));
+  const executionRoot = resolve(temporaryRoot, "runtime");
+  const archivePath = resolve(temporaryRoot, "runtime.tar");
+  await mkdir(executionRoot);
+  try {
+    await execFileAsync("git", [
+      "-C",
+      runtimeRoot,
+      "archive",
+      "--format=tar",
+      `--output=${archivePath}`,
+      pin.revision,
+    ]);
+    await execFileAsync("tar", ["-xf", archivePath, "-C", executionRoot]);
+    await rm(archivePath, { force: true });
+    await readFile(resolve(executionRoot, pin.profileEntrypoint), "utf8");
+    return {
+      root: executionRoot,
+      cleanup: async () => rm(temporaryRoot, { recursive: true, force: true }),
+    };
+  } catch (error) {
+    await rm(temporaryRoot, { recursive: true, force: true });
+    throw error;
+  }
+}
+
 export async function runNetworkCommand(
   projectRoot: string,
   network: NetworkName,
@@ -90,9 +122,14 @@ export async function runNetworkCommand(
     ...process.env,
     SAMURAI_TEZOS_RUNTIME_REVISION: pin.revision,
   });
-  return runner(
-    process.execPath,
-    [resolve(runtimeRoot, pin.profileEntrypoint), network, "--", "pnpm", `${role}:raw`],
-    environment as NodeJS.ProcessEnv,
-  );
+  const execution = await materializeApprovedRuntime(runtimeRoot, pin);
+  try {
+    return await runner(
+      process.execPath,
+      [resolve(execution.root, pin.profileEntrypoint), network, "--", "pnpm", `${role}:raw`],
+      environment as NodeJS.ProcessEnv,
+    );
+  } finally {
+    await execution.cleanup();
+  }
 }
