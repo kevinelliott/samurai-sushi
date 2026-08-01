@@ -118,4 +118,3 @@ legal review, and no implied price peg or future value.
   partial RPC failure, account switching, and repeated submission.
 - A published manifest and independent review cover each enabled row.
 - Mainnet and cross-chain support are separate gated products.
-

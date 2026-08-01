@@ -43,4 +43,3 @@ Marketplace, P2P trading, paid loot, staking, yield, bonding curves, referral
 emissions, public wealth rankings, PvP, guilds, land, token-gated story, daily
 streaks, broad bridges, automatic foreign-token consumption, or arbitrary FA2
 imports.
-

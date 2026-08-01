@@ -51,4 +51,3 @@ run, so these are explicitly labeled working assumptions and remain reversible.
 This specification does not prove a playable build, deployment, contract
 compatibility, audit, user demand, cultural approval, public availability,
 mainnet readiness, asset value, or financial return.
-

@@ -104,4 +104,3 @@ counts, medians/distributions, intervention log, accessibility matrix, failed
 journeys, participant quotes within consent, and exact build/deployment state.
 Source/build evidence, deployed runtime, authenticated wallet proof, cultural
 review, and device evidence remain separate.
-

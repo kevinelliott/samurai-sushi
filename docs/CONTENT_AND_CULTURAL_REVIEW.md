@@ -63,4 +63,3 @@ jalapeño, tequila, or other inventory into sushi to manufacture compatibility.
   and a reviewable asset/content pipeline.
 - Post-alpha: 12–24 dishes, seasonal packs, shop variants, and crossover specials
   only after provenance and contract approval.
-

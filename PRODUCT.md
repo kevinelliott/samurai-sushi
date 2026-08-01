@@ -106,4 +106,3 @@ Target WCAG 2.2 AA. Every core path must support keyboard, touch, and pointer;
 drag interactions require select/place alternatives. State cannot depend on
 color, motion, sound, or pixel art. Reduced motion is full functional parity.
 Text must work at 200% zoom and the experience must remain usable at 320 CSS px.
-
