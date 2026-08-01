@@ -194,9 +194,14 @@ class ObservedReplayFenceClient implements ConnectedSqlClient {
     private readonly attempted: Deferred<number>,
     private readonly acquired: Deferred<number>,
     private readonly releaseFence?: Promise<void>,
+    private readonly nextNow?: () => Date | undefined,
   ) {}
 
   async query<Row extends object>(text: string, values?: readonly SqlValue[]): Promise<QueryResult<Row>> {
+    if (text.trim() === "SELECT clock_timestamp() AS now") {
+      const now = this.nextNow?.();
+      if (now) return { rows: [{ now }] as unknown as readonly Row[], rowCount: 1 };
+    }
     const scope = values?.[0];
     if (!text.includes("pg_advisory_xact_lock") || typeof scope !== "string" || !scope.startsWith("guest-resume-replay:")) {
       return this.delegate.query<Row>(text, values);
@@ -216,6 +221,8 @@ class ObservedReplayFenceClient implements ConnectedSqlClient {
 }
 
 class ObservedReplayFencePool implements SqlPool {
+  private clockSequence: Date[] = [];
+
   constructor(
     private readonly delegate: SqlPool,
     readonly attempted: Deferred<number>,
@@ -227,12 +234,17 @@ class ObservedReplayFencePool implements SqlPool {
     return this.delegate.query<Row>(text, values);
   }
 
+  setClockSequence(sequence: readonly Date[]): void {
+    this.clockSequence = [...sequence];
+  }
+
   async connect(): Promise<ConnectedSqlClient> {
     return new ObservedReplayFenceClient(
       await this.delegate.connect(),
       this.attempted,
       this.acquired,
       this.releaseFence,
+      () => this.clockSequence.shift(),
     );
   }
 }
@@ -1664,9 +1676,10 @@ describe("PostgreSQL persistence spine", () => {
 
   it("rechecks key authority after issue waits on the replay fence", async () => {
     const clock = await rawPool.query<{ readonly now: Date }>("SELECT clock_timestamp() AS now");
+    const compromisedAt = new Date(clock.rows[0]!.now.getTime() + 60_000);
     const active = {
       ...hmacKey("resume", 18, 18),
-      compromisedAt: new Date(clock.rows[0]!.now.getTime() + 150),
+      compromisedAt,
     } as const;
     const release = deferred<void>();
     const observedPool = new ObservedReplayFencePool(pool, deferred<number>(), deferred<number>(), release.promise);
@@ -1676,6 +1689,10 @@ describe("PostgreSQL persistence spine", () => {
       tombstoneKeys,
     );
     await observedAuthority.bootstrap();
+    observedPool.setClockSequence([
+      new Date(compromisedAt.getTime() - 1),
+      new Date(compromisedAt.getTime() + 1),
+    ]);
     const service = new GuestSessionService(observedPool, observedAuthority, {
       issueSecret: () => issueResumeSecret(),
     });
@@ -1686,7 +1703,6 @@ describe("PostgreSQL persistence spine", () => {
       checkpoint: { step: 0 },
     });
     await observedPool.acquired.promise;
-    await rawPool.query("SELECT pg_sleep(0.25)");
     release.resolve();
     await expect(pending).rejects.toMatchObject({ code: "ACTIVE_KEY_UNAVAILABLE" });
     const counts = await rawPool.query<{ readonly sessions: string; readonly progress: string; readonly digests: string }>(
