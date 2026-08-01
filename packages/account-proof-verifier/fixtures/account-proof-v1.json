@@ -1,0 +1,64 @@
+{
+  "schemaVersion": 1,
+  "accepted": [
+    {
+      "scheme": "tz1",
+      "account": "tz1MsZxMSJdiUV9hVs4UKAMrXtksDvxWAZe2",
+      "publicKey": "edpkuZpp81M8NmaFbueXY8bk7EP9V54XTnwsFFt77Z5FTPs2QzLU9r",
+      "signature": "edsigu1EdH9zrocmLnTumfutDWqnYfvY3H73y7qbPmQJANttSDZiqWsSaV1e26TR73LWi7Deu1c11UR3J4BBCLo1TKJgwe83ocE",
+      "walletSigningSha256": "e0127bec5395151f1304370481310bb5da599dcbd6ca4f2d2ee306243291b248"
+    },
+    {
+      "scheme": "tz2",
+      "account": "tz2MTdHKt5pvb1qkJz52j9ywzsDkSS2tr5xN",
+      "publicKey": "sppk7bnE8ihKrWKnxZ3a3yGrnwXJNSWv3MVUMm7dimvKRkL1DSBuQbg",
+      "signature": "spsig1CxJs5Vcphp22J2hMbNq6xQcg5Qj1ZhvwkUhmYb78JKedJdxmFcuyTHePZvxxZKinCRNq1qyva86CenWsqervp2NaTSC75",
+      "walletSigningSha256": "022e458798546c63ff750e0909a7214b71712791b66eef9970cbb03c8649bced"
+    },
+    {
+      "scheme": "tz3",
+      "account": "tz3XaQAS5cQLTZj2TWkorJfR5iAx9LnsBM6T",
+      "publicKey": "p2pk65a7nPLEbProv72kMrid5HUXchHNdLCcH2pugbbUP6SWbJ48gcJ",
+      "signature": "p2signbPKC9hMJJSjunkShTtMXwVPoy8CPoWy6zRegHTWoyMpGAfiyWb7F2EUiLSAhV2cG6xPhofsRgMCV9QzAHbsRiFeUWN1Y",
+      "walletSigningSha256": "214a1af54ea0cdf4b01e939b620d80fa065b523b712f792b6bda424b707039f9"
+    },
+    {
+      "scheme": "tz4",
+      "account": "tz4WyfbEmh1PsSAGjyZHvAcZncHgxNa3b8Hx",
+      "publicKey": "BLpk1uxHnGszm59pDUvWZTgooRD4c8kPD4BE6MtWpB1WVNQ23CgopowrinVFN9fuWUGNbySsBsAw",
+      "signature": "BLsig9pERg9pVkH4QxKJa7CJ7A4vr18QohUH9ANsoDjQfWxM8cCbyTMNoRYykcnmFDBSKvzafKUQe98U3r91uf8cwcbQFz2NvhTfumzbp7dvG3XD77HPGM3Eebp7pJeaRGZjtTUpSM2pGf",
+      "walletSigningSha256": "fd56471304d1ecfc73d0332397bd938e9994570980098f5734d1e1cae1c5971f"
+    }
+  ],
+  "rejected": {
+    "genericSignatures": [
+      "sigqRAA6mxXgaJjGvUXt32ZYW2u6T7JUBNk9qf34JBNYsUujnF1yXVPxQ73roJwsLMfgBH66Dedo5XKP8zgefV8FcqkQmPN6",
+      "sigV8dY1tNMMqse82wPSpgT3jEmFd9wW5EUBMNzkRoKQPwCEz9agYY2KonhCMsuAFrhUgE63zMVRyN7N5QMxyN1bVG5yxfCp",
+      "sigoHAU749FqNQGyXzBysMa2Ui1RJtwJP6kfDaGGq2DbX5GittQbTVsxqpBXPuwGHTHe5SNdZjXvj2q6TVFZqQSA1uiYt8PJ"
+    ],
+    "wrongCurveSignatures": [
+      "spsig1ZEqVAPD12YT7SvEW2bBDTBQovEgNXp5DixyorTVBSoCLoS4CYbsM5sxkENQ1GQDkPvRq45H4wEFQfr7CXLz3U9xGF4gyx",
+      "p2sigpjP1BsWd9WMCDBEnbdZM3xpHV7LZZbnxbcWRTkcfmKmTH42LMaadEaXM3jqBJXvzJCo7ATayJ2qgmpvRF7gZXKBiyREa8"
+    ],
+    "highSSignatures": {
+      "tz2": "spsig1CxJs5Vcphp22J2hMbNq6xQcg5Qj1ZhvwkUhmYb78JKedbC3G4S96CGv4occEz7HizGSa8hrXCvXiydpBif7hgDwYskWHk",
+      "tz3": "p2signbPKC9hMJJSjunkShTtMXwVPoy8CPoWy6zRegHTWoyMqzXosjY7CqZ1foDpEr5Tk53F1g5nWNy6wNpNdafEsUiPncivhW"
+    },
+    "zip215": {
+      "canonicalIdentityPublicKey": "edpktefUpoyLzPPcnPSpp5WjR4RcvnhBQ5QQH2sjGvU8BEKEhkRqN2",
+      "canonicalIdentityAccount": "tz1gyNfTi636JHfXNR1HEBwUbZ4tvNFHWLgB",
+      "canonicalIdentitySignature": "edsigtXwMHXav9HzqTioGZ1RxyNYpvM8qSHcYb8F8BGH6F1jeRaUJykVGZFbXzwVmxQ6aVLbJZBZ5oYfHWhM429RcJohTVbsrDG",
+      "noncanonicalIdentityPublicKey": "edpkvTUsUgudVDe6SjTFE5uLzDC6ZJGv9wNgRfmkebNYKq7GkutYqP",
+      "noncanonicalIdentityAccount": "tz1gMSnQ57GGMbcRWxaCJMXVjFP34AY2ztEM",
+      "noncanonicalIdentitySignature": "edsigu55JkGDmAc9SAdeHxw348cs6xpaE7gxFYbJT7nZemHKs5AbjYSJbkkfYn3mH2yTJA8tHWhBWNKdF5beArRxHTJhoMhfVRW"
+    },
+    "invalidPointPublicKeys": {
+      "tz2": "sppk7VR9W7A2YABXrY6bVTVtjoLQKTkYM2dsBq3gnowG16had1yQp5s",
+      "tz3": "p2pk5zgg2umKdmbhtvV6akTjqbnhbgWosRamaLUNVWDN9bxyJz1Zqwz",
+      "tz4": "BLpk1DvGiVcNFFC8Dg6tHYRL8sGBTCyRA8VKZM1hL6oeBQwyJUeou8hRTYEDmevGzvkWHCr72BD6"
+    },
+    "invalidPointSignatures": {
+      "tz4": "BLsig4XnPRJQAkxE1dokc4AwLzmdC3ukRgzW8tUc53s7BkVH48eQALvMMM7KLCFyKfQxMadkoddeUkFWig7cREthNoZVLKMEjM16Ukz3x4dHBpLv5QfUWzqnD8s8TA1R5Eom1b8b4iETeJ"
+    }
+  }
+}

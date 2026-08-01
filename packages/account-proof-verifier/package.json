@@ -1,0 +1,21 @@
+{
+  "name": "@samurai-sushi/account-proof-verifier",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "test": "vitest run --root ../.. packages/account-proof-verifier/src",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@noble/curves": "1.9.7",
+    "@samurai-sushi/domain": "workspace:*",
+    "@taquito/utils": "25.0.0"
+  }
+}

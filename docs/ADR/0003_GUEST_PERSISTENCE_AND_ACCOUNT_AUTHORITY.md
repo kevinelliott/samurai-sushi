@@ -301,7 +301,8 @@ challengeBytes`, sent as lowercase hex with Beacon `SigningType.MICHELINE` and
 bytes; `SigningType.RAW` is not accepted. Neither a public key nor a signature
 belongs in the intent or challenge hash preimage.
 
-The next verifier pins server-side `@taquito/utils@25.0.0`, decodes and
+The Node-only verifier adapter pins server-side `@taquito/utils@25.0.0` and
+the exact `@noble/curves@1.9.7` point-validation implementation. It decodes and
 round-trips the one expected Base58Check prefix and length, derives the account
 as `BLAKE2b-160(decoded publicKey)` under the paired `tzN` prefix, and requires
 exact account equality before signature verification. It verifies the full
@@ -311,6 +312,12 @@ decoded lengths, and uses ordinary non-aggregate BLS verification for `tz4`.
 The curve-specific signature-prefix gate runs before Taquito because its generic
 verification path may accept the same valid signature bytes re-encoded as
 `sig`; this protocol must not.
+The adapter also applies strict RFC 8032 decoding and prime-subgroup checks to
+the Ed25519 public key and signature R point before Taquito, rejecting the
+ZIP-215 identity and noncanonical-point variants accepted by the dependency.
+It Base58Check-decodes and byte-for-byte round-trips the four-byte `chainId`
+under only the `Net` prefix. Taquito, Noble, keys, and signatures remain absent
+from the browser-safe claim-protocol subpath.
 Every parsing, account, key, and signature distinction collapses to one
 public-safe proof failure.
 
@@ -346,6 +353,14 @@ hashes, Micheline wallet-signing bytes, public-safe shape failure, golden
 fixtures, and a browser-safe package subpath. It performs no network calls and
 does not verify a wallet signature or Base58Check checksum.
 
+The second Stage 3 slice is the isolated Node-only proof-verifier package. It
+contains the exact Taquito/Noble dependency pins, canonical Base58Check gates,
+account-to-key derivation, curve/prefix and low-S enforcement, strict point
+checks, one public-safe proof failure, and byte-stable accepted and hostile
+vectors. It reconstructs `walletSigningBytes` from the canonical challenge and
+accepts no caller-supplied signing payload. It does not issue, persist, expire,
+or consume a challenge and makes no wallet or network call.
+
 The next persistence slice issues `issuedAt` and `expiresAt` from one PostgreSQL
 clock sample with an exact 300,000 ms interval. Admission requires
 `issuedAt <= dbNow < expiresAt`; equality at expiry rejects. Challenge hash and
@@ -362,12 +377,13 @@ the guest parent first. Challenge consumption, progress merge, ownership
 rewrite, wallet link, pending-delivery player-session issuance, guest
 credential/export revocation, and tombstones commit atomically.
 
-Migration 0003, player sessions, wallet credentials, signature SDK/verifier,
+Migration 0003, challenge persistence, player sessions, wallet credentials,
 claim transactions, ownership rewrites, endpoints, UI, and wallet/network calls
-remain explicit later gates. Their hostile suites must cover checksum and
-curve/prefix vectors, nonce reuse, exact expiry, replay, changed signature
-context, second-wallet conflict, lost response, import/delete races, and
-rollback after challenge consumption.
+remain explicit later gates. Their hostile suites must cover nonce reuse, exact
+expiry, replay, changed signature context, second-wallet conflict, lost
+response, import/delete races, and rollback after challenge consumption. The
+checksum, curve/prefix, account-derivation, malleability, and point attacks are
+owned by the completed pure verifier suite and must remain as regression gates.
 
 ### Privacy and deletion
 
