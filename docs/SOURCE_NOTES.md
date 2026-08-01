@@ -44,9 +44,12 @@ as an immediate fourth MVP unlock and a finite reviewed catalog path of 12 alpha
 
 ## Working assumptions
 
-Kevin was asked to confirm Shadownet-first, future opt-in interoperability, and
-web-first Next.js/TypeScript on Tezos. No answer arrived during the foundation
-run, so these are explicitly labeled working assumptions and remain reversible.
+Kevin was originally asked to confirm Shadownet-first, future opt-in
+interoperability, and web-first Next.js/TypeScript on Tezos. No answer arrived
+during the foundation run. On 2026-07-31 he subsequently established Localnet
+as the required ordinary development/test environment for the
+`project-crypto-*` Tezos projects, with Shadownet reserved for final tests. The
+stack and interoperability hypotheses remain reversible.
 
 ## Claims this repository does not support
 

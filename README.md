@@ -3,7 +3,9 @@
 Samurai Sushi is a guest-first pixel sushi-counter game with optional, legible
 onchain provenance. The first product goal is simple: let a player prepare and
 serve a satisfying three-order evening shift without a wallet, then optionally
-record a non-financial service keepsake on Tezos Shadownet.
+record a non-financial service keepsake on Tezos. Development and ordinary
+testing use the shared loopback-only Localnet; Shadownet is reserved for an
+explicit final rehearsal of the exact candidate.
 
 > **Foundation status:** specification only. No playable build, deployed
 > contract, compatible Dos Esposas asset, DER utility, mainnet path, or public
@@ -28,6 +30,7 @@ reskin and does not inherit Dos Esposas assets or token behavior by name.
 - [Normative domain specification](docs/DOMAIN_SPEC.md)
 - [Economy and interoperability policy](docs/ECONOMY_AND_INTEROPERABILITY.md)
 - [Technical specification](docs/TECHNICAL_SPEC.md)
+- [Tezos Localnet lifecycle](docs/TEZOS_LOCALNET_LIFECYCLE.md)
 - [Security and trust model](docs/SECURITY_AND_TRUST.md)
 - [Experience and visual design specification](docs/DESIGN_SPEC.md)
 - [Content and cultural review](docs/CONTENT_AND_CULTURAL_REVIEW.md)
@@ -50,3 +53,12 @@ roll families.
 Mainnet, a marketplace, trading, paid loot, random economic rewards, staking,
 yield, public rankings, token-gated play, DER spend, foreign-asset custody,
 bridging, migration, and consumptive Dos Esposas interoperability.
+
+## Network development rule
+
+Samurai Sushi implementation must default to the shared
+`REPOS/project-crypt-tezos-localnet` runtime. Missing or unknown network state,
+Mainnet, chain mismatches, mixed server/browser values, and a public indexer in
+Localnet mode must stop startup. Shadownet commands are explicit final-test
+commands and do not replace local development. See the
+[complete lifecycle](docs/TEZOS_LOCALNET_LIFECYCLE.md).

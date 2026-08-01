@@ -272,15 +272,25 @@ faucets, public minting, marketplace, migration, and test-only randomness.
 
 ## 7. Environment contract
 
-- Local: deterministic content, Postgres, mocked wallet/indexer, no public writes.
+- Localnet: required default for ordinary development, contract iteration, and
+  integration tests; shared loopback RPC, deterministic accounts, no public
+  writes, and no indexer in the base runtime.
 - Preview: ephemeral app/database and fixture-only chain adapter.
-- Shadownet: real wallet/contracts, isolated manifest, test assets.
+- Shadownet: explicit final rehearsal only; real wallet/contracts, isolated
+  manifest, and test assets.
 - Staging: production-shaped services against separately attested test deploy.
-- Mainnet: explicit configuration only, immutable manifest, multisig roles, no
-  test entrypoint/key in runtime.
+- Mainnet: unsupported by development commands. A future production decision
+  requires a separate reviewed release path, immutable manifest, multisig
+  roles, and no test entrypoint/key in runtime.
 
 Startup fails on missing/unknown environment, chain/address/hash mismatch, or
-unverifiable readiness; it never silently falls back to mainnet.
+unverifiable readiness; it never silently falls back to Shadownet or Mainnet.
+Server and browser-visible network, RPC, chain ID, and indexer values must
+match exactly. Localnet must use `127.0.0.1:8732`, chain
+`NetXtJqPyJGB6Pc`, and no public indexer. Indexer-backed paths return a
+controlled unavailable state until a separately validated local indexer exists.
+The implementation command contract and lifecycle are normative in
+`TEZOS_LOCALNET_LIFECYCLE.md`.
 
 ## 8. Test strategy
 
@@ -308,12 +318,13 @@ unverifiable readiness; it never silently falls back to mainnet.
 - Adapter fixtures for pagination, malformed data, lag, outage, and reorg.
 - Postgres integration for transactional intent, unique constraints, worker
   replay, and projection rebuild.
-- Exact-manifest Shadownet E2E and separate production-shaped smoke.
+- Localnet contract/integration E2E, exact-manifest Shadownet E2E, and separate
+  production-shaped smoke.
 - Browser/a11y tests at 320, 390, 768, 1024, and 1440 px.
 
 Required CI: format, lint, typecheck, schema/content validation, unit/property/
 integration tests, SmartPy compile/scenarios, artifact-size and forbidden-
-entrypoint checks, policy/manifest verification, production/Shadownet builds,
+entrypoint checks, policy/manifest verification, Localnet/Shadownet builds,
 Playwright/a11y, dependency/secret/license/static scans, and migration rebuild.
 
 ## 9. Observability and privacy

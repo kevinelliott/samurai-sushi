@@ -8,10 +8,10 @@ web
 
 ## Stack
 
-Working assumption: Next.js, React, and TypeScript on Tezos, with Shadownet as
-the first chain environment. The user was asked to confirm this direction; the
-foundation proceeded after no response, so it remains reversible until the
-first implementation decision.
+Working assumption: Next.js, React, and TypeScript on Tezos. Kevin explicitly
+set the network lifecycle on 2026-07-31: ordinary development and testing use
+the shared loopback-only Localnet, while Shadownet is an explicit final-test
+environment. The application stack remains reversible until implementation.
 
 ## Users
 
@@ -46,9 +46,10 @@ Players enter in guest mode, open a short evening service, prepare ingredients,
 assemble dishes, serve authored guests, and close the ledger with readable
 feedback. Wallet connection is offered only after a complete play result.
 
-The first chain rehearsal is assumed to use Tezos Shadownet. Any indexed chain
-data is a projection; confirmed chain state remains authoritative for onchain
-assets and receipts.
+Contract iteration and ordinary chain integration use Tezos Localnet. The first
+public-chain rehearsal uses Shadownet only after the exact candidate passes its
+local gates. Any indexed chain data is a projection; confirmed chain state
+remains authoritative for onchain assets and receipts.
 
 ## Capabilities and Constraints
 

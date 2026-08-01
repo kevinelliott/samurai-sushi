@@ -2,9 +2,11 @@
 
 ## 1. Boundary
 
-Launch as a standalone Shadownet game. Dos Esposas names and ingredient classes
-are semantic references only. DER and foreign assets remain absent or read-only
-until full identity and policy verification.
+Develop and ordinarily test as a standalone Localnet game; promote exact
+candidates to Shadownet for final public-chain rehearsal. Dos Esposas names and
+ingredient classes are semantic references only. DER and foreign assets remain
+absent or read-only until full identity and policy verification. Development
+commands must not support Mainnet.
 
 ## 2. Launch blockers
 

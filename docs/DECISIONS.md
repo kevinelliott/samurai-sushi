@@ -4,7 +4,7 @@
 | --- | --- | --- | --- |
 | SS-D-001 | Service game with optional onchain keepsake | Adopted foundation | All specialist lanes converged; reverse only with user-directed product change. |
 | SS-D-002 | Guest-first play; wallet after first complete service | Adopted foundation | Proves fun independently and protects recovery. |
-| SS-D-003 | Shadownet before mainnet | Working assumption | User confirmation requested but not received; validate before implementation. |
+| SS-D-003 | Localnet development, explicit Shadownet final rehearsal, no Mainnet development profile | Adopted foundation | Kevin set the shared `project-crypt-*` lifecycle on 2026-07-31; implementation must use the common fail-closed runtime. |
 | SS-D-004 | Next.js/TypeScript web app on Tezos | Working assumption | Existing expertise supports it; confirm at implementation kickoff. |
 | SS-D-005 | Three required first-service dishes, with salmon sashimi as an immediate fourth MVP unlock | Adopted foundation | Preserves the coherent usability experiment while making sashimi a first-class launch family. |
 | SS-D-006 | No DER spend/reward/gate in MVP | Adopted foundation | Meaning and identity do not transfer safely by ticker. |

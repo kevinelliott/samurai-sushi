@@ -29,15 +29,17 @@ Exit: the defined validation cohort finishes without a wallet; median first
 serve <3 minutes; ≥80% finish; ≥60% begin a second shift within 24 hours. Phase
 1 is a walletless prototype milestone, not the promised MVP release.
 
-## Phase 2 — Shadownet keepsake
+## Phase 2 — Localnet keepsake, then Shadownet rehearsal
 
 Add optional wallet link, exact review, non-financial receipt contract, chain
 worker, projection, durable lifecycle, deployment manifest, and reconciliation.
 
-Exit: exact-manifest Shadownet journey survives reload, reject, wrong network,
-account change, indexer lag, RPC outage, duplicate events, and reorg simulation.
-Phase 2 completes the specified MVP: Evening Service plus optional post-`SETTLED`
-Shadownet keepsake.
+Build and exercise the contract lifecycle on the shared Localnet first. Exit:
+the full local suite passes and the exact-manifest Shadownet journey then
+survives reload, reject, wrong network, account change, indexer lag, RPC outage,
+duplicate events, and reorg simulation. Phase 2 completes the specified MVP:
+Evening Service plus an optional post-`SETTLED` keepsake, with Shadownet proof
+reported separately from local build/test evidence.
 
 ## Phase 3 — Alpha content
 
