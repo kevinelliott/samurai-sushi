@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import type { ContentBundle, VersionedEntity } from "./model";
 
 const HASH_DOMAIN = "samurai-sushi:content-row:v1\n";
 
@@ -41,6 +42,32 @@ export function canonicalContentJson(value: unknown): string {
 
 export function contentHashFor(value: unknown): string {
   return `sha256:${createHash("sha256").update(HASH_DOMAIN).update(canonicalContentJson(value)).digest("hex")}`;
+}
+
+type ContentCollections = Pick<
+  ContentBundle,
+  "species" | "ingredients" | "cutStyles" | "components" | "families" | "dishes" | "recipes" | "variants" | "seasonalityRules"
+>;
+
+export function contentManifestHashFor(bundle: ContentCollections): string {
+  const groups: readonly [string, readonly VersionedEntity[]][] = [
+    ["component", bundle.components],
+    ["cut-style", bundle.cutStyles],
+    ["dish", bundle.dishes],
+    ["family", bundle.families],
+    ["ingredient", bundle.ingredients],
+    ["recipe", bundle.recipes],
+    ["seasonality-rule", bundle.seasonalityRules],
+    ["species", bundle.species],
+    ["variant", bundle.variants],
+  ];
+  const manifest = groups.flatMap(([kind, rows]) => rows.map((row) => ({ kind, id: row.id, version: row.version, contentHash: row.contentHash })))
+    .sort((left, right) => {
+      const leftKey = `${left.kind}:${left.id}@${left.version}`;
+      const rightKey = `${right.kind}:${right.id}@${right.version}`;
+      return leftKey < rightKey ? -1 : leftKey > rightKey ? 1 : 0;
+    });
+  return contentHashFor(manifest);
 }
 
 export const contentHashDomain = HASH_DOMAIN;

@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { compileContentPack } from "./compile";
 import { ContentValidationError, type ContentIssueCode, type StableContentFailureCode } from "./errors";
 import { salmonSashimiDraftBundle } from "./fixtures/salmon-sashimi";
-import { contentHashFor } from "./hash";
+import { contentHashFor, contentManifestHashFor } from "./hash";
 import type { ContentBundle, VersionedEntity } from "./model";
 import { recipeSnapshot } from "./replay";
 import { evaluateSeasonality } from "./seasonality";
@@ -16,6 +16,14 @@ type Mutable<T> = T extends readonly (infer Item)[]
 const clone = (): Mutable<ContentBundle> => structuredClone(salmonSashimiDraftBundle) as Mutable<ContentBundle>;
 const ref = (row: Pick<VersionedEntity, "id" | "version">) => ({ id: row.id, version: row.version });
 const rehash = <T extends object>(row: T): T & { contentHash: string } => ({ ...row, contentHash: contentHashFor(row) });
+
+function syncPack(bundle: Mutable<ContentBundle>): void {
+  bundle.pack = rehash({
+    ...bundle.pack,
+    contentManifestHash: contentManifestHashFor(bundle),
+    artAssetMapHash: contentHashFor(bundle.artAssets),
+  });
+}
 
 function expectIssue(
   input: unknown,
@@ -48,6 +56,10 @@ describe("compileContentPack", () => {
     expect(Object.isFrozen(first.bundle)).toBe(true);
     expect("set" in first.indexes.dish).toBe(false);
     expect("set" in first.dishFacts).toBe(false);
+    const facts = first.dishFacts.get("atlantic-salmon-sashimi@1")!;
+    expect(Object.isFrozen(facts)).toBe(true);
+    expect(Object.isFrozen(facts.containsAllergens)).toBe(true);
+    expect(() => (facts.containsAllergens as string[]).push("egg")).toThrow();
     expect(first.dishFacts.get("atlantic-salmon-sashimi@1")).toEqual({
       containsAllergens: ["fish"],
       mayContainAllergens: [],
@@ -83,6 +95,19 @@ describe("compileContentPack", () => {
     const missingReview = clone();
     missingReview.reviewReferences = ["unrelated-review"];
     expectIssue(missingReview, "REVIEW_REFERENCE_MISSING", "PROVENANCE_UNVERIFIED");
+  });
+
+  it("hash-binds the complete art key, digest, and non-color identity mapping", () => {
+    const swapped = clone();
+    const first = swapped.artAssets[0]!;
+    const second = swapped.artAssets[1]!;
+    swapped.artAssets[0] = { ...first, digest: second.digest };
+    swapped.artAssets[1] = { ...second, digest: first.digest };
+    expectIssue(swapped, "PACK_MEMBERSHIP_MISMATCH", "CONTENT_VERSION_DRIFT");
+
+    const relabeled = clone();
+    relabeled.artAssets[0] = { ...relabeled.artAssets[0]!, nonColorIdentity: "silently changed silhouette" };
+    expectIssue(relabeled, "PACK_MEMBERSHIP_MISMATCH", "CONTENT_VERSION_DRIFT");
   });
 
   it("keeps biological, culinary, component, dish, and token-like identities non-equal and rejects uni as roe", () => {
@@ -156,6 +181,59 @@ describe("compileContentPack", () => {
     expectIssue(bundle, "RECIPE_INVALID", "INVALID_QUANTITY");
   });
 
+  it("rejects unsupported dietary claims and unreachable deterministic results", () => {
+    const dietary = clone();
+    dietary.dishes[0] = rehash({ ...dietary.dishes[0]!, dietaryTags: ["vegan"] });
+    expectIssue(dietary, "RECIPE_INVALID", "UNKNOWN_RECIPE");
+
+    const result = clone();
+    result.recipes[0] = rehash({ ...result.recipes[0]!, deterministicResult: { id: "missing-dish", version: 1 } });
+    expectIssue(result, "BROKEN_REFERENCE", "UNKNOWN_RECIPE");
+  });
+
+  it("enforces the exact authored nori placement at the component slot", () => {
+    const bundle = clone();
+    const originalIngredient = bundle.ingredients[0]!;
+    const { speciesRef: _speciesRef, productKind: _productKind, ...ingredientBase } = originalIngredient;
+    const ingredient = rehash({ ...ingredientBase, kind: "staple" as const, roles: ["nori" as const], baseContainsAllergens: [] });
+    const originalComponent = bundle.components[0]!;
+    const { cutStyleRef: _cutStyleRef, ...componentBase } = originalComponent;
+    const component = rehash({ ...componentBase, treatment: "plant" as const, rawNotice: "none" as const, containsAllergens: [] });
+    const family = rehash({
+      ...bundle.families[0]!,
+      form: "nigiri" as const,
+      requiredRoles: ["wrapper" as const],
+      allowedRoles: ["wrapper" as const],
+      noriPlacement: "outer-wrapper" as const,
+    });
+    const wrongDish = rehash({
+      ...bundle.dishes[0]!,
+      familyRef: ref(family),
+      componentSlots: [{ role: "wrapper" as const, componentRef: ref(component), noriPlacement: "inner-layer" as const }],
+      containsAllergens: [],
+      rawProfile: "none" as const,
+    });
+    const recipe = rehash({
+      ...bundle.recipes[0]!,
+      dishRef: ref(wrongDish),
+      deterministicResult: ref(wrongDish),
+      exactComponentAmounts: [{ ...bundle.recipes[0]!.exactComponentAmounts[0]!, componentRef: ref(component), role: "wrapper" as const }],
+    });
+    bundle.ingredients = [ingredient];
+    bundle.components = [component];
+    bundle.families = [family];
+    bundle.dishes = [wrongDish];
+    bundle.recipes = [recipe];
+    syncPack(bundle);
+    expectIssue(bundle, "FAMILY_GRAMMAR_VIOLATION", "DISH_FAMILY_MISMATCH");
+
+    const correctDish = rehash({ ...wrongDish, componentSlots: [{ role: "wrapper" as const, componentRef: ref(component), noriPlacement: "outer-wrapper" as const }] });
+    bundle.dishes = [correctDish];
+    bundle.recipes = [rehash({ ...recipe, dishRef: ref(correctDish), deterministicResult: ref(correctDish) })];
+    syncPack(bundle);
+    expect(() => compileContentPack(bundle)).not.toThrow();
+  });
+
   it("evaluates half-open regional seasonality with no-rule unspecified", () => {
     const subjectRef = { kind: "dish" as const, id: "atlantic-salmon-sashimi", version: 1 };
     const rule = {
@@ -202,18 +280,52 @@ describe("compileContentPack", () => {
     expectIssue(bundle, "SEASONALITY_UNRESOLVED", "SEASONALITY_UNRESOLVED");
   });
 
+  it("replays structurally valid historical tzdb content without reactivating it", () => {
+    const bundle = clone();
+    const dish = bundle.dishes[0]!;
+    const rule = rehash({
+      id: "historical-salmon-season",
+      version: 1,
+      reviewId: dish.reviewId,
+      subjectRef: { kind: "dish" as const, ...ref(dish) },
+      regionId: "us-pnw",
+      ianaTimeZone: "America/Los_Angeles",
+      calendar: "iso8601-gregorian" as const,
+      tzdbVersion: "2025b",
+      windows: [{ startLocalDateInclusive: "2025-06-01", endLocalDateExclusive: "2025-09-01", availability: "available" as const }],
+      sourceRef: "fixture-historical-source",
+      reviewedAt: "2025-07-31",
+    });
+    bundle.seasonalityRules = [rule];
+    bundle.pack = rehash({ ...bundle.pack, seasonalityRuleRefs: [ref(rule)] });
+    syncPack(bundle);
+    expectIssue(bundle, "SEASONALITY_UNRESOLVED", "SEASONALITY_UNRESOLVED");
+    expect(() => {
+      // @ts-expect-error Historical compilation is private to recipeSnapshot.
+      compileContentPack(bundle, { mode: "historical" });
+    }).toThrow(ContentValidationError);
+    expect(() => recipeSnapshot(bundle, bundle.recipes[0]!)).not.toThrow();
+  });
+
   it("keeps a historical recipe snapshot byte-equivalent after new transitive versions", () => {
     const original = compileContentPack(clone());
     const before = recipeSnapshot(original.bundle, { id: "atlantic-salmon-sashimi", version: 1 });
     const bundle = clone();
     const componentV2 = rehash({ ...bundle.components[0]!, version: 2, artKey: "raw-salmon-v2" });
     const dishV2 = rehash({ ...bundle.dishes[0]!, version: 2, componentSlots: [{ role: "topping" as const, componentRef: ref(componentV2) }], artKey: "salmon-dish-v2" });
-    const recipeV2 = rehash({ ...bundle.recipes[0]!, version: 2, dishRef: ref(dishV2), exactComponentAmounts: [{ ...bundle.recipes[0]!.exactComponentAmounts[0]!, componentRef: ref(componentV2) }] });
+    const recipeV2 = rehash({ ...bundle.recipes[0]!, version: 2, dishRef: ref(dishV2), deterministicResult: ref(dishV2), exactComponentAmounts: [{ ...bundle.recipes[0]!.exactComponentAmounts[0]!, componentRef: ref(componentV2) }] });
     bundle.components = [...bundle.components, componentV2];
     bundle.dishes = [...bundle.dishes, dishV2];
     bundle.recipes = [...bundle.recipes, recipeV2];
     bundle.artAssets = [...bundle.artAssets, { key: "raw-salmon-v2", digest: contentHashFor({ fixture: "component-v2" }), nonColorIdentity: "wider striped slice" }, { key: "salmon-dish-v2", digest: contentHashFor({ fixture: "dish-v2" }), nonColorIdentity: "four offset slices" }];
-    bundle.pack = rehash({ ...bundle.pack, componentRefs: [...bundle.pack.componentRefs, ref(componentV2)], dishRefs: [...bundle.pack.dishRefs, ref(dishV2)], recipeRefs: [...bundle.pack.recipeRefs, ref(recipeV2)], artAssetDigests: bundle.artAssets.map((asset) => asset.digest).sort() });
+    bundle.pack = rehash({
+      ...bundle.pack,
+      componentRefs: [...bundle.pack.componentRefs, ref(componentV2)],
+      dishRefs: [...bundle.pack.dishRefs, ref(dishV2)],
+      recipeRefs: [...bundle.pack.recipeRefs, ref(recipeV2)],
+      contentManifestHash: contentManifestHashFor(bundle),
+      artAssetMapHash: contentHashFor(bundle.artAssets),
+    });
     const expanded = compileContentPack(bundle);
     expect(recipeSnapshot(expanded.bundle, { id: "atlantic-salmon-sashimi", version: 1 })).toBe(before);
     expect(recipeSnapshot(expanded.bundle, ref(recipeV2))).not.toBe(before);

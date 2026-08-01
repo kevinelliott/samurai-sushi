@@ -18,13 +18,20 @@ the pack enumerates every supplied row exactly once. Hashes use canonical JSON
 under the domain `samurai-sushi:content-row:v1` so repeated builds are byte
 stable and a field change cannot masquerade as the same version.
 
+The pack also binds the exact `{kind,id,version,contentHash}` manifest and the
+exact ordered art records `{key,digest,nonColorIdentity}`. Membership therefore
+cannot preserve a pack hash while swapping row hashes, art digests, or visual
+identity between keys.
+
 The package derives dish allergen and raw profiles from exact prepared-component
 versions, validates typed family roles and nori placement, rejects wildcard or
 cyclic variants, requires immutable art digests and non-color identities, and
 uses pinned subject, region, IANA zone, tzdb version, and half-open dates for
-seasonality; compilation rejects rules whose tzdb version differs from the
-compiler runtime. Historical recipe snapshots contain their transitive component,
-ingredient, cut, family, seasonality, art-key, recovery, and result meaning.
+seasonality. Activation compilation rejects rules whose tzdb version differs
+from the compiler runtime; historical replay validates the archived `YYYYx`
+pin without re-activating it against a newer host tzdb. Historical recipe
+snapshots contain their transitive component, ingredient, cut, family,
+seasonality, art-key, recovery, and exact result meaning.
 
 Diagnostic issue codes remain precise for authors. `ContentValidationError`
 also exposes one existing stable domain failure code: structural/hash/atomicity
@@ -47,6 +54,10 @@ evidence of production culinary, cultural, sourcing, or food-safety approval.
 silently collapsed into ingredient identity. Production activation that makes
 origin, tradition, sourcing, or seasonality claims must add evidence-backed
 provenance records and named review before release.
+
+Schema v1 rejects non-empty dietary claims until their derivation is modeled.
+Recipe results must resolve to the exact pinned dish, and unlock/recovery values
+come from closed enums so runtime code cannot silently interpret new prose.
 
 ## Consequences
 

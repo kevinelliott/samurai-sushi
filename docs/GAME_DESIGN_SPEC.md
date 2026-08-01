@@ -130,22 +130,26 @@ Content is data-authored:
 
 ```text
 VersionedRef { id, version }
-Species { id, version, contentHash, scientificName, names, marketNames, group, reviewId }
-Ingredient { id, version, contentHash, kind, speciesRef?, productKind?, names, glossary, allergenSets, artKey, reviewId }
-PreparedComponent { id, version, contentHash, ingredientRef, cutStyleRef?, treatment, rawNotice, allergenSets, stationSteps, artKey, reviewId }
-DishFamily { id, version, contentHash, structuralSlots, forbiddenSlots, namingRules, platingRules, reviewId }
-Dish { id, version, contentHash, familyRef, componentSlots, rawProfile, allergenSets, dietaryTags, artKey, reviewId }
-RecipeVersion { id, version, dishRef, exactComponentAmounts, stations, unlock, recovery, seasonalityRuleRefs, contentHash }
-RecipeVariant { id, version, contentHash, baseRecipeRef, exactSubstitutions, resultingDishRef, reviewIds, status }
+SpeciesDefinition { id, version, contentHash, reviewId, scientificName, localizedCommonNames, marketNames, group }
+IngredientDefinition { id, version, contentHash, reviewId, kind, speciesRef?, productKind?, roles, names, glossary, baseContainsAllergens, baseMayContainAllergens, baseCrossContactTags, artKey }
+CutStyle { id, version, contentHash, reviewId, names, glossary, compatibleProductKinds, presentationClass }
+PreparedComponent { id, version, contentHash, reviewId, ingredientRef, cutStyleRef?, treatment, rawNotice, containsAllergens, mayContainAllergens, crossContactTags, stationSteps, artKey }
+DishFamily { id, version, contentHash, reviewId, form, requiredRoles, allowedRoles, noriPlacement, namingRules, platingRules }
+ComponentSlot { role, componentRef, noriPlacement? }
+DishDefinition { id, version, contentHash, reviewId, familyRef, names, glossary, componentSlots, rawProfile, containsAllergens, mayContainAllergens, crossContactTags, dietaryTags, presentationRules, nonColorIdentity, artKey }
+RecipeVersion { id, version, contentHash, reviewId, dishRef, exactComponentAmounts, stationSequence, deterministicResult:VersionedRef, unlockRule, recovery, seasonalityRuleRefs, status }
+RecipeVariant { id, version, contentHash, reviewId, baseRecipeRef, substitutions, resultingDishRef, reason, reviewIds, status }
 Guest { id, portraits, preferences, accessibleTell, dialogue, storyFlags }
 Service { id, menuRules, guestSequence, constraints, outcomes }
 Quest { id, prerequisites, serviceMutation, consequence, keepsake, replayPolicy }
 ```
 
-Validation rejects missing glossary text, art keys, derived dietary/allergen
-tags, raw-service policy, recipe version, recovery result, replay policy, or
-required cultural signoff. Species, cut, roe, roll-form, and content-pack rules
-are normative in [`SUSHI_CONTENT_CATALOG.md`](SUSHI_CONTENT_CATALOG.md).
+Validation rejects missing glossary text, art keys, derived allergen facts,
+raw-service policy, recipe version, closed recovery/unlock semantics, replay
+policy, or required review references. Schema v1 rejects non-empty dietary
+claims until a derivation model is adopted. Species, cut, roe, roll-form, and
+content-pack rules are normative in
+[`SUSHI_CONTENT_CATALOG.md`](SUSHI_CONTENT_CATALOG.md).
 
 ## 10. Gameplay acceptance
 

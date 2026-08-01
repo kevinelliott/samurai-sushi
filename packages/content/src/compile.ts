@@ -1,4 +1,4 @@
-import { contentHashFor } from "./hash";
+import { canonicalContentJson, contentHashFor, contentManifestHashFor } from "./hash";
 import { ContentValidationError, sortedIssues, type ContentIssue, type ContentIssueCode } from "./errors";
 import {
   type Allergen,
@@ -96,12 +96,12 @@ function validateReview(reviewId: string, references: ReadonlySet<string>, path:
 }
 
 function deriveFacts(components: readonly PreparedComponent[]): DishFacts {
-  return {
+  return deepFreeze({
     containsAllergens: sortedUnique(components.flatMap((component) => component.containsAllergens)) as readonly Allergen[],
     mayContainAllergens: sortedUnique(components.flatMap((component) => component.mayContainAllergens)) as readonly Allergen[],
     crossContactTags: sortedUnique(components.flatMap((component) => component.crossContactTags)),
     rawProfile: components.some((component) => component.rawNotice === "required") ? "notice-required" : "none",
-  };
+  });
 }
 
 function componentSignature(role: string, ref: VersionedRef): string {
@@ -155,7 +155,7 @@ function readonlyMap<K, V>(source: ReadonlyMap<K, V>): ReadonlyMap<K, V> {
   return Object.freeze(view);
 }
 
-export function compileContentPack(input: unknown): CompiledContentPack {
+function compileContentPackInternal(input: unknown, mode: "activation" | "historical"): CompiledContentPack {
   const cloned = structuredClone(input) as unknown;
   const bundle = decodeContentBundle(cloned);
   const issues: ContentIssue[] = [];
@@ -286,6 +286,9 @@ export function compileContentPack(input: unknown): CompiledContentPack {
       [dish.crossContactTags, "crossContactTags"],
       [dish.dietaryTags, "dietaryTags"],
     ] as const) assertCanonicalSet(values, `${path}.${name}`, issues);
+    if (dish.dietaryTags.length > 0) {
+      addIssue(issues, "RECIPE_INVALID", `${path}.dietaryTags`, "Schema v1 rejects dietary claims until exact derivation is modeled.");
+    }
     if (!sameStrings(dish.containsAllergens, facts.containsAllergens) ||
         !sameStrings(dish.mayContainAllergens, facts.mayContainAllergens) ||
         !sameStrings(dish.crossContactTags, facts.crossContactTags)) {
@@ -301,12 +304,18 @@ export function compileContentPack(input: unknown): CompiledContentPack {
     }
     const ingredients = components.map((component) => indexes.ingredient.get(refKey(component.ingredientRef)) as IngredientDefinition | undefined);
     const hasRice = ingredients.some((ingredient) => ingredient?.roles.includes("sushi-rice"));
-    const noriSlots = dish.componentSlots.filter((slot, slotIndex) => ingredients[slotIndex]?.roles.includes("nori"));
+    const noriSlots = dish.componentSlots.filter((_slot, slotIndex) => ingredients[slotIndex]?.roles.includes("nori"));
     if (family.form === "sashimi" && hasRice) {
       addIssue(issues, "FAMILY_GRAMMAR_VIOLATION", `${path}.componentSlots`, "Sashimi must not contain a sushi-rice component.");
     }
-    if (family.noriPlacement === "none" ? noriSlots.length > 0 : !noriSlots.some((slot) => slot.role === "wrapper")) {
-      addIssue(issues, "FAMILY_GRAMMAR_VIOLATION", `${path}.componentSlots`, "Nori presence and wrapper role must match the family placement policy.");
+    const invalidNoriSlot = dish.componentSlots.some((slot, slotIndex) => {
+      const isNori = ingredients[slotIndex]?.roles.includes("nori") ?? false;
+      if (!isNori) return slot.noriPlacement !== undefined;
+      return slot.role !== "wrapper" || family.noriPlacement === "none" || slot.noriPlacement !== family.noriPlacement;
+    });
+    const noriCountInvalid = family.noriPlacement === "none" ? noriSlots.length !== 0 : noriSlots.length !== 1;
+    if (invalidNoriSlot || noriCountInvalid) {
+      addIssue(issues, "FAMILY_GRAMMAR_VIOLATION", `${path}.componentSlots`, "Nori slots must pin the family placement exactly and use the wrapper role.");
     }
     if (["gunkan", "hosomaki", "futomaki", "uramaki", "temaki"].includes(family.form) && !roles.includes("filling")) {
       addIssue(issues, "FAMILY_GRAMMAR_VIOLATION", `${path}.componentSlots`, "Gunkan and roll families require an exact filling role.");
@@ -324,6 +333,10 @@ export function compileContentPack(input: unknown): CompiledContentPack {
     if (dish) {
       const dishSignature = dish.componentSlots.map((slot) => componentSignature(slot.role, slot.componentRef)).sort(compare);
       if (!sameStrings(recipeSignature, dishSignature)) addIssue(issues, "DISH_COMPONENT_MISMATCH", `${path}.exactComponentAmounts`, "Recipe inputs must exactly match the pinned dish component slots.");
+    }
+    const result = resolve<DishDefinition>(indexes.dish, recipe.deterministicResult, `${path}.deterministicResult`, "dish", issues);
+    if (result && dish && refKey(result) !== refKey(dish)) {
+      addIssue(issues, "RECIPE_INVALID", `${path}.deterministicResult`, "Recipe result must resolve to its exact pinned dish.");
     }
     if (recipe.stationSequence.length === 0) addIssue(issues, "RECIPE_INVALID", `${path}.stationSequence`, "Playable recipes require at least one station step.");
     recipe.exactComponentAmounts.forEach((amount, amountIndex) => {
@@ -398,8 +411,10 @@ export function compileContentPack(input: unknown): CompiledContentPack {
     } catch {
       addIssue(issues, "SEASONALITY_UNRESOLVED", `${path}.ianaTimeZone`, "Unknown IANA time zone.");
     }
-    if (!RUNTIME_TZDB_VERSION || rule.tzdbVersion !== RUNTIME_TZDB_VERSION) {
+    if (mode === "activation" && (!RUNTIME_TZDB_VERSION || rule.tzdbVersion !== RUNTIME_TZDB_VERSION)) {
       addIssue(issues, "SEASONALITY_UNRESOLVED", `${path}.tzdbVersion`, `tzdbVersion must match the compiler runtime${RUNTIME_TZDB_VERSION ? ` (${RUNTIME_TZDB_VERSION})` : ""}.`);
+    } else if (!/^\d{4}[a-z]$/.test(rule.tzdbVersion)) {
+      addIssue(issues, "SEASONALITY_UNRESOLVED", `${path}.tzdbVersion`, "Historical tzdbVersion must remain pinned as YYYYx.");
     }
     if (strictDateOrdinal(rule.reviewedAt) === undefined) addIssue(issues, "SEASONALITY_UNRESOLVED", `${path}.reviewedAt`, "reviewedAt must be a real ISO local date.");
     let previousStart: number | undefined;
@@ -439,10 +454,13 @@ export function compileContentPack(input: unknown): CompiledContentPack {
     assertCanonicalSet(actual, `$.pack.${name}`, issues);
     if (!sameStrings(actual, expected)) addIssue(issues, "PACK_MEMBERSHIP_MISMATCH", `$.pack.${name}`, "Pack membership must exactly and atomically enumerate the supplied definitions.");
   }
-  assertCanonicalSet(bundle.pack.artAssetDigests, "$.pack.artAssetDigests", issues);
-  const expectedArtDigests = bundle.artAssets.map((asset) => asset.digest).sort(compare);
-  if (!sameStrings(bundle.pack.artAssetDigests, expectedArtDigests)) {
-    addIssue(issues, "PACK_MEMBERSHIP_MISMATCH", "$.pack.artAssetDigests", "Pack membership must pin every immutable art digest exactly once.");
+  const artKeys = bundle.artAssets.map((asset) => asset.key);
+  assertCanonicalSet(artKeys, "$.artAssets", issues);
+  if (bundle.pack.artAssetMapHash !== contentHashFor(bundle.artAssets)) {
+    addIssue(issues, "PACK_MEMBERSHIP_MISMATCH", "$.pack.artAssetMapHash", "Pack must hash-bind the exact art key, digest, and non-color identity mapping.");
+  }
+  if (bundle.pack.contentManifestHash !== contentManifestHashFor(bundle)) {
+    addIssue(issues, "PACK_MEMBERSHIP_MISMATCH", "$.pack.contentManifestHash", "Pack must hash-bind every versioned row and content hash.");
   }
 
   if (issues.length > 0) throw new ContentValidationError(sortedIssues(issues));
@@ -451,6 +469,44 @@ export function compileContentPack(input: unknown): CompiledContentPack {
     Object.entries(indexes).map(([kind, index]) => [kind, readonlyMap(index)]),
   ) as Record<IndexedKind, ReadonlyMap<string, VersionedEntity>>;
   return deepFreeze({ bundle: frozenBundle, indexes: readonlyIndexes, dishFacts: readonlyMap(dishFacts) });
+}
+
+export function compileContentPack(input: unknown): CompiledContentPack {
+  return compileContentPackInternal(input, "activation");
+}
+
+function required<T extends VersionedEntity>(rows: readonly T[], ref: VersionedRef, path: string): T {
+  const row = rows.find((candidate) => refKey(candidate) === refKey(ref));
+  if (!row) throw new ContentValidationError([{ code: "BROKEN_REFERENCE", path, message: `Unknown pinned reference ${refKey(ref)}.` }]);
+  return row;
+}
+
+export function recipeSnapshot(input: unknown, recipeRef: VersionedRef): string {
+  const bundle = compileContentPackInternal(input, "historical").bundle;
+  const recipe = required(bundle.recipes, recipeRef, "$.recipeRef");
+  const dish = required(bundle.dishes, recipe.dishRef, "$.recipe.dishRef");
+  const art = new Map(bundle.artAssets.map((asset) => [asset.key, asset]));
+  return canonicalContentJson({
+    schemaVersion: bundle.schemaVersion,
+    recipe,
+    dish,
+    dishArt: art.get(dish.artKey),
+    family: required(bundle.families, dish.familyRef, "$.dish.familyRef"),
+    components: recipe.exactComponentAmounts.map((amount) => {
+      const component = required(bundle.components, amount.componentRef, "$.recipe.exactComponentAmounts.componentRef");
+      const ingredient = required(bundle.ingredients, component.ingredientRef, "$.component.ingredientRef");
+      return {
+        amount,
+        component,
+        componentArt: art.get(component.artKey),
+        ingredient,
+        ingredientArt: art.get(ingredient.artKey),
+        cutStyle: component.cutStyleRef ? required(bundle.cutStyles, component.cutStyleRef, "$.component.cutStyleRef") : null,
+      };
+    }),
+    seasonalityRules: recipe.seasonalityRuleRefs.map((ref) => required(bundle.seasonalityRules, ref, "$.recipe.seasonalityRuleRefs")),
+    identity: versionedKey("recipe", recipe),
+  });
 }
 
 export function deriveDishFacts(pack: CompiledContentPack, dishRef: VersionedRef): DishFacts {

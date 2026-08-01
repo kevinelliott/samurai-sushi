@@ -112,6 +112,7 @@ export interface DishFamily extends VersionedEntity {
 export interface ComponentSlot {
   readonly role: ComponentRole;
   readonly componentRef: VersionedRef;
+  readonly noriPlacement?: Exclude<NoriPlacement, "none">;
 }
 
 export interface DishDefinition extends VersionedEntity {
@@ -123,6 +124,7 @@ export interface DishDefinition extends VersionedEntity {
   readonly mayContainAllergens: readonly Allergen[];
   readonly crossContactTags: readonly string[];
   readonly rawProfile: "none" | "notice-required";
+  /** Schema v1 rejects non-empty dietary claims until derivation is modeled. */
   readonly dietaryTags: readonly string[];
   readonly presentationRules: readonly string[];
   readonly nonColorIdentity: string;
@@ -140,9 +142,9 @@ export interface RecipeVersion extends VersionedEntity {
   readonly dishRef: VersionedRef;
   readonly exactComponentAmounts: readonly ComponentAmount[];
   readonly stationSequence: readonly StationStep[];
-  readonly deterministicResult: string;
-  readonly unlockRule: string;
-  readonly recovery: string;
+  readonly deterministicResult: VersionedRef;
+  readonly unlockRule: "available-at-start" | "first-service-settled";
+  readonly recovery: "retry-with-corrective-cue" | "staff-meal" | "return-components";
   readonly seasonalityRuleRefs: readonly VersionedRef[];
   readonly status: "draft" | "published" | "retired";
 }
@@ -197,7 +199,8 @@ export interface ContentPack extends VersionedEntity {
   readonly recipeRefs: readonly VersionedRef[];
   readonly variantRefs: readonly VersionedRef[];
   readonly seasonalityRuleRefs: readonly VersionedRef[];
-  readonly artAssetDigests: readonly string[];
+  readonly contentManifestHash: string;
+  readonly artAssetMapHash: string;
   readonly archivePolicy: "append-only";
   readonly reviewerSignoffs: readonly string[];
 }
