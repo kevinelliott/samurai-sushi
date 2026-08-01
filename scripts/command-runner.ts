@@ -7,7 +7,7 @@ import {
   assertApprovedRuntimeState,
   assertNoCompetingNetworkConfig,
   runtimeRevisionFromEnvironment,
-  sanitizeSigningEnvironment,
+  validateSigningEnvironment,
   validateNetworkEnvironment,
   validateRuntimePin,
   type NetworkEnvironment,
@@ -118,10 +118,11 @@ export async function runNetworkCommand(
     execFileAsync("git", ["-C", runtimeRoot, "status", "--porcelain=v1"]),
   ]);
   assertApprovedRuntimeState(pin, { revision: revision.trim(), porcelain });
-  const environment = sanitizeSigningEnvironment(network, {
+  const environment = {
     ...process.env,
     SAMURAI_TEZOS_RUNTIME_REVISION: pin.revision,
-  });
+  };
+  validateSigningEnvironment(network, environment);
   const execution = await materializeApprovedRuntime(runtimeRoot, pin);
   try {
     return await runner(

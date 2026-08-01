@@ -3,6 +3,7 @@ import {
   CredentialBoundaryError,
   runtimeRevisionFromEnvironment,
   sanitizeSigningEnvironment,
+  validateSigningEnvironment,
 } from "./signing-policy";
 
 describe("profile-scoped signing environment", () => {
@@ -42,6 +43,12 @@ describe("profile-scoped signing environment", () => {
   it("rejects every browser-visible signing key", () => {
     expect(() =>
       sanitizeSigningEnvironment("localnet", { NEXT_PUBLIC_SAMURAI_SIGNER_KEY: "nope" }),
+    ).toThrowError(CredentialBoundaryError);
+  });
+
+  it("rejects child-only generic signing state at the public command boundary", () => {
+    expect(() =>
+      validateSigningEnvironment("localnet", { SAMURAI_SIGNER_PRIVATE_KEY: "leaked" }),
     ).toThrowError(CredentialBoundaryError);
   });
 

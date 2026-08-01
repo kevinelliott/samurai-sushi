@@ -34,9 +34,11 @@ runtime commit. Changing either produces a different candidate.
 Signing inputs, when a later phase needs them, use only
 `SAMURAI_LOCALNET_SIGNER_*` or `SAMURAI_SHADOWNET_SIGNER_*`. The project runner
 rejects the inactive profile namespace, rejects browser-visible secret names,
-rejects known Localnet fixture material on Shadownet, strips both namespaces,
-and maps only the selected values into the child-only `SAMURAI_SIGNER_*`
-namespace. The parent shell remains unchanged.
+and rejects known Localnet fixture material on Shadownet. The shared runtime
+receives the validated profile-scoped name, strips both profile namespaces, and
+maps only the selected values into the child-only `SAMURAI_SIGNER_*` namespace.
+Generic signer values are rejected at both public boundaries. The parent shell
+remains unchanged.
 
 ## Generation-bound adoption
 
