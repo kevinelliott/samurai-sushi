@@ -1,0 +1,30 @@
+{
+  "intent": {
+    "claimId": "123e4567-e89b-42d3-a456-426614174000",
+    "guestClaimCommitment": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+    "createPlayer": true,
+    "guestRevision": 7,
+    "idempotencyKey": "223e4567-e89b-42d3-a456-426614174000",
+    "contentVersion": "phase0-salmon@1",
+    "cosmeticSelections": {
+      "counter": "moonwake",
+      "norens": "indigo"
+    }
+  },
+  "intentCanonicalJson": "{\"claimId\":\"123e4567-e89b-42d3-a456-426614174000\",\"contentVersion\":\"phase0-salmon@1\",\"cosmeticSelections\":{\"counter\":\"moonwake\",\"norens\":\"indigo\"},\"createPlayer\":true,\"guestClaimCommitment\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"guestRevision\":7,\"idempotencyKey\":\"223e4567-e89b-42d3-a456-426614174000\"}",
+  "intentHash": "sha256:e8e91b8f0680c7258afb8eb1f11a21195e713bd80155ddb216c726ef1254ec23",
+  "challenge": {
+    "domain": "samurai-sushi:guest-claim:v1",
+    "schemaVersion": 1,
+    "origin": "https://game.samurai-sushi.example",
+    "chainId": "NetXdQprcVkpaWU",
+    "account": "tz1VSUr8wwNhLAzempoch5d6hLRiTh8Cjcjb",
+    "claimIntentHash": "sha256:e8e91b8f0680c7258afb8eb1f11a21195e713bd80155ddb216c726ef1254ec23",
+    "nonce": "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBA",
+    "issuedAt": "2026-08-01T20:30:00.000Z",
+    "expiresAt": "2026-08-01T20:35:00.000Z"
+  },
+  "challengeCanonicalJson": "{\"account\":\"tz1VSUr8wwNhLAzempoch5d6hLRiTh8Cjcjb\",\"chainId\":\"NetXdQprcVkpaWU\",\"claimIntentHash\":\"sha256:e8e91b8f0680c7258afb8eb1f11a21195e713bd80155ddb216c726ef1254ec23\",\"domain\":\"samurai-sushi:guest-claim:v1\",\"expiresAt\":\"2026-08-01T20:35:00.000Z\",\"issuedAt\":\"2026-08-01T20:30:00.000Z\",\"nonce\":\"BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBA\",\"origin\":\"https://game.samurai-sushi.example\",\"schemaVersion\":1}",
+  "challengeHash": "sha256:398fc91e06607332629db8e1da5338450cf9bd306980029cfbe865e94236b4a0",
+  "walletSigningHex": "0501000001957b226163636f756e74223a22747a31565355723877774e684c417a656d706f6368356436684c5269546838436a636a62222c22636861696e4964223a224e6574586451707263566b70615755222c22636c61696d496e74656e7448617368223a227368613235363a65386539316238663036383063373235386166623865623166313161323131393565373133626438303135356464623231366337323665663132353465633233222c22646f6d61696e223a2273616d757261692d73757368693a67756573742d636c61696d3a7631222c22657870697265734174223a22323032362d30382d30315432303a33353a30302e3030305a222c226973737565644174223a22323032362d30382d30315432303a33303a30302e3030305a222c226e6f6e6365223a2242424242424242424242424242424242424242424242424242424242424242424242424242424242424241222c226f726967696e223a2268747470733a2f2f67616d652e73616d757261692d73757368692e6578616d706c65222c22736368656d6156657273696f6e223a317d"
+}

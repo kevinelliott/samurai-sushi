@@ -280,13 +280,39 @@ signed challenge is
 `{domain:"samurai-sushi:guest-claim:v1",schemaVersion,origin,chainId,account,
 claimIntentHash,nonce,issuedAt,expiresAt}`. No hash includes itself.
 Account parsing preserves the protocol-canonical Tezos address rather than
-case-normalizing display text; signature verification selects the permitted
-scheme from the decoded account/public-key form and verifies the exact canonical
-bytes. The stored challenge hash is consumed inside the claim transaction.
+case-normalizing display text. V1 key-possession claims admit implicit accounts
+only: `tz1`/`edpk`/`edsig`, `tz2`/`sppk`/`spsig1`, `tz3`/`p2pk`/`p2sig`, and
+`tz4`/`BLpk`/`BLsig`. `KT1`, `sr1`, `tz5`, generic `sig`, aggregate `asig`, and
+cross-curve prefix pairs are not this protocol; an abstracted account requires
+a separately reviewed Proof-of-Event flow. The pure domain decoder preserves
+bounded canonical account and chain text shapes but does not claim
+that either is Base58Check-valid or that the account proves key possession.
+The next adapter must Base58Check-decode and byte-for-byte round-trip both before
+key matching. That remains a server-verifier gate.
+
+The stored challenge hash is consumed inside the claim transaction.
 Let `challengeBytes` be the UTF-8 RFC 8785 canonical JSON bytes of that exact
-signed challenge. The database lookup value is
+challenge. The database lookup value is
 `SHA-256("samurai-sushi:claim-challenge-hash:v1\n" + challengeBytes)` and the
-wallet signs `challengeBytes`; the golden fixture pins both.
+golden fixture pins it independently. Wallet signing uses
+`walletSigningBytes = 0x05 || 0x01 || uint32_be(challengeBytes.length) ||
+challengeBytes`, sent as lowercase hex with Beacon `SigningType.MICHELINE` and
+`sourceAddress = challenge.account`. The wallet signs the full Micheline-packed
+bytes; `SigningType.RAW` is not accepted. Neither a public key nor a signature
+belongs in the intent or challenge hash preimage.
+
+The next verifier pins server-side `@taquito/utils@25.0.0`, decodes and
+round-trips the one expected Base58Check prefix and length, derives the account
+as `BLAKE2b-160(decoded publicKey)` under the paired `tzN` prefix, and requires
+exact account equality before signature verification. It verifies the full
+`walletSigningBytes` with no extra watermark, rejects generic signatures,
+requires canonical low-S ECDSA for `tz2`/`tz3`, validates curve points and exact
+decoded lengths, and uses ordinary non-aggregate BLS verification for `tz4`.
+The curve-specific signature-prefix gate runs before Taquito because its generic
+verification path may accept the same valid signature bytes re-encoded as
+`sig`; this protocol must not.
+Every parsing, account, key, and signature distinction collapses to one
+public-safe proof failure.
 
 The transaction locks subject rows in stable `(subjectKind, subjectId)` order,
 then progress and owned rows, preventing conflicting lock order. It locks
@@ -311,6 +337,37 @@ with different issuance IDs cannot revoke one another.
 A second wallet, stale revision, replayed challenge, changed idempotency
 payload, deleted/expired guest, or injected failure at any rewrite boundary
 leaves both subjects and all ownership unchanged.
+
+#### Stage 3 pure-domain boundary and next gates
+
+The first Stage 3 slice contains only strict `ClaimIntent` and challenge-to-sign
+types, bounded canonical decoders, RFC 8785 bytes, intent/challenge lookup
+hashes, Micheline wallet-signing bytes, public-safe shape failure, golden
+fixtures, and a browser-safe package subpath. It performs no network calls and
+does not verify a wallet signature or Base58Check checksum.
+
+The next persistence slice issues `issuedAt` and `expiresAt` from one PostgreSQL
+clock sample with an exact 300,000 ms interval. Admission requires
+`issuedAt <= dbNow < expiresAt`; equality at expiry rejects. Challenge hash and
+256-bit nonce are unique and single-use, and consumption occurs in the same
+transaction as the claim so any later failure rolls it back.
+
+That transaction authenticates or resolves identifiers without child locks,
+then locks the guest and any existing target player in stable
+`(subjectKind, subjectId)` order. After resampling PostgreSQL time it revalidates
+active-unclaimed state and both exact revisions, then locks the challenge,
+claim-ID/idempotency scope, wallet credential, progress, sessions,
+exports/imports, services, and owned rows. Import, deletion, and claim all take
+the guest parent first. Challenge consumption, progress merge, ownership
+rewrite, wallet link, pending-delivery player-session issuance, guest
+credential/export revocation, and tombstones commit atomically.
+
+Migration 0003, player sessions, wallet credentials, signature SDK/verifier,
+claim transactions, ownership rewrites, endpoints, UI, and wallet/network calls
+remain explicit later gates. Their hostile suites must cover checksum and
+curve/prefix vectors, nonce reuse, exact expiry, replay, changed signature
+context, second-wallet conflict, lost response, import/delete races, and
+rollback after challenge consumption.
 
 ### Privacy and deletion
 

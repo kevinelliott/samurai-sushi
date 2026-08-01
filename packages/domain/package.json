@@ -6,6 +6,7 @@
   "exports": {
     ".": "./src/index.ts",
     "./canonical-json": "./src/canonical-json.ts",
+    "./claim-protocol": "./src/claim-protocol.ts",
     "./portable-recovery": "./src/portable-recovery.ts",
     "./portable-save-crypto": "./src/portable-save-crypto.ts"
   },
