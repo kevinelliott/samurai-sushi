@@ -29,6 +29,9 @@ export function sanitizeSigningEnvironment(
     if (PUBLIC_SECRET.test(key)) {
       throw new CredentialBoundaryError(`${key} must never expose signing material to the browser.`);
     }
+    if (key.startsWith(ACTIVE_PREFIX)) {
+      throw new CredentialBoundaryError(`${key} is child-only and cannot enter a public project command.`);
+    }
     if (key.startsWith(forbiddenPrefix)) {
       throw new CredentialBoundaryError(`${key} is forbidden while running the ${network} profile.`);
     }
@@ -52,6 +55,13 @@ export function sanitizeSigningEnvironment(
     }
   }
   return sanitized;
+}
+
+export function validateSigningEnvironment(
+  network: NetworkName,
+  environment: NetworkEnvironment,
+): void {
+  sanitizeSigningEnvironment(network, environment);
 }
 
 export function runtimeRevisionFromEnvironment(environment: NetworkEnvironment): string {
