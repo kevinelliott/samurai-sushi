@@ -42,6 +42,9 @@ importers:
 
   apps/web:
     dependencies:
+      '@samurai-sushi/domain':
+        specifier: workspace:*
+        version: link:../../packages/domain
       '@samurai-sushi/network':
         specifier: workspace:*
         version: link:../../packages/network
