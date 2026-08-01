@@ -102,7 +102,23 @@ Automated axe/contrast/overflow tests supplement but do not replace these
 journeys. Record device/OS/browser/assistive-technology versions and exact
 release commit.
 
-## 6. Reporting
+## 6. Catalog comprehension study
+
+Before the 12-dish alpha gate, run a separate eight-person content study using
+grayscale and reduced-motion variants. All eight must distinguish sashimi from
+nigiri, locate raw/cooked state and contains/may-contain allergen facts, and
+explain that the game is not food-safety guidance. At least seven of eight must
+distinguish the tested roe vessels and roll-family structures using label plus
+silhouette rather than hue. Record every confusion pair and revise art/copy;
+this formative threshold is not market validation.
+
+Before the 24-dish public-launch gate, repeat with the defined 24-person
+validation cohort. Report family/species/cut confusion matrices, raw/allergen
+fact-finding success, assistive-technology results, and performance with the
+full cookbook. Catalog breadth MUST NOT worsen first-service completion or
+median first-serve time beyond the existing product gates.
+
+## 7. Reporting
 
 The report includes protocol deviations, recruitment, sample, denominators, raw
 counts, medians/distributions, intervention log, accessibility matrix, failed

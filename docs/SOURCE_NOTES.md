@@ -38,7 +38,9 @@ The originating Buzz thread received eight independent specialist reviews:
 
 The shared conclusion is a service game with optional provenance, not a token
 economy. Where recommendations differed, the foundation chose the smaller
-MVP—three dishes/guests—and moved six-dish breadth into alpha.
+first-service experiment—three required dishes/guests—then added salmon sashimi
+as an immediate fourth MVP unlock and a finite reviewed catalog path of 12 alpha,
+24 public-launch, and 40+ post-launch dishes.
 
 ## Working assumptions
 

@@ -2,8 +2,9 @@
 
 ## Phase 0 — Foundation
 
-Deliver workspace, ADRs, domain/content schemas, validator, database migrations,
-CI, environment contract, threat model, and walletless pixel shell.
+Deliver workspace, ADRs, the finite species → ingredient → prepared component
+→ dish → recipe/content-pack graph, family/variant validator, database
+migrations, CI, environment contract, threat model, and walletless pixel shell.
 
 Exit: repository gates run from a clean checkout; product and cultural open
 decisions are visible; no chain/deployment claim is implied.
@@ -20,9 +21,9 @@ resolved.
 
 ## Phase 1 — Evening Service prototype
 
-Build one counter, three guests, three dishes, core stations, service state,
-feedback, pause/recovery, save/resume, restoration choice, responsive layout,
-and accessibility.
+Build one counter, three guests, the three-dish first service, immediate salmon
+sashimi unlock, core stations, service state, feedback, pause/recovery,
+save/resume, restoration choice, responsive layout, and accessibility.
 
 Exit: the defined validation cohort finishes without a wallet; median first
 serve <3 minutes; ≥80% finish; ≥60% begin a second shift within 24 hours. Phase
@@ -40,8 +41,12 @@ Shadownet keepsake.
 
 ## Phase 3 — Alpha content
 
-Expand to six recipes, more guests, cookbook/service history, restoration and
-memento gallery, content validation, and final cultural/culinary asset review.
+Expand to 12 authored dishes across sashimi, nigiri, gunkan, hosomaki,
+futomaki, and uramaki; add more guests, cookbook/service history, restoration
+and memento gallery, content validation, and final cultural/culinary asset
+review. Public-launch readiness separately requires 24 reviewed dishes,
+including temaki, at least eight seafood identities, three roe identities, four
+roll structures, and meaningful cooked/plant-forward alternatives.
 
 Exit: content/a11y/performance gates pass; product health remains within target
 after content breadth increases.

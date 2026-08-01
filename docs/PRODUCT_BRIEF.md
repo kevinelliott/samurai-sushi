@@ -51,16 +51,19 @@ One responsive counter experience lasting 8–12 minutes:
 ## MVP scope
 
 - One counter, one player character, three guests.
-- Three dishes: kappa maki, tamago nigiri, and salmon nigiri.
+- A three-dish first service—kappa maki, tamago nigiri, and salmon nigiri—plus
+  salmon sashimi as an immediate post-service MVP unlock.
 - Three essential interaction groups: rice preparation, topping preparation,
   and roll/nigiri assembly plus plating.
 - Pause, retry, recovery, reduced-motion, and input parity.
 - Local/service recap that survives wallet failure.
 - One optional, deterministic, non-financial Shadownet receipt.
 
-Six recipes, more guests, a persistent cookbook, a memento gallery, and
-read-only Dos Esposas recognition belong to alpha only after the first loop
-passes its gates.
+A 12-dish alpha and 24-dish public-launch catalog spanning sashimi, nigiri,
+gunkan, hosomaki, futomaki, uramaki, temaki, and composed dishes; more guests;
+a persistent cookbook; a memento gallery; and read-only Dos Esposas recognition
+follow only after the first loop passes its gates. Catalog rules and candidate
+ingredients are defined in [`SUSHI_CONTENT_CATALOG.md`](SUSHI_CONTENT_CATALOG.md).
 
 ## Success
 

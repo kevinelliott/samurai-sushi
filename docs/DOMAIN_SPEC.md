@@ -88,6 +88,20 @@ rechecked”; `DROPPED/FAILED/REJECTED` state that no receipt was recorded.
     wallet generation, session revision, source, chain, permission scope,
     destination, entrypoint, mutez amount, payload bytes, manifest, intent, and
     expiry; otherwise transport calls equal zero.
+16. Species, culinary ingredient, prepared component, dish, recipe version,
+    provenance claim, and asset binding are distinct identities.
+17. Every aquatic ingredient resolves to exactly one reviewed species; every
+    roe product identifies its source species. Uni is not roe.
+18. Every recipe references exact prepared components and one dish family;
+    runtime wildcards such as `any fish`, `any roe`, or `any filling` are invalid.
+19. Sashimi contains no sushi rice. Nigiri, gunkan, and each roll subtype satisfy
+    their versioned structural-slot grammar.
+20. Raw-food notice and allergen profiles derive monotonically from exact
+    prepared components; overrides cannot remove a contained allergen.
+21. Recipe variants are finite, explicit, acyclic, review-addressable, and
+    resolve to a concrete dish. Published recipe versions are immutable.
+22. Missing seasonality evidence means `unspecified`, never inferred available.
+23. No semantic content identity authorizes an onchain asset binding.
 
 ## 4. Stable failure codes
 
@@ -101,6 +115,14 @@ POLICY_MISMATCH
 INTENT_EXPIRED
 UNKNOWN_RECIPE
 RECIPE_VERSION_INACTIVE
+UNKNOWN_SPECIES
+UNKNOWN_COMPONENT
+DISH_FAMILY_MISMATCH
+AMBIGUOUS_VARIANT
+ALLERGEN_CONFLICT
+RAW_PROFILE_CONFLICT
+SEASONALITY_UNRESOLVED
+PROVENANCE_UNVERIFIED
 INVALID_QUANTITY
 UNKNOWN_ASSET
 FOREIGN_ASSET_NOT_APPROVED
@@ -123,6 +145,13 @@ replace stable, user-safe failure codes.
 
 - Schema tests reject malformed identity, negative/non-integer quantity,
   duplicate accepted refs, missing digests, and inexact conversion.
+- Content graph tests reject dangling/cyclic variants, wildcard components,
+  species/product/cut mismatch, family-slot violations, missing raw notices,
+  weakened allergens, contradictory seasonality, evidence-free provenance, and
+  semantic IDs used as asset authorization.
+- Identity fixtures keep salmon species, salmon flesh, a salmon sashimi
+  component, salmon sashimi dish, and a lookalike `SALMON` token non-equal;
+  ikura/tobiko/masago remain distinct and uni-as-roe is rejected.
 - Event replay twice produces byte-equivalent projection.
 - Failed/backtracked/skipped operations never settle.
 - Account A→B, network, scope, disconnect/reconnect, multi-tab, and payload drift

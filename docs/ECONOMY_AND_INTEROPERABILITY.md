@@ -11,10 +11,14 @@ permanence adds player meaning.
 ## 2. Asset taxonomy
 
 - Staples: rice, vinegar, nori.
-- Proteins: salmon, tuna, tamago, tofu.
+- Aquatic products: reviewed finfish flesh/cuts, shellfish, mollusks, and
+  species-identified roe. Species, product form, cut, and preparation are
+  separate content identities.
+- Other proteins: tamago and tofu.
 - Produce/garnish: cucumber, avocado, scallion, ginger, sesame, citrus.
 - Prepared components: sushi rice, sliced topping, tamago block, garnish tray.
-- Finished dishes: nigiri, maki, hand rolls, bowls, composed plates.
+- Finished dishes: sashimi, nigiri, gunkan, hosomaki, futomaki, uramaki,
+  temaki, bowls, and composed plates.
 - Progress: recipe mastery, station proficiency, neighborhood trust;
   non-transferable and non-redeemable.
 - Provenance: verified foreign holdings, festival stamps, cosmetics, and
@@ -22,6 +26,11 @@ permanence adds player meaning.
 
 All asset math uses raw natural-number units. `raw = display × 10^decimals`.
 Inexact conversion is rejected, never rounded.
+
+The semantic content graph is defined in
+[`SUSHI_CONTENT_CATALOG.md`](SUSHI_CONTENT_CATALOG.md). A species, cut,
+prepared component, roe source, or dish ID is never an onchain identity and
+cannot authorize an import or compatibility claim.
 
 ## 3. Sources and sinks
 

@@ -38,6 +38,8 @@ Named Japanese cultural and culinary reviewers must cover:
 
 - product and shop names;
 - culinary terminology, recipe construction, serving ware, and dietary tags;
+- species and market naming, sashimi cuts, roe terminology, roll-family
+  construction, raw-food copy, seasonality, and sourcing/provenance claims;
 - signage, Japanese-language text, seals, clothing, and architecture;
 - guest naming and characterization;
 - seasonal references, ceremonies, and neighborhood fiction;
@@ -58,8 +60,15 @@ jalapeño, tequila, or other inventory into sushi to manufacture compatibility.
 
 ## 6. Content delivery targets
 
-- MVP: three dishes, three guests, one room, three restoration choices.
-- Alpha: six dishes, four to eight guests, five authored quests, three chapters,
-  and a reviewable asset/content pipeline.
-- Post-alpha: 12–24 dishes, seasonal packs, shop variants, and crossover specials
-  only after provenance and contract approval.
+- MVP: three required first-service dishes, salmon sashimi as an immediate
+  fourth-dish unlock, three guests, one room, and three restoration choices.
+- Alpha: 12 reviewed authored dishes covering sashimi, nigiri, gunkan,
+  hosomaki, futomaki, and uramaki; four to eight guests; five quests; three
+  chapters; and a reviewable content pipeline.
+- Public launch: 24 reviewed dishes with at least eight seafood identities,
+  three roe identities, four roll structures, and cooked/plant-forward choices.
+- Post-launch: 40+ reviewed dishes, seasonal packs, shop variants, and
+  crossover specials only after provenance and contract approval.
+
+Catalog count never overrides review. A candidate species, roe, cut, or dish
+that lacks evidence remains disabled even if a delivery target is missed.

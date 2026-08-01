@@ -22,7 +22,7 @@ An MVP service lasts 8–12 minutes and has three sequential guest tickets. Cost
 and success conditions are visible before commitment. Presentation affects
 guest delight and expression, never token yield.
 
-## 3. MVP content ceiling
+## 3. MVP onboarding vertical and scalable catalog
 
 ### Ingredients
 
@@ -43,20 +43,28 @@ they MUST NOT silently alter economic recipes.
 | Kappa maki | sushi rice, nori, cucumber | prep → rolling mat | layering and roll order |
 | Tamago nigiri | sushi rice, tamago, nori | prep → nigiri counter | portion and binding |
 | Salmon nigiri | sushi rice, salmon | prep → nigiri counter | topping preparation and finishing |
+| Salmon sashimi | salmon | prep/sashimi board → plating | rice-free cut, portion, and presentation |
 
-The alpha content target may expand to avocado maki, inari sushi, and an
-ochazuke closing bowl after MVP play gates pass.
+The first three rows form the required first service. Salmon sashimi unlocks
+immediately after that service reaches `SETTLED`; it is MVP content but not a
+fourth tutorial order. Alpha expands to the multi-family catalog in
+[`SUSHI_CONTENT_CATALOG.md`](SUSHI_CONTENT_CATALOG.md) after MVP play gates pass.
 
 ### Stations
 
-| Station | Verbs | Purpose |
-| --- | --- | --- |
-| Rice hearth | wash, steam, season | shared base preparation and batch planning |
-| Prep board | slice, portion | topping transformation and accuracy |
-| Rolling/nigiri counter | roll, press, brush, plate | assembly and finishing |
+| Capability | Verbs | Purpose | Availability |
+| --- | --- | --- | --- |
+| Rice hearth | wash, steam, season, portion | shared base preparation and batch planning | MVP |
+| Prep/sashimi board | slice, portion, score, arrange | topping transformation, sashimi cuts, and accuracy | MVP |
+| Rolling mat | layer, roll, cut | hosomaki, futomaki, and uramaki form | MVP; advanced forms later |
+| Nigiri counter | press, bind, wrap, fill, fold, brush, plate | nigiri, gunkan, and temaki form | MVP; gunkan/temaki later |
+| Tea & flame | brew, cook, sear | cooked ingredients, tea/soup, and reviewed seared dishes | Alpha |
 
-Station interactions are short decisions, not dexterity gates. Animation
-confirms state; it never hides the next action.
+The UI may group these into three compact interaction areas during MVP, but the
+content schema preserves five capability IDs so sashimi, gunkan, temaki, and
+cooked/seared dishes do not require a later migration. Station interactions are
+short decisions, not dexterity gates. Animation confirms state; it never hides
+the next action. These are game abstractions, not real-world handling guidance.
 
 ## 4. First session
 
@@ -66,7 +74,8 @@ confirms state; it never hides the next action.
 4. Choose one plate/garnish presentation.
 5. Make tamago and salmon orders with less guidance.
 6. Close the ledger and choose one shop-restoration cosmetic.
-7. Choose **Keep playing** or the secondary optional wallet receipt.
+7. Unlock salmon sashimi and choose **Keep playing** or the secondary optional
+   wallet receipt.
 
 ## 5. Guest system
 
@@ -97,7 +106,8 @@ unless a separately reviewed chain operation was already confirmed.
 Four private mastery threads:
 
 - Rice: preparation and batch planning.
-- Knife & Form: cuts, rolls, nigiri, presentation.
+- Knife & Form: sashimi cuts, fish/cut recognition, rolls, nigiri, gunkan, and
+  presentation.
 - Hospitality: preference accuracy and pacing.
 - Season: menu composition and neighborhood events.
 
@@ -119,15 +129,22 @@ clearly previewed milestone.
 Content is data-authored:
 
 ```text
-Ingredient { id, names, glossary, tags, allergens, provenanceClass, artKey, compatibility }
-Recipe { id, version, inputs, stations, output, dietaryTags, plateRules, unlock, recovery }
+Species { id, scientificName, localizedCommonNames, marketNames, group, reviewId }
+Ingredient { id, kind, speciesId?, productKind?, names, glossary, baseAllergens, artKey, reviewId }
+PreparedComponent { id, ingredientId, cutStyleId?, treatment, rawNotice, allergens, stationSteps, artKey, reviewId }
+DishFamily { id, structuralSlots, forbiddenSlots, namingRules, platingRules, reviewId }
+Dish { id, familyId, componentSlots, rawProfile, allergenProfile, dietaryTags, artKey, reviewId }
+RecipeVersion { id, version, dishId, exactComponents, stations, unlock, recovery, seasonalityRules, contentHash }
+RecipeVariant { id, baseRecipeVersion, exactSubstitutions, resultingDishId, reviewIds, status }
 Guest { id, portraits, preferences, accessibleTell, dialogue, storyFlags }
 Service { id, menuRules, guestSequence, constraints, outcomes }
 Quest { id, prerequisites, serviceMutation, consequence, keepsake, replayPolicy }
 ```
 
-Validation rejects missing glossary text, art keys, dietary tags, recipe
-version, recovery result, replay policy, or required cultural signoff.
+Validation rejects missing glossary text, art keys, derived dietary/allergen
+tags, raw-service policy, recipe version, recovery result, replay policy, or
+required cultural signoff. Species, cut, roe, roll-form, and content-pack rules
+are normative in [`SUSHI_CONTENT_CATALOG.md`](SUSHI_CONTENT_CATALOG.md).
 
 ## 10. Gameplay acceptance
 
@@ -135,6 +152,8 @@ version, recovery result, replay policy, or required cultural signoff.
 - Player can identify the next station and ingredient from label, icon, and
   silhouette without color alone.
 - Every dish has deterministic input/output preview and a recovery result.
+- The MVP includes a real sashimi path after the first settled service; sashimi
+  contains no sushi rice and cannot be generated from an arbitrary fish name.
 - No connect CTA, wallet request, or ownership branch before the service reaches
   `SETTLED`; a pre-play informational ownership explainer is allowed.
 - Reduced motion removes looping/action animation while preserving every state.

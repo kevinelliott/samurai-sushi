@@ -6,7 +6,8 @@
 | --- | --- | --- |
 | Guest-first entry | play begins without crypto knowledge | start shift in one action; no wallet wall |
 | Guided rice preparation | learn the shared base rhythm | forgiving tutorial; keyboard/touch/pointer |
-| Three authored orders | complete service arc | kappa, tamago, salmon; clear tickets and recovery |
+| Three authored orders | complete service arc | kappa, tamago, salmon nigiri; clear tickets and recovery |
+| First sashimi unlock | establish rice-free fish preparation | salmon sashimi unlocks after first `SETTLED` service; reviewed slice/plate path |
 | Counter stations | tactile craft decisions | no drag-only or sub-5-second essential timing |
 | Plating choice | expression without pay advantage | cosmetic guest feedback only |
 | Service ledger | trustworthy completion and learning | accuracy/pacing/hospitality separated; durable resume |
@@ -18,7 +19,11 @@
 
 ## P1 — Alpha, after MVP gates
 
-- Six-recipe cookbook and broader pantry.
+- A 12-dish authored alpha spanning sashimi, nigiri, gunkan, hosomaki,
+  futomaki, and uramaki; a separately gated 24-dish public-launch catalog adds
+  temaki, deeper fish/cut breadth, and three distinct roe products.
+- Filterable cookbook by family, species, cut, dietary/allergen, season, and
+  mastery state.
 - Four to eight recurring guests and chapter flags.
 - Persistent service history and memento gallery.
 - Five authored neighborhood quests and three chapter arcs.

@@ -24,6 +24,7 @@ reskin and does not inherit Dos Esposas assets or token behavior by name.
 - [Product requirements](docs/PRD.md)
 - [Feature catalog](docs/FEATURES.md)
 - [Game design specification](docs/GAME_DESIGN_SPEC.md)
+- [Sushi content catalog](docs/SUSHI_CONTENT_CATALOG.md)
 - [Normative domain specification](docs/DOMAIN_SPEC.md)
 - [Economy and interoperability policy](docs/ECONOMY_AND_INTEROPERABILITY.md)
 - [Technical specification](docs/TECHNICAL_SPEC.md)
@@ -37,9 +38,12 @@ reskin and does not inherit Dos Esposas assets or token behavior by name.
 
 ## MVP in one line
 
-One responsive web counter, three authored customers, three dishes, three core
-stations, an 8–12 minute guest-mode service, and one optional Shadownet service
-receipt only after the service reaches `SETTLED`.
+One responsive web counter, three authored customers, a three-dish tutorial
+service plus an immediately unlocked sashimi dish, three compact interaction
+areas, an 8–12 minute guest-mode service, and one optional Shadownet service
+receipt only after the service reaches `SETTLED`. The schema separately
+supports a reviewed 12/24/40+ dish path across fish, roe, sashimi, and distinct
+roll families.
 
 ## Explicitly out of MVP
 

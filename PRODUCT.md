@@ -53,6 +53,10 @@ assets and receipts.
 ## Capabilities and Constraints
 
 - The MVP is a responsive web experience with an 8–12 minute evening shift.
+- The first service has three required dishes; salmon sashimi unlocks
+  immediately afterward as a fourth MVP dish. The versioned content system
+  supports broad fish, cut, roe, and roll-family expansion without wildcard
+  recipes.
 - A complete first service MUST work without a wallet, faucet, marketplace, or
   crypto vocabulary.
 - MVP gameplay outcomes are deterministic; no random economic reward ships.

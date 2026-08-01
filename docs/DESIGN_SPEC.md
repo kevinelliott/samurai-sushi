@@ -51,8 +51,10 @@ MVP in 8–12 minutes.
 Primary navigation:
 
 1. **Counter** — order, prep, plate, serve, result.
-2. **Stores** — ingredients and dishes, provenance and readiness.
-3. **Recipes** — learned recipes and station sequences.
+2. **Stores** — ingredients and dishes, filterable by family, species/product,
+   dietary/allergen tag, season, provenance, and readiness.
+3. **Recipes** — learned recipes, dish families, exact components, raw/cooked
+   state, allergen facts, and station sequences.
 4. **Ledger** — service records, pending operations, receipts, failures.
 
 Market is deferred from MVP. A future Market may replace Recipes in the primary
@@ -115,6 +117,9 @@ ornaments.
 - Top-left light source, one-pixel source outline, two or three value steps per
   material, controlled family palette.
 - Every ingredient is recognizable by silhouette at 1× and by a text label.
+- Sashimi uses cut geometry plus skin/fat/texture cues; roe uses bead size,
+  clustering, vessel, and label; hosomaki, futomaki, uramaki, and temaki use
+  distinct cross-section or fold silhouettes. None may be a color-only swap.
 - Core components: order chit, ingredient tile, prep slot, serving tray, recipe
   strip, service stamp, network plaque, wallet seal, receipt drawer, status
   lantern.
@@ -126,6 +131,10 @@ to the pass, and the service stamp lands once. UI feedback is 80–160 ms; serve
 moments 400–700 ms. Indeterminate waits pair limited motion with text and elapsed
 state. Reduced motion uses immediate swaps and a static result stamp.
 
+Sashimi uses a rice-free slice → arrange → plate sequence. Gunkan wraps then
+fills; temaki folds then fills; neither reuses a cylindrical roll animation.
+Reduced motion presents the same ordered states as labeled static swaps.
+
 ## 10. State and copy contract
 
 Design all of: first-run, guest, disconnected, connecting, wrong network, empty,
@@ -136,6 +145,11 @@ contract mismatch, stale indexer, reorg, and unavailable.
 Food language frames tasks but never hides chain facts. Errors say what happened,
 what remains safe, and what to do next. Example: “Wallet request cancelled.
 Nothing was spent. Review and try again.”
+
+Ingredient and recipe facts show full common name, dish family, species/product
+and cut/preparation when relevant, raw/cooked game state, contains/may-contain
+allergens, season/availability evidence state, and provenance/compatibility.
+They state that game content is not real-world food-safety guidance.
 
 Receipts include account, network, contract/version, exact payload or asset
 deltas, fee, operation hash, timestamps, confirmations, manifest, and finality.
@@ -164,6 +178,12 @@ deltas, fee, operation hash, timestamps, confirmations, manifest, and finality.
 - `SS-IA-001`: Counter, Stores, Recipes, Ledger are one action away.
 - `SS-VIS-001`: wordmark-hidden distinction from Dos Esposas.
 - `SS-VIS-002`: integer pixel scaling and silhouette tests pass.
+- `SS-VIS-003`: at 1× and without color, players can distinguish sashimi from
+  nigiri, roe vessels, and hosomaki/futomaki/uramaki/temaki structures by
+  silhouette plus label.
+- `SS-CONTENT-001`: ingredient and recipe facts expose raw/cooked state,
+  allergens, exact culinary identity, and unknown/unsupported evidence states
+  without presenting real-world food-safety instruction.
 - `SS-VIS-003`: culturally specific production assets have recorded signoff.
 - `SS-A11Y-001`: no serious/critical automated issues plus manual journeys.
 - `SS-A11Y-002`: contrast, targets, zoom, 320 px, and non-color state pass.

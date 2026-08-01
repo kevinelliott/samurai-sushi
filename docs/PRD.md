@@ -19,6 +19,8 @@ optional provenance second.
 
 - Deliver a satisfying, comprehensible 8–12 minute service.
 - Teach prepare → assemble → plate → serve through play.
+- Establish sashimi, fish/cut variety, roe, and distinct roll forms as
+  first-class authored content rather than interchangeable toppings.
 - Make accuracy, pacing, presentation, and hospitality legible.
 - Preserve progress through wallet rejection, delay, outage, reload, and
   account/network changes.
@@ -50,6 +52,10 @@ optional provenance second.
 7. **Optional ownership:** the player may connect a wallet, review exact
    network/contract/data/fee/finality, and record a service keepsake.
 
+After the first service settles, salmon sashimi unlocks as the fourth MVP dish
+and introduces a rice-free preparation path without changing the three-order
+first-session experiment.
+
 ## 6. Functional requirements
 
 ### SS-FR-001 Guest service
@@ -64,6 +70,9 @@ optional provenance second.
 
 - Every order MUST show dish, required ingredients, station sequence, dietary
   tags, patience/pacing rule, and optional preference before acceptance.
+- Recipe/order facts MUST expose dish family, exact recipe version,
+  species/product and cut/preparation where relevant, raw/cooked game state,
+  contains/may-contain allergens, and any explicit substitution policy.
 - Every station MUST support keyboard, touch, and pointer without a drag-only
   dependency.
 - Duplicate step input MUST be idempotent.
@@ -115,10 +124,28 @@ Required aggregate/attempt states and legal transitions are normative in
 - DER MUST NOT be an input, output, fee, gate, score, or progression reward in
   MVP.
 
+### SS-FR-007 Sushi catalog
+
+- Sashimi MUST be a distinct dish family and MUST NOT be modeled as nigiri with
+  an omitted rice display.
+- Fish species, cut/grade, product form, preparation, roe source species, and
+  dish family MUST have separate stable content identities.
+- Hosomaki, futomaki, uramaki, and temaki MUST be distinct authored forms;
+  “roll” MUST NOT enable arbitrary ingredient combinations.
+- Every animal-derived prepared component MUST declare treatment/raw-service,
+  allergen, provenance, seasonality, art, and culinary-review state before
+  activation.
+- Dietary/allergen claims MUST derive from the exact ingredient versions.
+- The normative catalog tiers and validation invariants are defined in
+  [`SUSHI_CONTENT_CATALOG.md`](SUSHI_CONTENT_CATALOG.md).
+
 ## 7. Content requirements
 
 - One shop room, one counter keeper, three guests.
-- Three MVP dishes and the ingredients necessary to teach them.
+- Three required first-service dishes, salmon sashimi as an immediate fourth
+  MVP unlock, and the ingredients necessary to teach them.
+- A data model capable of versioned fish, cut, roe, roll-form, and sashimi
+  expansion without automatic substitution.
 - Three customer story beats and one persistent consequence each.
 - Three restoration choices.
 - Plain-English glossary on first use of Japanese culinary terms.
@@ -167,6 +194,9 @@ confidence/reporting rules are normative in
   no production faucet/test mint, and no unresolved critical/high review finding.
 - Deployment gate: exact release commit plus exact Shadownet manifest journey.
 - Claim gate: no financial promise or unverified availability/compatibility.
+- Culinary-schema gate: family grammar, exact species/product/cut identity,
+  finite variants, raw/allergen derivation, seasonality evidence, art truth,
+  and required cultural/culinary signoffs all validate.
 
 Passing source tests does not establish deployment, authenticated wallet smoke,
 mainnet readiness, cultural approval, or physical-device evidence.

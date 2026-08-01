@@ -49,16 +49,26 @@ operation, event, projection, and receipt.
 
 ```text
 AssetRef { chainId, contractAddress, tokenId, standard, decimals, metadataDigest }
-AcceptedAssetRef { semanticAssetKey, assetRef, policyVersion, enabled }
+AcceptedAssetRef { semanticSubjectType, semanticSubjectId, assetRef, policyVersion, enabled }
+SpeciesDefinition { speciesId, scientificName, localizedCommonNames, marketNames, group, culinaryReviewId }
+IngredientDefinition { ingredientId, kind, speciesId?, productKind?, names, glossary, baseAllergens, artKey, culturalReviewId }
+CutStyle { cutStyleId, names, glossary, compatibleProductKinds, presentationClass, culturalReviewId }
+PreparedComponent { componentId, ingredientId, cutStyleId?, treatment, rawNotice, allergens, stationSteps, artKey, reviewId }
+DishFamily { familyId, structuralSlots, forbiddenSlots, namingRules, platingRules, reviewId }
+DishDefinition { dishId, familyId, names, componentSlots, rawProfile, allergenProfile, dietaryTags, presentationRules, artKey, reviewId }
+RecipeVariant { variantId, baseRecipeId, baseVersion, substitutions, resultingDishId, reviewIds, status }
+SeasonalityRule { ruleId, subjectType, subjectId, regionId, calendar, windows, availability, sourceRef, reviewedAt }
+ProvenanceProfile { profileId, semanticSubjectId, claimType, claimValue, evidenceRef, validFrom?, validUntil?, reviewStatus }
+AssetBinding { bindingId, semanticSubjectType, semanticSubjectId, assetRef, use, policyVersion, manifestHash, reviewIds, enabled }
 GuestSession { id, resumeSecretHash, state, createdAt, lastSeenAt, expiresAt, consentVersion }
 Player { id, linkedWallets, tutorialState, createdAt }
 SubjectRef = GuestSubject { guestSessionId } | PlayerSubject { playerId }
 PlayerProgress { subjectType, subjectId, revision, contentVersion, services, mastery, cosmetics }
 ProgressMerge { idempotencyKey, guestId, playerId, guestRevision, playerRevision, resultDigest }
 ServiceSession { id, subject:SubjectRef, originKind, originSubjectCommitment, contentVersion, state, openedAt, closedAt }
-OrderTicket { id, sessionId, recipeId, modifiers, deadline, state }
+OrderTicket { id, sessionId, recipeId, recipeVersion, dishId, modifiers, deadline, state }
 Preparation { orderId, requiredSteps, completedSteps, mistakes, state }
-RecipeVersion { id, version, stations, inputs, output, disposition, policyHash }
+RecipeVersion { id, version, dishId, exactComponents, quantities, stationSequence, output, disposition, unlock, recovery, seasonalityRuleIds, contentHash, policyHash, status }
 CraftIntent { id, account, chainId, recipeVersion, quantity, expectedDeltas, expiry }
 ReceiptIntent { id, subject:SubjectRef, account, serviceCommitment, payloadHash, manifestHash, state, expiresAt, createdAt }
 OperationAttempt { id, intentId, chainId, hash, source, counter, state, replacesAttemptId, replacedByAttemptId, includedLevel, includedBlockHash, orphanedBlockHash, confirmations, submittedAt, includedAt, confirmedAt, finalizedAt, lastObservedAt, errorCode }
@@ -245,7 +255,11 @@ unverifiable readiness; it never silently falls back to mainnet.
 - Domain unit/property tests for transitions, conservation, bounds, decimal
   scaling, idempotency, and replay.
 - Content/schema tests for duplicate IDs, broken recipe graphs, missing review,
-  and unreachable output.
+  unreachable output, family-slot violations, wildcard/ambiguous variants,
+  species/product/cut mismatch, raw-notice gaps, allergen derivation conflicts,
+  seasonality boundaries, unsupported provenance, and semantic/asset lookalikes.
+- Golden content builds prove finite, acyclic, duplicate-free variant expansion
+  and byte-identical content hashes across repeated builds.
 - SmartPy tests for authorization, exactly-once receipt, failure atomicity,
   events, pause scope, manifest drift, and forbidden entrypoints.
 - Golden cross-language tests for identical canonical policy hashes.
