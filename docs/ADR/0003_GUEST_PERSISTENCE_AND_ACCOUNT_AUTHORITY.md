@@ -1,0 +1,226 @@
+# ADR 0003: Guest Persistence and Account Authority
+
+- Status: adopted in Phase 0 for Phase 1
+- Date: 2026-07-31
+- Decision: SS-D-011
+
+## Context
+
+Samurai Sushi begins without a wallet, must preserve every confirmed service
+result, and later lets a player claim guest progress without duplication or
+loss. Browser-only state cannot provide transactional claims, deletion,
+cross-device recovery, or reliable concurrency. A wallet address is a public
+credential, not a private player record or an acceptable implicit profile.
+
+## Decision
+
+PostgreSQL behind the Samurai web server is the sole durable authority for
+guest sessions, services, progress, exports, account links, and future player
+identities. Browser state is an untrusted display cache. Phase 1 does not accept
+offline mutations: if the server cannot confirm a command, the counter enters a
+clear disconnected/read-only state at the last acknowledged checkpoint. It may
+retry the exact command by idempotency key after reconnect, but it never invents
+success or merges an independent local history.
+
+Every mutation includes a client-generated idempotency key, subject, expected
+revision, content version, and canonical payload hash. Keys are unique within
+`(subjectKind, subjectId, idempotencyKey)`. The server looks up that scope before
+checking the current revision: an exact payload-hash retry returns the stored,
+versioned response, while reuse with a different hash fails. A new command then
+commits its result, revision, domain event, outbox row, and repeatable response
+in one transaction.
+
+Command payloads use UTF-8 RFC 8785 JSON Canonicalization Scheme bytes and
+SHA-256 in the domain `samurai-sushi:command:v1`; digests are compared in
+constant time. The durable receipt stores the response schema version and
+canonical response payload, not only its hash. Outbox delivery is at-least-once
+and consumers deduplicate by event ID.
+
+### Guest identity
+
+The server issues a random 256-bit resume secret only in a host-only
+`__Host-samurai_guest` cookie with `Secure`, `HttpOnly`, `SameSite=Lax`, and
+`Path=/`; no `Domain` is allowed. Unsafe methods require exact configured
+`Origin`, JSON content type, and `X-Samurai-Request: 1`; CORS does not admit
+credentialed foreign origins. Persistence-enabled local development uses
+loopback HTTPS rather than weakening production cookie attributes.
+
+The database stores `HMAC-SHA-256(digestKey[keyVersion], secret)` plus the
+separate `keyVersion` and compares digests in constant time. Active and
+verification-only digest keys are explicit; rotation can accept the predecessor
+for at most 60 seconds for in-flight requests, then invalidates it. Guest
+sessions have a 30-day idle and absolute maximum and rotate at least every seven
+active days, on recovery/export-import, or on a security event. Raw cookie
+headers and secrets are redacted before application,
+proxy, trace, error-report, or analytics logging. Guest play remains
+browser-bound: there is no fingerprint, email requirement, analytics identity,
+public profile, or wallet prompt before the first settled service.
+
+Unclaimed guests expire after 30 days of inactivity. Explicit guest deletion
+immediately invalidates resume, export, import, and claim capability and removes
+active guest/session, service, progress, command receipt, event/outbox,
+export/import, merge, and analytics-join records. Encrypted operational backups
+must age out within 30 days and must never restore deleted records as active. A
+non-reversible replay tombstone may exist only for that window and contains no
+subject identifier or payload that can restore the deleted identity.
+
+### Export and recovery
+
+Before wallet link, the close ledger offers an explicit portable encrypted save
+export. The server keeps a private, subject-owned `SaveExportRecord` and
+produces a distinct canonical envelope containing no raw guest/player ID: only
+an export ID, subject revision, unlinkable claim commitment, content refs/hashes,
+a maximum 29-day expiry, and integrity tag. The browser encrypts it with a user
+passphrase using a versioned WebCrypto AEAD/KDF suite; the passphrase never
+reaches the server or telemetry.
+
+Import decrypts locally and submits the canonical envelope to the server. One
+transaction validates integrity, schema/content compatibility, expiry,
+deletion/claim state, idempotency, and server revision. It may create or resume
+a guest, but never link a wallet, overwrite newer progress, or authorize an
+onchain receipt. The implementation must publish exact crypto parameters,
+upgrade behavior, and lost-passphrase copy before export is enabled.
+
+The integrity key version is embedded in the envelope. Verification-only keys
+remain available through the maximum export horizon; retirement rejects later
+imports, and compromise revokes every unimported envelope under that key with a
+clear re-export path. Export/import replay tombstones live for at least the
+maximum 29-day export validity plus one day of clock skew. Claim challenges
+expire in five minutes, so no challenge or idempotency horizon may exceed its
+relevant tombstone.
+
+### Player identity and guest claim
+
+`Player.id` is an opaque server identity. A wallet link is a unique credential
+keyed by full network and account identity, not the player primary key. Multiple
+wallets may link to one player only through an explicit account flow; one wallet
+cannot identify multiple players. Existing players are never auto-merged.
+
+Wallet proof creates or rotates a `PlayerSession` whose independent random
+256-bit secret uses a `__Host-samurai_player` cookie and the same host-only,
+digest-key, origin, comparison, redaction, expiry, and rotation rules as the
+guest session. Ordinary gameplay authenticates with that server session, not a
+repeated wallet signature. Sessions are individually revocable. A second device
+requires a new wallet proof and creates a separately revocable session; logout
+revokes only the selected session unless the player chooses all devices. Player
+sessions have a seven-day idle and 30-day absolute maximum and rotate after
+claim, credential/recovery changes, seven active days, or a security event.
+
+`ClaimGuestProgress` requires the resume secret and a fresh, five-minute,
+single-use canonical signed challenge. Its payload is
+`{domain:"samurai-sushi:guest-claim:v1",schemaVersion,origin,chainId,account,
+guestClaimCommitment,targetPlayerId?,createPlayer,guestRevision,playerRevision?,
+idempotencyKey,claimPayloadHash,contentVersion,nonce,issuedAt,expiresAt}`.
+Account parsing preserves the protocol-canonical Tezos address rather than
+case-normalizing display text; signature verification selects the permitted
+scheme from the decoded account/public-key form and verifies the exact canonical
+bytes. The stored challenge hash is consumed inside the claim transaction.
+
+The transaction locks subject rows in stable `(subjectKind, subjectId)` order,
+then progress and owned rows, preventing conflicting lock order. It locks
+guest/player revisions and all owned rows in one transaction; merges service
+and unlock IDs as idempotent sets;
+requires explicit selection for conflicting single-choice cosmetics; writes
+one `ProgressMerge`; rewrites every private guest-owned row; and tombstones the
+guest claim path. Immutable origin provenance uses a salted, unlinkable
+commitment, after which the salt is destroyed. The durable merge record stores
+that commitment rather than the raw guest ID. The same transaction creates the
+new player session and invalidates the guest resume path; no post-claim request
+depends on the tombstoned guest secret.
+
+A second wallet, stale revision, replayed challenge, changed idempotency
+payload, deleted/expired guest, or injected failure at any rewrite boundary
+leaves both subjects and all ownership unchanged.
+
+### Privacy and deletion
+
+Gameplay analytics never include a wallet address. Any analytics join is
+separately consented and cannot restore a deleted identity. Player deletion
+immediately revokes player sessions and wallet credentials and removes active
+service, progress, command receipt, event/outbox, export/import, merge, and
+analytics-join records. Backups and a non-reversible replay tombstone must age
+out within 30 days.
+
+Optional public-chain receipts are irreversible and remain opaque. The delete
+flow must disclose that boundary. No guest ID, orders, score, dialogue,
+accessibility settings, analytics ID, IP history, or wallet-to-guest link is
+published.
+
+The deletion transaction and retention jobs follow this matrix:
+
+| Store | Delete/anonymize rule | Maximum residual retention |
+| --- | --- | --- |
+| guest/player sessions and wallet credentials | hard delete or revoke, then delete | immediate active DB |
+| progress, services, orders, preparations | hard delete | immediate active DB |
+| command receipts and canonical response payloads | hard delete | immediate active DB |
+| domain events, outbox, and dead letters | hard delete subject rows and payloads | immediate active DB |
+| save exports, imports, and integrity records | hard delete payloads; retain only export-ID replay tombstone | 30 days |
+| progress merges and origin commitments | hard delete | immediate active DB |
+| analytics join | hard delete | immediate active DB |
+| application/proxy/security logs | redact at ingestion; retain only non-identifying category/request ID | 30 days |
+| encrypted backups | exclude from active restore and age out | 30 days, deployment gate |
+| optional public receipt | cannot delete; contains no private service ID | chain lifetime |
+
+The 30-day backup limit is an adopted operational requirement, not verified
+deployment evidence until backup configuration and a restore drill prove it.
+
+## Staged implementation boundary
+
+Only the first stage is required before Phase 1 service-state code merges:
+
+1. **Persistence spine:** guest sessions, guest progress/checkpoint revision,
+   command receipts with stored repeatable response, domain events/outbox/dead
+   letters, deletion/replay tombstones, guest issue/resume/rotate/delete
+   repositories, and one transactional CAS/idempotency executor. Add pure domain
+   contracts for command envelopes, revision conflicts, and disconnected state.
+2. **Portable recovery:** encrypted export/import only after the canonical
+   envelope, WebCrypto profile, integrity-key lifecycle, expiry, and replay
+   horizon above are implemented and reviewed.
+3. **Account claim:** player sessions, wallet credentials, canonical challenge,
+   and atomic guest claim only after stages 1–2. Wallet SDKs, endpoints, and UI
+   remain out until those persistence primitives pass independent review.
+
+## Acceptance and threat tests
+
+- Rebuild a disposable real PostgreSQL database from empty; repeat migration is
+  clean and required foreign-key, uniqueness, check, and revision constraints
+  are exercised.
+- Valid resume works; wrong, expired, and deleted secrets fail. Raw secrets are
+  absent from stored rows and log-shaped repository output.
+- Exact idempotent retry returns the same result; changed payload and stale
+  revision reject without mutation.
+- Concurrent claim tests cover a second wallet, expired/deleted guest, stale
+  guest/player revisions, replayed challenge, failure at every ownership
+  rewrite boundary, repeated merge, import-before-merge, and changed payload.
+  Exactly one claimant may commit.
+- Challenge tests cover wrong guest/target player, create-player drift,
+  wrong origin/chain/account, changed cosmetic selection/payload/content,
+  expiration, replay, account parsing, signature scheme, and concurrent lock
+  ordering.
+- Export tests cover tamper, wrong passphrase, incompatible schema/content,
+  duplicate import, newer server revision, deletion, and lost-passphrase copy.
+- Disconnection tests prove the UI cannot advance beyond the last acknowledged
+  checkpoint and exact retry does not duplicate a step or service result.
+- Claim tests prove the guest secret stops authorizing requests while the new
+  player session authorizes the committed player revision. Reload, logout,
+  credential revocation, stolen/stale session, concurrent cookie rotation, and
+  second-device behavior follow the session rules above.
+- Deletion tests prove sessions, credentials, services, progress, command
+  receipts, event/outbox rows, exports/imports, merges, analytics joins, and
+  claim capability are gone; tombstones contain no reversible subject/payload.
+  Backup-aging and public-receipt disclosures are operational/UI policy gates.
+- Cookie tests cover the exact host-only attributes, unsafe-method Origin/header
+  policy, wrong origin, stale/concurrent cookies, digest-key rotation,
+  constant-time comparison boundary, reverse-proxy/application redaction, and
+  loopback HTTPS behavior.
+- Export boundaries cover import after claim/deletion and exact expiry/tombstone
+  edges; compromised integrity keys reject affected unimported envelopes.
+
+## Consequences and exclusions
+
+This decision authorizes the persistence/domain implementation boundary. It
+does not authorize wallet UI, receipt contracts, analytics collection, public
+deployment, offline mutation/synchronization, automatic player-to-player
+merges, or wiring the current one-order shell to unfinished persistence.
+LocalStorage and IndexedDB are not gameplay authorities. Redis and multi-device
+live synchronization require measured need and a separate decision.
