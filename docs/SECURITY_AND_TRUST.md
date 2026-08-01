@@ -80,6 +80,31 @@ issuer/nonce audit needed for security, with a published duration. Optional
 public summaries require separate opt-in and warn that content addressing does
 not guarantee availability.
 
+### Guest persistence and recovery
+
+ADR 0003 makes PostgreSQL authoritative and forbids offline mutation. Guest
+resume secrets are random 256-bit bearer values in Secure, HttpOnly,
+SameSite=Lax cookies; only keyed digests are stored, and same-origin mutation
+checks are mandatory. Browser storage must not contain resume secrets, wallet
+material, an independent service history, or analytics identity.
+
+Successful wallet proof creates an independent random player-session cookie
+with the same storage and origin protections. Claim atomically creates that
+session and revokes the guest path. Player sessions expire, rotate after
+credential/recovery changes, and can be revoked without changing wallet state.
+Cookie-secret predecessor grace is separate from HMAC verification-key
+retention; compromised digest keys cause bounded mass reauthentication.
+
+Portable saves are server-integrity-protected and encrypted locally with a user
+passphrase under a versioned WebCrypto suite. Import, wallet claim, and deletion
+are server transactions. Active private data is removed immediately on explicit
+deletion; encrypted backups and non-reversible replay tombstones must age out
+within 30 days. Deletion covers sessions, credentials, private services/progress,
+command receipts, event/outbox rows, exports/imports, merges, and analytics
+joins; tombstones contain no reversible subject or payload. Public opaque
+receipts cannot be deleted, and the UI must disclose that boundary before
+submission and deletion confirmation.
+
 Issuer permits are domain-separated, expiring, single-use, and bound to account,
 chain, destination, entrypoint, zero mutez, commitment, content/manifest
 versions, and nonce. Issuer-key rotation/revocation is multisig-controlled,
@@ -107,6 +132,12 @@ exactly-once settlement.
 | compromised admin | least privilege, multisig, timelock, alerts, recovery ceremony |
 | test capability in production | separate artifact plus forbidden-entrypoint CI |
 | wallet-address privacy leak | data minimization, purpose limitation, retention/deletion policy |
+| stolen/replayed guest secret | keyed digest, secure cookie, same-origin checks, expiry and rotation |
+| concurrent or replayed guest claim | single-use scoped challenge, row locks, revision CAS, atomic rollback |
+| lost claim response | stored non-secret result, `REAUTH_REQUIRED`, fresh wallet proof and orphan-session revocation |
+| tampered or disclosed save export | server integrity tag, local authenticated encryption, explicit import validation |
+| reversible deletion tombstone | domain-separated HMAC over high-entropy replay key, versioned key lifecycle |
+| false offline success | server acknowledgement authority and disconnected/read-only UI |
 
 ## 4. Security gates
 

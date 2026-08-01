@@ -60,5 +60,5 @@ readiness.
   presenting wallet or deployment claims.
 - Network truth is request-time server state, never a value baked into a static
   build. Cross-profile production build/start regressions enforce this.
-- The SS-D-011 persistence/account decision remains open and blocks Phase 1
-  persistence work.
+- ADR 0003 resolves SS-D-011; Phase 1 persistence work must implement its
+  server-authoritative, no-offline-mutation boundary before service-state code.

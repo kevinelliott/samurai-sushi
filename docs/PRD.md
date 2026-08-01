@@ -83,8 +83,9 @@ first-session experiment.
 
 - Service feedback MUST separate accuracy, pacing, presentation, and
   hospitality without public scoring or financial value.
-- The close ledger MUST persist locally/server-side independently of wallet
-  state.
+- The close ledger MUST be durably acknowledged by the server independently of
+  wallet state. On disconnection, the UI MUST remain at the last acknowledged
+  checkpoint and MUST NOT imply that an unconfirmed result was saved.
 - MVP progression MUST be non-transferable and MUST NOT be redeemable or priced.
 - The first restoration choice MUST be cosmetic only.
 

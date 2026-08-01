@@ -12,7 +12,7 @@
 | SS-D-008 | Deterministic outcomes; no economic randomness | Adopted foundation | Existing testnet randomness is predictable and not needed to prove play. |
 | SS-D-009 | MVP memento is a non-financial, non-transferable contract ledger record | Adopted foundation | Player submits a one-time issuer-signed permit after `SETTLED`; not FA2 and no public service detail without opt-in. |
 | SS-D-010 | `Samurai Sushi` and `Moonwake Sushi` require cultural/name review | Open gate | Review with named Japanese cultural and culinary reviewers before public branding. |
-| SS-D-011 | Local persistence authority and guest-to-wallet migration | Open Phase 0 gate | Postgres/server is a working architecture assumption only; ADR must decide account model, offline play, privacy, deletion, export, recovery, and migration before Phase 1 implementation. |
+| SS-D-011 | Server persistence authority and atomic guest claim | Adopted Phase 0 | ADR 0003 makes PostgreSQL authoritative, forbids offline mutation, and defines guest identity, encrypted export/import, wallet credentials, transactional claim, retention, and deletion. |
 | SS-D-012 | Monetization | Open | Do not invent token sinks before durable player value and payer are understood. |
 | SS-D-013 | Broad sushi catalog uses a finite authored content graph | Adopted foundation | Supports many fish, roe, cuts, and roll families without wildcard combinations, alias substitution, or semantic-to-token identity leakage. |
 | SS-D-014 | Project commands pin one exact clean shared Tezos runtime revision | Adopted Phase 0 | Candidate identity includes `.tezos-runtime.json`; an unapproved or dirty sibling stops before its profile runner executes. |

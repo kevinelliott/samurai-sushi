@@ -14,10 +14,10 @@ and culinary concept review of title, setting, guests, recipes, signage,
 silhouettes, clothing, and audio direction. Record required changes. Final
 asset/copy/audio review remains a separate release gate.
 
-Phase 0 also decides the Phase 1 persistence/account ADR. Postgres/server
-authority is a working architecture assumption, not adopted product truth,
-until privacy, offline behavior, deletion, and guest-to-wallet migration are
-resolved.
+Phase 0 adopts the Phase 1 persistence/account boundary in ADR 0003: PostgreSQL
+is authoritative, offline mutations are forbidden, and guest identity,
+encrypted export/import, wallet credentials, atomic claim, retention, and
+deletion are explicit implementation contracts.
 
 ## Phase 1 — Evening Service prototype
 

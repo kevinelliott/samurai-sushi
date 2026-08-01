@@ -42,6 +42,7 @@ reskin and does not inherit Dos Esposas assets or token behavior by name.
 - [Source and evidence notes](docs/SOURCE_NOTES.md)
 - [Application stack and network authority ADR](docs/ADR/0001_APPLICATION_STACK_AND_NETWORK_AUTHORITY.md)
 - [Versioned content compiler ADR](docs/ADR/0002_VERSIONED_CONTENT_COMPILER.md)
+- [Guest persistence and account authority ADR](docs/ADR/0003_GUEST_PERSISTENCE_AND_ACCOUNT_AUTHORITY.md)
 
 ## MVP in one line
 

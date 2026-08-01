@@ -120,7 +120,9 @@ clearly previewed milestone.
 - Wrong assembly becomes a staff meal or explicit retry with a corrective cue.
 - Late service changes feedback, not ownership.
 - Pause/reload restores the last durable service boundary.
-- Wallet or network failure cannot erase local service results.
+- Wallet or network failure cannot erase server-acknowledged service results.
+  Pending input stays visibly unconfirmed and may retry only with its original
+  idempotency key after reconnect.
 - No essential timing window is under five seconds.
 - Every action supports pointer, touch, and keyboard.
 

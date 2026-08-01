@@ -1,11 +1,10 @@
 # Technical Specification
 
-## 1. Proposed architecture
+## 1. Architecture
 
-Adopted Phase 0 application spine: TypeScript/pnpm workspace and Next.js web
-shell. The server/Postgres authority model remains proposed, not adopted, until
-the Phase 0 persistence/account ADR resolves offline play, privacy, deletion,
-and guest-to-wallet migration.
+Adopted application spine: TypeScript/pnpm workspace, Next.js web/BFF, and the
+ADR 0003 PostgreSQL persistence authority. Browser state is an untrusted display
+cache and Phase 1 accepts no offline mutation.
 
 ```text
 apps/
@@ -26,19 +25,19 @@ contracts/
   tests/               SmartPy scenarios and fixtures
 ```
 
-The proposed MVP uses one web deployable, one async chain worker when the
-receipt path ships, and Postgres. Phase 1 MAY use device-local durable prototype
-state if the ADR defines export, recovery, and migration; no implementation may
-silently close the authority decision. Add Redis only after measured need.
+The MVP uses one web deployable, PostgreSQL, and one async chain worker when the
+receipt path ships. On server loss, Phase 1 remains at the last acknowledged
+checkpoint in an explicit disconnected/read-only state. Add Redis only after
+measured need.
 
-## 2. Proposed authority boundary
+## 2. Authority boundary
 
-- Game server after ADR adoption: sessions, orders, timing, feedback, tutorial, progress,
-  cosmetics, and content flags.
+- Game server/PostgreSQL: durable sessions, orders, timing, feedback, tutorial,
+  progress, cosmetics, content flags, exports, and account links.
 - Tezos: only deliberately transferable ownership and confirmed service
   receipts.
-- Browser: never custody authority. Its durable gameplay role is decided by the
-  Phase 0 ADR; local storage is not assumed disposable until then.
+- Browser: never custody authority. LocalStorage and IndexedDB are not durable
+  gameplay authorities; unconfirmed UI state cannot advance the service.
 - Worker: RPC finality, indexed ingestion, reorg handling, canonical projection,
   stale-intent expiry, and reconciliation.
 - Indexer: availability projection, never authorization.
@@ -67,11 +66,20 @@ AssetBinding { id, version, semanticSubjectRef, assetRef, use, policyVersion, ma
 ArtAsset { key, digest, nonColorIdentity }
 ContentPack { id, version, contentHash, reviewId, schemaVersion, speciesRefs, ingredientRefs, cutStyleRefs, componentRefs, familyRefs, dishRefs, recipeRefs, variantRefs, seasonalityRuleRefs, contentManifestHash, artAssetMapHash, archivePolicy, reviewerSignoffs }
 ContentBundle { schemaVersion, pack, species, ingredients, cutStyles, components, families, dishes, recipes, variants, seasonalityRules, artAssets:[ArtAsset], reviewReferences }
-GuestSession { id, resumeSecretHash, state, createdAt, lastSeenAt, expiresAt, consentVersion }
-Player { id, linkedWallets, tutorialState, createdAt }
+GuestSession { id, claimCommitment, resumeSecretDigest, digestKeyVersion, previousSecretDigest?, previousDigestKeyVersion?, previousDigestExpiresAt?, state, revision, createdAt, lastSeenAt, expiresAt, consentVersion }
+Player { id, tutorialState, revision, createdAt }
+PlayerSession { id, playerId, issuanceKind:claim|wallet-proof, issuanceId, sessionSecretDigest, digestKeyVersion, previousSecretDigest?, previousDigestKeyVersion?, previousDigestExpiresAt?, state:pending-delivery|active|revoked, createdAt, lastSeenAt, expiresAt, revokedAt? }
+WalletCredential { playerId, chainId, account, state, linkedAt }
 SubjectRef = GuestSubject { guestSessionId } | PlayerSubject { playerId }
 PlayerProgress { subjectType, subjectId, revision, contentVersion, services, mastery, cosmetics }
-ProgressMerge { idempotencyKey, guestId, playerId, guestRevision, playerRevision, resultDigest }
+CommandReceipt { subject:SubjectRef, idempotencyKey, expectedRevision, contentVersion, payloadHash, responseSchemaVersion, responsePayload, resultHash, committedRevision }
+DomainEvent { eventId, subject:SubjectRef, eventType, schemaVersion, payload, committedRevision, createdAt }
+OutboxDelivery { eventId, destination, state, attempts, nextAttemptAt, deliveredAt? }
+SaveExportRecord { exportId, subject:SubjectRef, subjectRevision, contentVersion, payloadHash, integrityKeyVersion, state, expiresAt }
+PortableSaveEnvelope { exportId, subjectRevision, guestClaimCommitment, contentRefs, contentHashes, integrityKeyVersion, expiresAt, integrityTag }
+ClaimChallenge { challengeHash, claimIntentHash, claimId, chainId, account, state, issuedAt, expiresAt, consumedAt? }
+DeletionTombstone { kind, replayKeyDigest, tombstoneKeyVersion, expiresAt }
+ProgressMerge { mergeId, claimId, idempotencyKey, guestOriginCommitment, playerId, guestRevision, playerRevision, payloadHash, resultDigest }
 ServiceSession { id, subject:SubjectRef, originKind, originSubjectCommitment, contentVersion, state, openedAt, closedAt }
 OrderTicket { id, sessionId, recipeRef, dishRef, modifiers, deadline, state }
 Preparation { orderId, requiredSteps, completedSteps, mistakes, state }
@@ -122,18 +130,34 @@ overlapping matching windows with contradictory availability produce
 
 ### Guest identity and merge
 
-The working implementation assumption issues a 256-bit opaque resume secret in
-a Secure, HttpOnly, SameSite cookie and stores only its hash. Guest play is
+The adopted guest boundary issues a 256-bit opaque resume secret in a Secure,
+HttpOnly, SameSite=Lax cookie and stores only its keyed digest. Guest play is
 device/browser-bound; no fingerprinting. Clearing site data loses the resume
-secret, so the close ledger offers an encrypted save export until account link
-is implemented. Inactive unclaimed guest records expire after 30 days; players
-may delete immediately. Any longer retention requires explicit consent.
+secret, so the close ledger offers the ADR 0003 encrypted save export until
+account link. Inactive unclaimed guests expire after 30 days. Explicit deletion
+removes active private data immediately; encrypted backups and a non-reversible
+replay tombstone must age out within 30 days.
+
+Each command carries an idempotency key, subject, expected revision, content
+version, and canonical payload hash. PostgreSQL commits the result, revision,
+event/outbox, and repeatable response atomically. Exact retry returns the prior
+stored response after looking up `(subjectKind, subjectId, idempotencyKey)`
+before revision CAS; changed payload or revision fails without mutation. Server
+loss produces an explicit disconnected/read-only state at the last acknowledged
+checkpoint. Stored response payloads never contain raw bearer secrets.
 
 `ClaimGuestProgress` validates the guest resume secret and a fresh wallet-signed
 challenge, locks guest and player revisions, and merges in one database
 transaction. Service IDs and unlock events are idempotent sets. Conflicting
 single-choice cosmetics require explicit player selection. Success writes a
-`ProgressMerge`, tombstones the guest claim path, and is replay-safe. A guest
+`ProgressMerge`, creates a keyed-digest `PlayerSession`, tombstones the guest
+claim path, and is replay-safe. The new random player-session secret is returned
+only in a Secure, HttpOnly, SameSite=Lax cookie; ordinary gameplay does not
+require repeat wallet signatures. Claim-issued sessions begin
+`pending-delivery`; the first authenticated player request activates them. If
+the claim response is lost, its retry receives `REAUTH_REQUIRED` without reading
+the claim receipt; fresh wallet proof resolves the player through its wallet
+credential, revokes the pending session, and issues a replacement. A guest
 already claimed by another wallet, stale revision, reused challenge, duplicate
 idempotency key with different payload, or partial write fails without mutation.
 Wallet linking never automatically merges two existing player identities.
@@ -143,10 +167,12 @@ or a player. On a successful claim, the same transaction rewrites the guest's
 service sessions and progress to the player subject while preserving immutable
 origin provenance as `originKind = guest` plus a salted, unlinkable
 `originSubjectCommitment`; it then destroys the commitment salt. No raw guest ID
-is retained in public data or exposed as a reversible provenance link. Deleting
-an unclaimed guest deletes its private sessions and progress; after a claim,
-player deletion follows the adopted retention policy while any optional public
-receipt remains irreversible and opaque.
+is retained in public data or exposed as a reversible provenance link. Guest or
+player deletion removes active sessions, wallet credentials, services,
+progress, command receipts, event/outbox rows, exports/imports, merges, and
+analytics joins; non-reversible tombstones and encrypted backups must age out
+within 30 days. Guest expiry runs the same deletion matrix within 24 hours. Any
+optional public receipt remains irreversible and opaque.
 
 Persistence tests cover a claim attempted by a second wallet, an expired or
 deleted guest, stale guest/player revisions, a partial subject rewrite, a
