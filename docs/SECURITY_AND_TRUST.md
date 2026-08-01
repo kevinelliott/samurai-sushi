@@ -92,6 +92,8 @@ Successful wallet proof creates an independent random player-session cookie
 with the same storage and origin protections. Claim atomically creates that
 session and revokes the guest path. Player sessions expire, rotate after
 credential/recovery changes, and can be revoked without changing wallet state.
+Cookie-secret predecessor grace is separate from HMAC verification-key
+retention; compromised digest keys cause bounded mass reauthentication.
 
 Portable saves are server-integrity-protected and encrypted locally with a user
 passphrase under a versioned WebCrypto suite. Import, wallet claim, and deletion
@@ -132,7 +134,9 @@ exactly-once settlement.
 | wallet-address privacy leak | data minimization, purpose limitation, retention/deletion policy |
 | stolen/replayed guest secret | keyed digest, secure cookie, same-origin checks, expiry and rotation |
 | concurrent or replayed guest claim | single-use scoped challenge, row locks, revision CAS, atomic rollback |
+| lost claim response | stored non-secret result, `REAUTH_REQUIRED`, fresh wallet proof and orphan-session revocation |
 | tampered or disclosed save export | server integrity tag, local authenticated encryption, explicit import validation |
+| reversible deletion tombstone | domain-separated HMAC over high-entropy replay key, versioned key lifecycle |
 | false offline success | server acknowledgement authority and disconnected/read-only UI |
 
 ## 4. Security gates

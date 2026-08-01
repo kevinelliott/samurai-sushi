@@ -66,9 +66,9 @@ AssetBinding { id, version, semanticSubjectRef, assetRef, use, policyVersion, ma
 ArtAsset { key, digest, nonColorIdentity }
 ContentPack { id, version, contentHash, reviewId, schemaVersion, speciesRefs, ingredientRefs, cutStyleRefs, componentRefs, familyRefs, dishRefs, recipeRefs, variantRefs, seasonalityRuleRefs, contentManifestHash, artAssetMapHash, archivePolicy, reviewerSignoffs }
 ContentBundle { schemaVersion, pack, species, ingredients, cutStyles, components, families, dishes, recipes, variants, seasonalityRules, artAssets:[ArtAsset], reviewReferences }
-GuestSession { id, resumeSecretDigest, digestKeyVersion, previousSecretDigest?, previousDigestExpiresAt?, state, revision, createdAt, lastSeenAt, expiresAt, consentVersion }
+GuestSession { id, claimCommitment, resumeSecretDigest, digestKeyVersion, previousSecretDigest?, previousDigestKeyVersion?, previousDigestExpiresAt?, state, revision, createdAt, lastSeenAt, expiresAt, consentVersion }
 Player { id, tutorialState, revision, createdAt }
-PlayerSession { id, playerId, sessionSecretDigest, digestKeyVersion, previousSecretDigest?, previousDigestExpiresAt?, state, createdAt, lastSeenAt, expiresAt, revokedAt? }
+PlayerSession { id, playerId, issuanceKind:claim|wallet-proof, issuanceId, sessionSecretDigest, digestKeyVersion, previousSecretDigest?, previousDigestKeyVersion?, previousDigestExpiresAt?, state:pending-delivery|active|revoked, createdAt, lastSeenAt, expiresAt, revokedAt? }
 WalletCredential { playerId, chainId, account, state, linkedAt }
 SubjectRef = GuestSubject { guestSessionId } | PlayerSubject { playerId }
 PlayerProgress { subjectType, subjectId, revision, contentVersion, services, mastery, cosmetics }
@@ -77,9 +77,9 @@ DomainEvent { eventId, subject:SubjectRef, eventType, schemaVersion, payload, co
 OutboxDelivery { eventId, destination, state, attempts, nextAttemptAt, deliveredAt? }
 SaveExportRecord { exportId, subject:SubjectRef, subjectRevision, contentVersion, payloadHash, integrityKeyVersion, state, expiresAt }
 PortableSaveEnvelope { exportId, subjectRevision, guestClaimCommitment, contentRefs, contentHashes, integrityKeyVersion, expiresAt, integrityTag }
-ClaimChallenge { challengeHash, payloadHash, chainId, account, state, issuedAt, expiresAt, consumedAt? }
-DeletionTombstone { kind, replayKeyHash, expiresAt }
-ProgressMerge { idempotencyKey, guestOriginCommitment, playerId, guestRevision, playerRevision, payloadHash, resultDigest }
+ClaimChallenge { challengeHash, claimIntentHash, claimId, chainId, account, state, issuedAt, expiresAt, consumedAt? }
+DeletionTombstone { kind, replayKeyDigest, tombstoneKeyVersion, expiresAt }
+ProgressMerge { mergeId, claimId, idempotencyKey, guestOriginCommitment, playerId, guestRevision, playerRevision, payloadHash, resultDigest }
 ServiceSession { id, subject:SubjectRef, originKind, originSubjectCommitment, contentVersion, state, openedAt, closedAt }
 OrderTicket { id, sessionId, recipeRef, dishRef, modifiers, deadline, state }
 Preparation { orderId, requiredSteps, completedSteps, mistakes, state }
@@ -144,7 +144,7 @@ event/outbox, and repeatable response atomically. Exact retry returns the prior
 stored response after looking up `(subjectKind, subjectId, idempotencyKey)`
 before revision CAS; changed payload or revision fails without mutation. Server
 loss produces an explicit disconnected/read-only state at the last acknowledged
-checkpoint.
+checkpoint. Stored response payloads never contain raw bearer secrets.
 
 `ClaimGuestProgress` validates the guest resume secret and a fresh wallet-signed
 challenge, locks guest and player revisions, and merges in one database
@@ -153,7 +153,11 @@ single-choice cosmetics require explicit player selection. Success writes a
 `ProgressMerge`, creates a keyed-digest `PlayerSession`, tombstones the guest
 claim path, and is replay-safe. The new random player-session secret is returned
 only in a Secure, HttpOnly, SameSite=Lax cookie; ordinary gameplay does not
-require repeat wallet signatures. A guest
+require repeat wallet signatures. Claim-issued sessions begin
+`pending-delivery`; the first authenticated player request activates them. If
+the claim response is lost, its retry receives `REAUTH_REQUIRED` without reading
+the claim receipt; fresh wallet proof resolves the player through its wallet
+credential, revokes the pending session, and issues a replacement. A guest
 already claimed by another wallet, stale revision, reused challenge, duplicate
 idempotency key with different payload, or partial write fails without mutation.
 Wallet linking never automatically merges two existing player identities.
@@ -167,7 +171,8 @@ is retained in public data or exposed as a reversible provenance link. Guest or
 player deletion removes active sessions, wallet credentials, services,
 progress, command receipts, event/outbox rows, exports/imports, merges, and
 analytics joins; non-reversible tombstones and encrypted backups must age out
-within 30 days. Any optional public receipt remains irreversible and opaque.
+within 30 days. Guest expiry runs the same deletion matrix within 24 hours. Any
+optional public receipt remains irreversible and opaque.
 
 Persistence tests cover a claim attempted by a second wallet, an expired or
 deleted guest, stale guest/player revisions, a partial subject rewrite, a

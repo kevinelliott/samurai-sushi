@@ -28,7 +28,15 @@ revision, content version, and canonical payload hash. Keys are unique within
 checking the current revision: an exact payload-hash retry returns the stored,
 versioned response, while reuse with a different hash fails. A new command then
 commits its result, revision, domain event, outbox row, and repeatable response
-in one transaction.
+in one transaction. Ordinary command receipts remain repeatable for 30 days or
+until subject deletion. Raw bearer secrets are deliberately excluded from
+stored responses: after a committed claim whose `Set-Cookie` response is lost,
+the revoked guest cannot read the claim receipt and receives `REAUTH_REQUIRED`.
+A fresh wallet proof discovers the committed player through its wallet
+credential, revokes every `pending-delivery` session from that claim, and issues
+a new one. This bearer-issuance exception is narrower than the ordinary
+repeatable-response contract. Clients reuse a key only to retry the identical
+canonical command; every different logical command or payload gets a new key.
 
 Command payloads use UTF-8 RFC 8785 JSON Canonicalization Scheme bytes and
 SHA-256 in the domain `samurai-sushi:command:v1`; digests are compared in
@@ -45,10 +53,14 @@ The server issues a random 256-bit resume secret only in a host-only
 credentialed foreign origins. Persistence-enabled local development uses
 loopback HTTPS rather than weakening production cookie attributes.
 
-The database stores `HMAC-SHA-256(digestKey[keyVersion], secret)` plus the
-separate `keyVersion` and compares digests in constant time. Active and
-verification-only digest keys are explicit; rotation can accept the predecessor
-for at most 60 seconds for in-flight requests, then invalidates it. Guest
+The database stores `HMAC-SHA-256(digestKey[keyVersion], secret)` plus the key
+version for each current or predecessor digest and compares digests in constant
+time. Cookie-secret rotation accepts the predecessor digest for at most 60
+seconds for in-flight requests. Digest-key rotation is separate: a retired key
+remains verification-only for the maximum 30-day session horizon plus the grace
+window, and successful authentication rotates the cookie secret onto the active
+key. Emergency compromise revokes every session under that key and requires
+fresh guest recovery or wallet proof; it never extends verification. Guest
 sessions have a 30-day idle and absolute maximum and rotate at least every seven
 active days, on recovery/export-import, or on a security event. Raw cookie
 headers and secrets are redacted before application,
@@ -56,7 +68,8 @@ proxy, trace, error-report, or analytics logging. Guest play remains
 browser-bound: there is no fingerprint, email requirement, analytics identity,
 public profile, or wallet prompt before the first settled service.
 
-Unclaimed guests expire after 30 days of inactivity. Explicit guest deletion
+Unclaimed guests expire after 30 days of inactivity; a retention job must run
+the same deletion matrix within 24 hours. Explicit guest deletion
 immediately invalidates resume, export, import, and claim capability and removes
 active guest/session, service, progress, command receipt, event/outbox,
 export/import, merge, and analytics-join records. Encrypted operational backups
@@ -107,14 +120,26 @@ sessions have a seven-day idle and 30-day absolute maximum and rotate after
 claim, credential/recovery changes, seven active days, or a security event.
 
 `ClaimGuestProgress` requires the resume secret and a fresh, five-minute,
-single-use canonical signed challenge. Its payload is
+single-use canonical signed challenge. First construct
+`ClaimIntent {claimId,guestClaimCommitment,targetPlayerId?,createPlayer,
+guestRevision,playerRevision?,idempotencyKey,contentVersion,
+cosmeticSelections}`. `claimId` is a client-generated 128-bit value unique to
+that claim and session issuance. The claim
+commitment is a server-issued random 256-bit value stored on the guest, not its
+ID; `cosmeticSelections` is a canonical map of selection IDs to option IDs. Its
+`claimIntentHash` is SHA-256 over the UTF-8 bytes
+`samurai-sushi:claim-intent:v1\n` followed by its RFC 8785 canonical JSON. The
+signed challenge is
 `{domain:"samurai-sushi:guest-claim:v1",schemaVersion,origin,chainId,account,
-guestClaimCommitment,targetPlayerId?,createPlayer,guestRevision,playerRevision?,
-idempotencyKey,claimPayloadHash,contentVersion,nonce,issuedAt,expiresAt}`.
+claimIntentHash,nonce,issuedAt,expiresAt}`. No hash includes itself.
 Account parsing preserves the protocol-canonical Tezos address rather than
 case-normalizing display text; signature verification selects the permitted
 scheme from the decoded account/public-key form and verifies the exact canonical
 bytes. The stored challenge hash is consumed inside the claim transaction.
+Let `challengeBytes` be the UTF-8 RFC 8785 canonical JSON bytes of that exact
+signed challenge. The database lookup value is
+`SHA-256("samurai-sushi:claim-challenge-hash:v1\n" + challengeBytes)` and the
+wallet signs `challengeBytes`; the golden fixture pins both.
 
 The transaction locks subject rows in stable `(subjectKind, subjectId)` order,
 then progress and owned rows, preventing conflicting lock order. It locks
@@ -125,8 +150,16 @@ one `ProgressMerge`; rewrites every private guest-owned row; and tombstones the
 guest claim path. Immutable origin provenance uses a salted, unlinkable
 commitment, after which the salt is destroyed. The durable merge record stores
 that commitment rather than the raw guest ID. The same transaction creates the
-new player session and invalidates the guest resume path; no post-claim request
-depends on the tombstoned guest secret.
+new player session and immediately tombstones the guest path. No raw player
+secret is stored for replay. A lost response therefore requires the explicit
+fresh-wallet-proof recovery above; no post-claim request depends on the guest
+secret.
+
+Claim-issued sessions store `issuanceKind=claim` and `issuanceId=claimId`, with
+a unique `(playerId, issuanceKind, issuanceId)` constraint. Fresh wallet proof
+binds `recoverClaimId` in its signed payload, locks that exact session key, and
+revokes only the matching pending-delivery session. Concurrent claims or devices
+with different issuance IDs cannot revoke one another.
 
 A second wallet, stale revision, replayed challenge, changed idempotency
 payload, deleted/expired guest, or injected failure at any rewrite boundary
@@ -154,6 +187,7 @@ The deletion transaction and retention jobs follow this matrix:
 | progress, services, orders, preparations | hard delete | immediate active DB |
 | command receipts and canonical response payloads | hard delete | immediate active DB |
 | domain events, outbox, and dead letters | hard delete subject rows and payloads | immediate active DB |
+| claim challenges | hard delete payload | immediate on deletion; otherwise five minutes |
 | save exports, imports, and integrity records | hard delete payloads; retain only export-ID replay tombstone | 30 days |
 | progress merges and origin commitments | hard delete | immediate active DB |
 | analytics join | hard delete | immediate active DB |
@@ -163,6 +197,16 @@ The deletion transaction and retention jobs follow this matrix:
 
 The 30-day backup limit is an adopted operational requirement, not verified
 deployment evidence until backup configuration and a restore drill prove it.
+
+Replay tombstones use
+`HMAC-SHA-256(tombstoneKey[keyVersion],
+"samurai-sushi:deletion-tombstone:v1\n" + kind + ":" + replayKey)` over a
+high-entropy export, import, claim, or idempotency replay key and store the
+separate key version. Keys remain verification-only until all of their
+tombstones expire, then are destroyed. Planned rotation writes new tombstones
+with the active key; compromise fails closed for the affected import/claim
+horizon. Expiry cleanup removes the tombstone and any expired private rows in
+the same scheduled job.
 
 ## Staged implementation boundary
 
@@ -197,6 +241,8 @@ Only the first stage is required before Phase 1 service-state code merges:
   wrong origin/chain/account, changed cosmetic selection/payload/content,
   expiration, replay, account parsing, signature scheme, and concurrent lock
   ordering.
+- Golden fixtures pin the exact ClaimIntent canonical bytes, intent hash,
+  challenge bytes, and accepted/rejected signature cases.
 - Export tests cover tamper, wrong passphrase, incompatible schema/content,
   duplicate import, newer server revision, deletion, and lost-passphrase copy.
 - Disconnection tests prove the UI cannot advance beyond the last acknowledged
@@ -205,6 +251,12 @@ Only the first stage is required before Phase 1 service-state code merges:
   player session authorizes the committed player revision. Reload, logout,
   credential revocation, stolen/stale session, concurrent cookie rotation, and
   second-device behavior follow the session rules above.
+- Lost-response tests inject failure after claim commit and before response
+  headers, prove the guest credential is invalid, retry returns
+  `REAUTH_REQUIRED` without reading the receipt, and fresh wallet proof
+  discovers the committed player and revokes the undelivered session before
+  issuing a usable replacement. Two simultaneous pending claims prove recovery
+  revokes only the signed `recoverClaimId` target.
 - Deletion tests prove sessions, credentials, services, progress, command
   receipts, event/outbox rows, exports/imports, merges, analytics joins, and
   claim capability are gone; tombstones contain no reversible subject/payload.
@@ -213,8 +265,14 @@ Only the first stage is required before Phase 1 service-state code merges:
   policy, wrong origin, stale/concurrent cookies, digest-key rotation,
   constant-time comparison boundary, reverse-proxy/application redaction, and
   loopback HTTPS behavior.
+- Rotation tests distinguish predecessor cookie-secret grace from the 30-day
+  HMAC verification-key horizon, including inactive sessions, overlapping dual
+  rotation, and emergency mass reauthentication.
 - Export boundaries cover import after claim/deletion and exact expiry/tombstone
   edges; compromised integrity keys reject affected unimported envelopes.
+- Expiry tests run the full deletion matrix within 24 hours and verify the
+  domain-separated tombstone digest, key version, rotation, destruction, and
+  horizon boundary without retaining a reversible subject or payload.
 
 ## Consequences and exclusions
 
