@@ -63,7 +63,8 @@ ChainOperation { intentId, chainId, hash, source, status, confirmations, error }
 InventoryProjection { account, assetRef, rawBalance, level, observedAt }
 ReceiptDeploymentManifest { chain, operation, address, roles, issuerKey, code, schema, emptyState, receiptPolicy }
 AssetDeploymentManifest { chain, operation, addresses, roles, code, ledger, supply, metadata, economicPolicy }
-ReceiptPermit { schemaVersion, account, serviceCommitment, contentVersion, nonce, expiry, manifestHash, issuerSignature }
+ReceiptPayload { domain, schemaVersion, chainId, account, destination, entrypoint, mutezAmount, serviceCommitment, contentVersion, nonce, expiry, manifestHash }
+ReceiptPermit { payload, payloadHash, issuerKeyId, issuerPolicyVersion, issuerSignature }
 ServiceReceipt { chainId, contract, owner, serviceCommitment, contentVersion, nonce, payloadHash, operationHash, state }
 ```
 
@@ -109,7 +110,10 @@ Wallet linking never automatically merges two existing player identities.
   mutez amount, canonical payload bytes, manifest hash, intent ID, and expiry at
   final dispatch with no intervening await.
 - `ObserveOperation`: idempotently map RPC/indexer evidence to explicit states.
-- `FinalizeReceipt`: only after the configured confirmation threshold.
+- `ConfirmReceiptProjection`: after the manifest-configured confirmation
+  threshold; marks the normal projection recorded but not final.
+- `FinalizeReceiptProjection`: only after the manifest-configured
+  finality/cemented-block policy; marks the projection terminally finalized.
 
 Transaction and attempt transitions, confirmation/finality policy, replacement,
 drop, and reorg compensation are normative in `DOMAIN_SPEC.md`.
@@ -118,27 +122,40 @@ drop, and reorg compensation are normative in `DOMAIN_SPEC.md`.
 
 The MVP representation is a non-transferable contract ledger record, not FA2.
 The game issuer signs a one-time `ReceiptPermit` after a `SETTLED` service; the
-player submits it from the bound wallet. The public canonical payload uses RFC
-8785 JSON serialization and `SHA-256(UTF-8(canonicalJson))`.
+player submits it from the bound wallet.
 
-Public fields are `schemaVersion`, wallet account, opaque `serviceCommitment`,
-content version, one-time nonce, permit expiry, destination contract, entrypoint,
-attached mutez amount (zero), chain ID, and deployment manifest hash.
+The canonical `ReceiptPayload` fields are `domain =
+SAMURAI_SUSHI_RECEIPT_V1`, schema version, chain ID, wallet account, destination
+contract, entrypoint, attached mutez amount (zero), opaque service commitment,
+content version, one-time nonce, permit expiry, and deployment manifest hash.
+`payloadBytes = Michelson PACK(ReceiptPayload)` and
+`payloadHash = BLAKE2b-256(payloadBytes)`. The issuer signature covers
+`payloadHash`; TypeScript and SmartPy golden fixtures MUST produce identical
+packed bytes and hash. The contract reconstructs the typed payload from call
+parameters, re-packs it, compares the hash, and verifies the signature.
 The commitment is a hash of the private service record plus a server nonce; raw
 guest ID, orders, scores, dialogue, and behavior remain offchain. Optional public
 summary content requires separate opt-in and availability disclosure; a hash is
 not an availability promise.
 
-The issuer signature is domain-separated by `SAMURAI_SUSHI_RECEIPT_V1` and binds
-every public field plus canonical payload hash. The contract verifies the
-configured issuer signature, sender/account binding, expiry, destination,
-entrypoint, zero mutez, manifest hash, and uniqueness of
+The contract verifies an active manifest-pinned issuer key/policy, sender/account
+binding, expiry, destination, entrypoint, zero mutez, manifest hash, and
+uniqueness of
 `(owner, serviceCommitment)` and nonce;
 then stores the minimal record and emits `service_receipt(owner,
 service_commitment, content_version, nonce, payload_hash)`. Issuer key rotation,
-pause, and revocation are manifest-bound privileged actions. Exactly-once means
+pause, and revocation are manifest-bound privileged actions. Permit lifetime is
+at most 15 minutes. Routine rotation stops issuance from the old key but retains
+verification for 15 minutes; emergency revocation invalidates outstanding old-
+key permits immediately. Exactly-once means
 one accepted record for the uniqueness key under duplicate wallet/API/indexer
 events.
+
+Negative contract/golden tests mutate each payload field, payload hash, issuer
+key ID/policy, and signature independently and require signature/policy failure
+with zero accepted record. The local `intentId` remains part of the final
+dispatch tuple and durable correlation, but is not a public service identifier
+or a signed receipt field.
 
 ## 6. Contract boundaries
 

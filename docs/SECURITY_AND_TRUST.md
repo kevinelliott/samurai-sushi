@@ -114,8 +114,12 @@ exactly-once settlement.
 - Wallet: real SDK concurrency tests for account/network/scope/session drift,
   reconnect overlap, multi-tab state, mapping delay, duplicate click, rejection,
   timeout, and stale resume.
-- Manifest: clean-context reconstruction rejects wrong or incomplete chain,
-  operation, address, role, code, ledger, supply, metadata, or policy evidence.
+- Manifest: clean-context reconstruction validates every required field for the
+  selected typed manifest. Receipt manifests reject wrong/incomplete chain,
+  operation, address, admin/issuer/pause role, issuer key/policy, code/schema,
+  entrypoint, initial empty state, or receipt policy. Future FA2 manifests
+  separately reject wrong/incomplete ledger, supply, metadata, or economic
+  policy evidence.
 - Interop: every accepted row has positive and lookalike/malicious/replay/
   partial-failure negative fixtures; drift disables mutation.
 - Media/web: hostile corpus for active formats, polyglots, decompression bombs,

@@ -59,8 +59,13 @@ abandoned session; do not silently exclude failures. Targets:
 - median time to first successful serve <3 minutes;
 - at least 15/24 begin a second shift within 24 hours;
 - at least 18/24 explain the core loop correctly;
-- in the wallet-path subsample, at least 70% pass the onchain comprehension
-  rubric and zero claim promised test-asset value.
+- all 24 participants receive the same post-`SETTLED` ownership review and count
+  in the comprehension denominator, including abandonment or refusal; at least
+  17/24 (the ceiling of 70%) pass the onchain comprehension rubric and 24/24
+  state that test assets have no promised value. A preregistered, balanced 12
+  participants may continue to actual test-wallet signature for transaction
+  lifecycle research, but signature participation does not change the 24-person
+  comprehension denominator.
 
 Small samples are directional. Publish raw counts and confidence intervals where
 appropriate; do not present them as market validation.
