@@ -300,6 +300,10 @@ describe("compileContentPack", () => {
     bundle.pack = rehash({ ...bundle.pack, seasonalityRuleRefs: [ref(rule)] });
     syncPack(bundle);
     expectIssue(bundle, "SEASONALITY_UNRESOLVED", "SEASONALITY_UNRESOLVED");
+    expect(() => {
+      // @ts-expect-error Historical compilation is private to recipeSnapshot.
+      compileContentPack(bundle, { mode: "historical" });
+    }).toThrow(ContentValidationError);
     expect(() => recipeSnapshot(bundle, bundle.recipes[0]!)).not.toThrow();
   });
 

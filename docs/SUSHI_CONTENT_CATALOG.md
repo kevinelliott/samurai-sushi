@@ -196,12 +196,14 @@ AssetBinding {
   use: recognition|escrow|consumption, policyVersion, manifestHash,
   enabledFrom?, disabledAt?, reviewIds, enabled
 }
+ArtAsset { key, digest, nonColorIdentity }
 ContentPack {
   id, version, contentHash, reviewId, schemaVersion, speciesRefs,
   ingredientRefs, cutStyleRefs, componentRefs, familyRefs, dishRefs,
   recipeRefs, variantRefs, seasonalityRuleRefs, contentManifestHash,
   artAssetMapHash, archivePolicy, reviewerSignoffs
 }
+ContentBundle { schemaVersion, pack, versioned definition arrays, artAssets:[ArtAsset], reviewReferences }
 ```
 
 Commercial/display names are labels, not identity. Species, culinary product,

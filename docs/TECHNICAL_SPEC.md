@@ -64,7 +64,9 @@ SeasonWindow { startLocalDateInclusive, endLocalDateExclusive, availability }
 SeasonalityRule { id, version, contentHash, reviewId, subjectRef:{kind,id,version}, regionId, ianaTimeZone, calendar, tzdbVersion, windows:[SeasonWindow], sourceRef, reviewedAt }
 ProvenanceProfile { id, version, contentHash, semanticSubjectRef, claimType, claimValue, evidenceRef, validFrom?, validUntil?, reviewStatus }
 AssetBinding { id, version, semanticSubjectRef, assetRef, use, policyVersion, manifestHash, reviewIds, enabled }
+ArtAsset { key, digest, nonColorIdentity }
 ContentPack { id, version, contentHash, reviewId, schemaVersion, speciesRefs, ingredientRefs, cutStyleRefs, componentRefs, familyRefs, dishRefs, recipeRefs, variantRefs, seasonalityRuleRefs, contentManifestHash, artAssetMapHash, archivePolicy, reviewerSignoffs }
+ContentBundle { schemaVersion, pack, versioned definition arrays, artAssets:[ArtAsset], reviewReferences }
 GuestSession { id, resumeSecretHash, state, createdAt, lastSeenAt, expiresAt, consentVersion }
 Player { id, linkedWallets, tutorialState, createdAt }
 SubjectRef = GuestSubject { guestSessionId } | PlayerSubject { playerId }
