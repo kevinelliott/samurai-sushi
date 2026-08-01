@@ -1,9 +1,14 @@
-import { readFile } from "node:fs/promises";
+import { execFile } from "node:child_process";
+import { mkdtemp, mkdir, readFile, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { resolve } from "node:path";
+import { promisify } from "node:util";
 import { describe, expect, it, vi } from "vitest";
-import { runProfiledCommand } from "./command-runner";
+import { materializeApprovedRuntime, runProfiledCommand } from "./command-runner";
+import type { RuntimePin } from "@samurai-sushi/network";
 
 const projectRoot = resolve(import.meta.dirname, "..");
+const execFileAsync = promisify(execFile);
 const localnetEnvironment = {
   TEZOS_NETWORK: "localnet",
   TEZOS_RPC_URL: "http://127.0.0.1:8732",
@@ -39,5 +44,41 @@ describe("project command contract", () => {
     expect(packageJson.scripts["test:integration"]).toContain("localnet test:integration");
     expect(packageJson.scripts["test:shadownet"]).toContain("shadownet test:integration");
     expect(Object.keys(packageJson.scripts).some((name) => name.includes("mainnet"))).toBe(false);
+  });
+
+  it("executes an archived commit tree that cannot drift with the sibling checkout", async () => {
+    const root = await mkdtemp(resolve(tmpdir(), "samurai-runtime-fixture-"));
+    const runtimeRoot = resolve(root, "runtime");
+    await mkdir(resolve(runtimeRoot, "scripts"), { recursive: true });
+    await execFileAsync("git", ["init", runtimeRoot]);
+    await writeFile(resolve(runtimeRoot, "scripts/profile.mjs"), "export const identity = 'approved';\n");
+    await execFileAsync("git", ["-C", runtimeRoot, "add", "."]);
+    await execFileAsync("git", [
+      "-C",
+      runtimeRoot,
+      "-c",
+      "user.name=Runtime Test",
+      "-c",
+      "user.email=runtime@example.invalid",
+      "commit",
+      "-m",
+      "fixture",
+    ]);
+    const { stdout } = await execFileAsync("git", ["-C", runtimeRoot, "rev-parse", "HEAD"]);
+    const pin: RuntimePin = {
+      schemaVersion: 1,
+      repository: "../runtime",
+      revision: stdout.trim(),
+      profileEntrypoint: "scripts/profile.mjs",
+    };
+    const execution = await materializeApprovedRuntime(runtimeRoot, pin);
+    try {
+      await writeFile(resolve(runtimeRoot, "scripts/profile.mjs"), "export const identity = 'drifted';\n");
+      await expect(readFile(resolve(execution.root, pin.profileEntrypoint), "utf8")).resolves.toContain(
+        "approved",
+      );
+    } finally {
+      await execution.cleanup();
+    }
   });
 });

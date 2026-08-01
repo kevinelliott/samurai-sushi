@@ -20,13 +20,14 @@
     "test:shadownet": "tsx scripts/run-network-command.ts shadownet test:integration",
     "test": "pnpm -r --if-present test",
     "test:unit": "vitest run",
+    "test:profile-artifact": "node scripts/profile-artifact-regression.mjs",
     "test:e2e": "playwright test",
     "dev:e2e": "tsx scripts/run-e2e-server.ts",
     "test:integration": "tsx scripts/run-network-command.ts localnet test:integration",
     "test:integration:raw": "tsx scripts/run-profiled-command.ts test:integration",
     "typecheck": "pnpm -r --if-present typecheck",
     "lint": "eslint apps packages scripts --max-warnings=0",
-    "validate": "pnpm lint && pnpm typecheck && pnpm test:unit"
+    "validate": "pnpm lint && pnpm typecheck && pnpm test:unit && pnpm test:profile-artifact"
   },
   "devDependencies": {
     "@samurai-sushi/network": "workspace:*",

@@ -17,7 +17,8 @@ authorities, each narrower than the previous one:
 
 1. `.tezos-runtime.json` pins one exact shared-runtime commit and profile
    entrypoint. The project verifies the sibling checkout is at that commit and
-   clean before executing its code.
+   clean, then materializes and executes that exact commit tree from a private
+   temporary directory. Later sibling checkout changes cannot alter the child.
 2. The shared runtime injects the selected Localnet or Shadownet profile and
    verifies the live RPC chain identity.
 3. `@samurai-sushi/network` revalidates exact server/browser parity, chain, RPC,
@@ -55,5 +56,7 @@ readiness.
   profile and runtime revision.
 - The shell can show exact network, chain, and runtime evidence without
   presenting wallet or deployment claims.
+- Network truth is request-time server state, never a value baked into a static
+  build. Cross-profile production build/start regressions enforce this.
 - The SS-D-011 persistence/account decision remains open and blocks Phase 1
   persistence work.
