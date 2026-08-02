@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import {
   COOKIE_RESET_PATH,
   GUEST_ISSUE_PATH,
@@ -19,6 +19,14 @@ import {
 } from "./service-browser";
 
 type TransportPhase = "loading" | "ready" | "sending" | "outcome-unknown" | "requerying" | "unavailable" | "authority";
+type FocusTarget = "preserve" | "task" | "choice" | "feedback";
+interface PendingFocusIntent {
+  readonly target: Exclude<FocusTarget, "preserve">;
+  readonly requestGeneration: number;
+  readonly identity: ServiceView["identity"];
+  readonly serviceGeneration: number;
+  readonly revision: number;
+}
 
 function PixelAsset({ asset, className = "", scale = 2 }: Readonly<{ asset: ViewAsset; className?: string; scale?: number }>) {
   return (
@@ -53,6 +61,7 @@ export function CounterShell() {
   const [ceremonyRow, setCeremonyRow] = useState<ViewLedgerRow | null>(null);
   const [showLedger, setShowLedger] = useState(false);
   const [miseOpen, setMiseOpen] = useState(true);
+  const [pendingFocus, setPendingFocus] = useState<PendingFocusIntent | null>(null);
   const generation = useRef(0);
   const viewRef = useRef<ServiceView | null>(null);
   const envelopeRef = useRef<IntentEnvelope | null>(null);
@@ -63,7 +72,13 @@ export function CounterShell() {
   const cancelAbandonRef = useRef<HTMLButtonElement>(null);
   const abandonDialogRef = useRef<HTMLDialogElement>(null);
 
-  const publishView = useCallback((next: ServiceView, envelope: IntentEnvelope | null, note?: string, focus: "preserve" | "task" | "choice" | "feedback" = "preserve") => {
+  const beginRequest = useCallback(() => {
+    const token = ++generation.current;
+    setPendingFocus(null);
+    return token;
+  }, []);
+
+  const publishView = useCallback((next: ServiceView, envelope: IntentEnvelope | null, note?: string, focus: FocusTarget = "preserve", requestGeneration = generation.current) => {
     const current = viewRef.current;
     if (current && next.revision < current.revision) return;
     viewRef.current = next;
@@ -75,12 +90,26 @@ export function CounterShell() {
     } else {
       setAnnouncement(note ?? next.correctiveCue?.text ?? `Saved service revision ${next.revision}.`);
     }
-    if (focus !== "preserve") window.requestAnimationFrame(() => {
-      if (focus === "choice") choicesRef.current?.querySelector<HTMLInputElement>("input:not(:disabled)")?.focus();
-      else if (focus === "feedback") feedbackRef.current?.focus();
-      else taskRef.current?.focus();
+    if (focus !== "preserve") setPendingFocus({
+      target: focus,
+      requestGeneration,
+      identity: next.identity,
+      serviceGeneration: next.generation,
+      revision: next.revision,
     });
   }, []);
+
+  useLayoutEffect(() => {
+    if (!pendingFocus) return;
+    const matchesCommittedView = view && pendingFocus.requestGeneration === generation.current
+      && pendingFocus.identity === view.identity && pendingFocus.serviceGeneration === view.generation
+      && pendingFocus.revision === view.revision;
+    const target = matchesCommittedView ? (pendingFocus.target === "choice"
+      ? choicesRef.current?.querySelector<HTMLInputElement>("input:not(:disabled)") ?? null
+      : pendingFocus.target === "feedback" ? feedbackRef.current : taskRef.current) : null;
+    if (target) target.focus();
+    setPendingFocus(null);
+  }, [pendingFocus, view]);
 
   const clearEnvelope = useCallback(() => {
     envelopeRef.current = null;
@@ -88,7 +117,7 @@ export function CounterShell() {
   }, []);
 
   const reconcile: (envelope: IntentEnvelope, refreshAttempted?: boolean) => Promise<void> = useCallback(async (envelope: IntentEnvelope, refreshAttempted = false) => {
-    const token = ++generation.current;
+    const token = beginRequest();
     setPhase("requerying");
     const timeout = requestTimeout();
     try {
@@ -153,10 +182,10 @@ export function CounterShell() {
     } finally {
       timeout.clear();
     }
-  }, [clearEnvelope, publishView]);
+  }, [beginRequest, clearEnvelope, publishView]);
 
-  const query: (refreshAttempted?: boolean) => Promise<void> = useCallback(async (refreshAttempted = false) => {
-    const token = ++generation.current;
+  const query: (refreshAttempted?: boolean, focus?: FocusTarget) => Promise<void> = useCallback(async (refreshAttempted = false, focus = "preserve") => {
+    const token = beginRequest();
     setPhase(viewRef.current ? "requerying" : "loading");
     const timeout = requestTimeout();
     try {
@@ -169,14 +198,14 @@ export function CounterShell() {
         if (refreshed && !refreshAttempted) {
           setPhase("requerying");
           setAnnouncement("Service access was refreshed for this guest. Requerying the saved service.");
-          void query(true);
+          void query(true, focus);
         } else {
           setPhase(authority ? "authority" : "unavailable");
           setAnnouncement(authority ? "Service access needs recovery." : "The service is temporarily unavailable.");
         }
         return;
       }
-      publishView(decodeServiceResponse(await response.json()), null);
+      publishView(decodeServiceResponse(await response.json()), null, undefined, focus, token);
     } catch {
       if (token === generation.current) {
         setPhase("unavailable");
@@ -185,9 +214,11 @@ export function CounterShell() {
     } finally {
       timeout.clear();
     }
-  }, [publishView]);
+  }, [beginRequest, publishView]);
 
   useEffect(() => { void query(); }, [query]);
+
+  useEffect(() => () => { generation.current += 1; }, []);
 
   useEffect(() => {
     const refresh = () => { if (document.visibilityState === "visible" && !envelopeRef.current) void query(); };
@@ -220,7 +251,7 @@ export function CounterShell() {
     envelopeRef.current = envelope;
     setInFlight(envelope);
     setPhase("sending");
-    const token = ++generation.current;
+    const token = beginRequest();
     const timeout = requestTimeout();
     try {
       const response = await postJson(SERVICE_COMMAND_PATH, envelope.canonicalBody, timeout.signal);
@@ -252,9 +283,9 @@ export function CounterShell() {
       if (newLedgerRow) {
         setCeremonyRow(newLedgerRow);
         setAnnouncement(newLedgerRow.serveFeedback.text);
-        publishView(next, envelope, newLedgerRow.serveFeedback.text, "feedback");
+        publishView(next, envelope, newLedgerRow.serveFeedback.text, "feedback", token);
       } else {
-        publishView(next, envelope, undefined, next.phase === "SETTLED" || next.phase === "ABANDONED" ? "task" : "choice");
+        publishView(next, envelope, undefined, next.phase === "SETTLED" || next.phase === "ABANDONED" ? "task" : "choice", token);
       }
     } catch {
       if (token === generation.current && envelopeRef.current === envelope) {
@@ -265,11 +296,11 @@ export function CounterShell() {
     } finally {
       timeout.clear();
     }
-  }, [clearEnvelope, publishView, reconcile]);
+  }, [beginRequest, clearEnvelope, publishView, reconcile]);
 
   const recoverAuthority = useCallback(async () => {
     if (envelopeRef.current) return;
-    const token = ++generation.current;
+    const token = beginRequest();
     setPhase("loading");
     setAnnouncement("Resetting service access without exposing credentials.");
     try {
@@ -279,15 +310,14 @@ export function CounterShell() {
       if (!issue.ok || token !== generation.current) throw new Error("issue");
       const issued = await issue.json() as unknown;
       if (!issued || typeof issued !== "object" || Array.isArray(issued) || JSON.stringify(issued) !== '{"issued":true}') throw new Error("issue");
-      await query();
-      window.requestAnimationFrame(() => taskRef.current?.focus());
+      await query(false, "task");
     } catch {
       if (token === generation.current) {
         setPhase("unavailable");
         setAnnouncement("Service recovery is temporarily unavailable.");
       }
     }
-  }, [query]);
+  }, [beginRequest, query]);
 
   const activeOrder = view?.orders.find((order) => order.active) ?? null;
   const selected = view?.choices.find((choice) => choice.id === selectedChoice) ?? null;

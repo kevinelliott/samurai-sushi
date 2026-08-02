@@ -172,6 +172,15 @@ async function interdictPersistence(page: Page): Promise<void> {
   });
 }
 
+async function forceAnimationFrameBeforeReactCommit(page: Page): Promise<void> {
+  await page.addInitScript(() => {
+    Object.defineProperty(window, "requestAnimationFrame", {
+      configurable: true,
+      value: (callback: FrameRequestCallback) => { callback(performance.now()); return 1; },
+    });
+  });
+}
+
 async function performProjectedChoice(page: Page, command: PublicCommand): Promise<void> {
   const checked = page.getByRole("radio", { checked: true });
   const all = page.getByRole("radio");
@@ -358,6 +367,7 @@ test("explicit authority recovery preserves a prior view and guest-to-player con
   const diagnostics: string[] = [];
   page.on("console", (message) => diagnostics.push(message.text()));
   page.on("pageerror", (error) => diagnostics.push(error.message));
+  await forceAnimationFrameBeforeReactCommit(page);
   await fixture.install(page);
   await page.goto("/");
   await expect(page.getByRole("heading", { name: "Start the first shift." })).toBeVisible();
@@ -372,6 +382,7 @@ test("explicit authority recovery preserves a prior view and guest-to-player con
   await expect(page.getByRole("heading", { name: "Start the first shift." })).toBeVisible();
   await page.getByRole("button", { name: "Recover service access" }).click();
   await expect(page.locator("header").getByText("Guest play · no wallet", { exact: true })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Start the first shift." })).toBeFocused();
   expect(diagnostics.join("\n")).not.toMatch(/hostile-authority-marker|cookie|subject|checkpoint|signature|proof|database|digest|hmac/iu);
 });
 
@@ -379,6 +390,7 @@ test("cold missing authority exposes only explicit privacy-safe recovery", async
   test.skip(testInfo.project.name !== "desktop", "cold authority recovery is covered once");
   const fixture = serviceFixture();
   fixture.setAuthorityRejected(true);
+  await forceAnimationFrameBeforeReactCommit(page);
   await fixture.install(page);
   await page.goto("/");
   await expect(page.getByRole("heading", { name: "Service access needs recovery." })).toBeVisible();
