@@ -115,6 +115,9 @@ describe("Phase 2C receipt review wallet authority", () => {
   it("keeps permission-only runtime unverified and creates no receipt or credential", async () => {
     const access = await review.syncRuntime(credential, { idempotencyKey: "phase2c-runtime-0001", runtimeGeneration: 1, sessionRevision: 0, runtime });
     expect(access).toMatchObject({ state: "ACCOUNT_PROOF_UNAVAILABLE", credentialMatch: false, reason: "ACCOUNT_PROOF_UNAVAILABLE" });
+    await expect(review.restoreReviewState(credential)).resolves.toMatchObject({ projection: null,
+      accessPresentation: { ref: "wallet.access.account-proof-unavailable", recoveryAction: null },
+      walletAccess: { walletLinkRef: access.walletLinkRef, state: "ACCOUNT_PROOF_UNAVAILABLE" } });
     await expect(review.prepareReview(credential, { idempotencyKey: "phase2c-prepare-0001", walletLinkRef: access.walletLinkRef,
       runtimeGeneration: access.runtimeGeneration, sessionRevision: access.sessionRevision })).rejects.toMatchObject({ code: "WALLET_LINK_REQUIRED" });
     const issued = await review.issueChallenge(credential, { idempotencyKey: "phase2c-disconnect-challenge",
@@ -378,6 +381,7 @@ describe("Phase 2C receipt review wallet authority", () => {
     const projection = await review.prepareReview(credential, input);
     expect(await review.restoreLatestReview(credential)).toEqual(projection);
     await expect(review.restoreReviewState(credential)).resolves.toMatchObject({ projection,
+      accessPresentation: { ref: "wallet.access.disconnected", recoveryAction: { ref: "wallet.access.reconnect" } },
       walletAccess: { walletLinkRef: access.walletLinkRef, state: "ACTIVE_CREDENTIAL_MATCH", credentialMatch: true } });
     expect(projection.reviewFacts).toMatchObject({ owner: ACCOUNT, source: ACCOUNT,
       network: { deploymentManifestHash: RECEIPT_AUTHORITY_MANIFEST_HASH }, entrypoint: "submit_receipt", attachedMutez: "0" });
@@ -410,6 +414,8 @@ describe("Phase 2C receipt review wallet authority", () => {
       VALUES ($1,$2,'NetXtJqPyJGB6Pc',$3,$4,'tz1',$5,$6)`, [CREDENTIAL, PLAYER, ACCOUNT, PUBLIC_KEY, CLAIM, now]);
     const access = await review.syncRuntime(credential, { idempotencyKey: "phase2c-revoke-runtime-1",
       runtimeGeneration: 7, sessionRevision: 9, runtime });
+    await review.prepareReview(credential, { idempotencyKey: "phase2c-revoke-prepare-1", walletLinkRef: access.walletLinkRef,
+      runtimeGeneration: access.runtimeGeneration, sessionRevision: access.sessionRevision });
     const blocker = await raw.connect();
     await blocker.query("BEGIN");
     await blocker.query("SELECT credential_id FROM samurai_persistence.wallet_credentials WHERE credential_id=$1 FOR UPDATE", [CREDENTIAL]);
@@ -426,7 +432,8 @@ describe("Phase 2C receipt review wallet authority", () => {
     await expect(review.revokeCredential(credential, revokeInput)).resolves.toMatchObject({ state: "REVOKED" });
     await expect(review.revokeCredential(credential, { ...revokeInput, runtimeGeneration: revokeInput.runtimeGeneration + 1 }))
       .rejects.toMatchObject({ code: "IDEMPOTENCY_PAYLOAD_MISMATCH" });
-    await expect(review.restoreReviewState(credential)).resolves.toMatchObject({ walletAccess: null });
+    await expect(review.restoreReviewState(credential)).resolves.toMatchObject({ walletAccess: null,
+      accessPresentation: { ref: "wallet.access.disconnected", recoveryAction: { ref: "wallet.access.reconnect" } } });
 
     const directCredential = "77777777-7777-4777-8777-777777777777";
     const directAccount = "tz1aSkwEot3L2kmUvcoxzjMomb9mvBNuzFK6";

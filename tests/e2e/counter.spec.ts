@@ -44,6 +44,7 @@ interface RouteFixture {
   readonly setMalformedNextQuery: () => void;
   readonly setConflictNextQuery: () => void;
   readonly setIdentity: (identity: "guest" | "player") => void;
+  readonly revokeReviewCredential: () => void;
   readonly holdNextQuery: () => { readonly release: () => void; readonly started: Promise<void> };
   readonly holdNextCommand: () => { readonly release: () => void; readonly started: Promise<void> };
   readonly holdNextReview: (path: string) => { readonly release: () => void; readonly started: Promise<void> };
@@ -70,7 +71,8 @@ function reviewedProjection(): Record<string, unknown> {
   };
 }
 
-function serviceFixture(initial = createInitialEveningServiceCheckpoint(), activeReview = false): RouteFixture {
+function serviceFixture(initial = createInitialEveningServiceCheckpoint(), initialActiveReview = false): RouteFixture {
+  let activeReview = initialActiveReview;
   let checkpoint = initial;
   let dropNextAfterCommit = false;
   let unavailable = false;
@@ -110,7 +112,10 @@ function serviceFixture(initial = createInitialEveningServiceCheckpoint(), activ
       effect: "This optional review can prepare one non-transferable service receipt for the displayed account. It does not change your saved service, unlock anything, or create a financial asset.",
       access: "Connecting asks the wallet for account access on the required network. This phase does not request a signature, estimate a fee, call a contract, or send an operation.",
       actionLabel: "Connect wallet for Localnet rehearsal",
-    }, projection: preparedReview, walletAccess: currentWalletAccess });
+    }, accessPresentation: currentWalletAccess?.state === "ACCOUNT_PROOF_UNAVAILABLE"
+      ? WALLET_REVIEW_COPY["wallet.access.account-proof-unavailable"]
+      : preparedReview ? WALLET_REVIEW_COPY["wallet.access.disconnected"] : WALLET_REVIEW_COPY["wallet.access.required"],
+    projection: preparedReview, walletAccess: currentWalletAccess });
     if (path === "/api/account/wallet/runtime/sync") {
       const request = JSON.parse(route.request().postData() ?? "{}") as { runtimeGeneration?: number; runtime?: { providerId?: string; chainId?: string; account?: string } };
       if (identity === "guest") return json(route, 200, { schemaVersion: 1, accessScope: "DISPLAY_ONLY", state: "ACCOUNT_PROOF_UNAVAILABLE",
@@ -213,6 +218,7 @@ function serviceFixture(initial = createInitialEveningServiceCheckpoint(), activ
     setMalformedNextQuery: () => { malformedNextQuery = true; },
     setConflictNextQuery: () => { conflictNextQuery = true; },
     setIdentity: (value) => { identity = value; },
+    revokeReviewCredential: () => { activeReview = false; currentWalletAccess = null; },
     holdNextQuery: () => {
       let release!: () => void;
       let started!: () => void;
@@ -540,6 +546,52 @@ test("@receipt-review settled optional review keeps gameplay primary and renders
   await expect(page.getByRole("heading", { name: "Wallet connected for review" })).toBeFocused();
   await expect(page.getByText("Exact active credential match", { exact: true })).toBeVisible();
   expect(fixture.requests.filter((path) => path === "/api/account/wallet/link/disconnect")).toHaveLength(1);
+});
+
+test("@receipt-review a prepared review honors the null recovery boundary after credential revocation", async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== "desktop", "the prepared revocation recovery boundary is exercised once");
+  const settled = (compiledFirstEveningService.goldenReplay.at(-1) as {
+    readonly response: { readonly checkpoint: EveningServiceCheckpoint } }).response.checkpoint;
+  const fixture = serviceFixture(settled, true); await fixture.install(page); await interdictPersistence(page);
+  await page.addInitScript((runtime) => {
+    const counters = { permission: 0, read: 0, disconnect: 0, sign: 0, send: 0, inject: 0, broadcast: 0, contract: 0, fee: 0, observe: 0 };
+    Object.defineProperty(window, "__walletTripwires", { value: counters });
+    Object.defineProperty(window, "samuraiLocalnetWallet", { value: {
+      requestPermission: async () => { counters.permission += 1; return runtime; },
+      readRuntime: async () => { counters.read += 1; return runtime; },
+      subscribe: () => () => undefined,
+      disconnect: async () => { counters.disconnect += 1; },
+    } });
+  }, EXPECTED_REVIEW_RUNTIME);
+  await page.goto("/");
+  const invoker = page.getByRole("button", { name: "Review optional keepsake" });
+  await invoker.click(); await page.getByRole("button", { name: "Connect wallet for Localnet rehearsal" }).click();
+  await expect(page.getByRole("heading", { name: "Wallet connected for review" })).toBeFocused();
+  await expect(page.getByText("Nothing has been sent.", { exact: false })).toBeVisible();
+  await expect(page.getByText("0 mutez attached", { exact: true })).toBeVisible();
+  expect((await reviewTripwires(page)).permission).toBe(1);
+  await page.getByRole("button", { name: "Close review" }).first().click();
+  fixture.revokeReviewCredential();
+
+  await page.reload(); await invoker.click();
+  await expect(page.getByText("Wallet disconnected. The receipt details remain read-only.", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Reconnect matching wallet" }).click();
+  await expect(page.getByRole("heading", { name: "Verified account proof unavailable" })).toBeFocused();
+  await expect(page.getByText("Nothing has been sent.", { exact: false })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Receipt account" })).toBeVisible();
+  await expect(page.getByText("0 mutez attached", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: /connect|reconnect/iu })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Close review" }).last()).toBeVisible();
+  expect(fixture.requests.filter((path) => path === "/api/account/receipt/review/prepare")).toHaveLength(1);
+  expect(fixture.requests.filter((path) => path === "/api/account/wallet/link/disconnect")).toEqual([]);
+  expect(await reviewTripwires(page)).toEqual({ permission: 1, read: 0, disconnect: 0, sign: 0, send: 0, inject: 0, broadcast: 0, contract: 0, fee: 0, observe: 0 });
+
+  await page.getByRole("button", { name: "Close review" }).first().click();
+  await expect(invoker).toBeFocused(); await invoker.click();
+  await expect(page.getByRole("heading", { name: "Verified account proof unavailable" })).toBeVisible();
+  await expect(page.getByRole("button", { name: /connect|reconnect/iu })).toHaveCount(0);
+  expect((await reviewTripwires(page)).permission).toBe(1);
+  expect(fixture.requests.filter((path) => path === "/api/account/receipt/review/prepare")).toHaveLength(1);
 });
 
 test("@receipt-review distinct access, drift, preflight, keyboard, announcement, and retirement states stay fail closed", async ({ page }, testInfo) => {

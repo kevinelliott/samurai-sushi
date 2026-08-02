@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { parseBrowserSafeReceiptReviewProjection, RECEIPT_REVIEW_STATE_MEANINGS,
   type BrowserSafeReceiptReviewProjectionV1 } from "@samurai-sushi/receipt-lifecycle";
-import { parseReceiptReviewDoorway, parseReceiptReviewPreflightResult, parseWalletAccessView, parseWalletRuntimeSyncView,
+import { parseReceiptReviewDoorway, parseReceiptReviewPreflightResult, parseWalletAccessView, parseWalletReviewCopy, parseWalletRuntimeSyncView,
   runtimeDriftPresentation, WALLET_REVIEW_COPY, type ReceiptReviewDoorwayView,
   type ReceiptReviewPreflightResult, type WalletAccessView, type WalletRuntimePort, type WalletRuntimeSyncView,
   type WalletReviewCopy } from "@samurai-sushi/wallet-link";
@@ -46,11 +46,13 @@ function plain(value: unknown, keys: readonly string[], message: string): Record
     || actual.some((key) => !descriptors[key]?.enumerable || !("value" in descriptors[key]!))) throw new TypeError(message);
   return value as Record<string, unknown>;
 }
-function restoreBody(value: unknown): Readonly<{ doorway: ReceiptReviewDoorwayView; projection: unknown | null; walletAccess: WalletAccessView | null }> {
-  const row = plain(value, ["doorway", "projection", "schemaVersion", "walletAccess"], "Review restore is unavailable.");
+function restoreBody(value: unknown): Readonly<{ accessPresentation: WalletReviewCopy; doorway: ReceiptReviewDoorwayView;
+  projection: unknown | null; walletAccess: WalletAccessView | null }> {
+  const row = plain(value, ["accessPresentation", "doorway", "projection", "schemaVersion", "walletAccess"], "Review restore is unavailable.");
   if (row.schemaVersion !== 1 || row.projection === undefined || row.walletAccess === undefined) throw new TypeError("Review restore is unavailable.");
   return Object.freeze({ doorway: parseReceiptReviewDoorway(row.doorway), projection: row.projection,
-    walletAccess: row.walletAccess === null ? null : parseWalletAccessView(row.walletAccess) });
+    walletAccess: row.walletAccess === null ? null : parseWalletAccessView(row.walletAccess),
+    accessPresentation: parseWalletReviewCopy(row.accessPresentation) });
 }
 function preparedBody(value: unknown): BrowserSafeReceiptReviewProjectionV1 {
   const row = plain(value, ["projection", "schemaVersion"], "Receipt preparation is unavailable.");
@@ -100,6 +102,7 @@ function ReceiptFacts({ projection, doorway, generationToken, commit }: Readonly
 export function ReceiptReviewDoorway() {
   const [open, setOpen] = useState(false); const [phase, setPhase] = useState<ReviewPhase>("closed");
   const [copy, setCopy] = useState<WalletReviewCopy>(WALLET_REVIEW_COPY["wallet.access.required"]);
+  const [actionCopy, setActionCopy] = useState<WalletReviewCopy>(WALLET_REVIEW_COPY["wallet.access.required"]);
   const [projection, setProjection] = useState<BrowserSafeReceiptReviewProjectionV1 | null>(null);
   const [doorway, setDoorway] = useState<ReceiptReviewDoorwayView | null>(null);
   const [wallet, setWallet] = useState<WalletRuntimeSyncView | null>(null); const [retiredWallet, setRetiredWallet] = useState<WalletAccessView | null>(null);
@@ -116,8 +119,8 @@ export function ReceiptReviewDoorway() {
       && (!expectedWallet || walletRef.current === expectedWallet), []);
   const controller = useCallback(() => { abortRef.current?.abort(); const next = new AbortController(); abortRef.current = next; return next; }, []);
   const focusStatus = useCallback((token: number) => window.requestAnimationFrame(() => { if (active(token)) statusRef.current?.focus(); }), [active]);
-  const commitCopy = useCallback((token: number, next: WalletReviewCopy, focus = false) => {
-    if (!active(token)) return false; setCopy(next); setAnnouncement(next.tone === "blocking" ? "" : `${next.title}. ${next.message}`);
+  const commitCopy = useCallback((token: number, next: WalletReviewCopy, focus = false, nextAction = next) => {
+    if (!active(token)) return false; setCopy(next); setActionCopy(nextAction); setAnnouncement(next.tone === "blocking" ? "" : `${next.title}. ${next.message}`);
     if (focus) focusStatus(token); return true;
   }, [active, focusStatus]);
   const commitClipboard = useCallback((token: number, nextAnnouncement?: string) => {
@@ -134,15 +137,17 @@ export function ReceiptReviewDoorway() {
       if (!active(token)) return; const response = await postJson(RECEIPT_REVIEW_RESTORE_PATH, "{}", controller().signal);
       if (!active(token) || !response.ok) throw new TypeError("restore"); const raw = await response.json();
       if (!active(token)) return; const body = restoreBody(raw); setDoorway(body.doorway); setRetiredWallet(body.walletAccess);
-      if (body.projection === null) { setPhase("access"); commitCopy(token, WALLET_REVIEW_COPY["wallet.access.required"], focusResult); return; }
+      if (body.projection === null) { setPhase("access"); commitCopy(token, body.accessPresentation, focusResult); return; }
       const restored = parseBrowserSafeReceiptReviewProjection(body.projection); if (!active(token)) return;
-      projectionRef.current = restored; setProjection(restored); setPhase("review"); commitCopy(token, WALLET_REVIEW_COPY["receipt.review.restored"], focusResult);
+      const restoredCopy = body.accessPresentation.ref === "wallet.access.account-proof-unavailable"
+        ? body.accessPresentation : WALLET_REVIEW_COPY["receipt.review.restored"];
+      projectionRef.current = restored; setProjection(restored); setPhase("review"); commitCopy(token, restoredCopy, focusResult, body.accessPresentation);
     } catch { if (active(token)) { setPhase("unavailable"); commitCopy(token, WALLET_REVIEW_COPY["wallet.access.unavailable"], true); } }
   }, [active, commitCopy, controller]);
 
   const openReview = useCallback(() => { retireAsync(); const token = generation.current; openRef.current = true; setOpen(true);
     projectionRef.current = null; walletRef.current = null; setProjection(null); setDoorway(null); setWallet(null); setRetiredWallet(null);
-    setRuntimeStale(false); setPreflight(null); setAnnouncement("");
+    setActionCopy(WALLET_REVIEW_COPY["wallet.access.required"]); setRuntimeStale(false); setPreflight(null); setAnnouncement("");
     window.requestAnimationFrame(() => { if (!active(token)) return; dialogRef.current?.showModal(); headingRef.current?.focus(); }); void restore(token);
   }, [active, restore, retireAsync]);
   useEffect(() => () => { openRef.current = false; retireAsync(); }, [retireAsync]);
@@ -208,7 +213,7 @@ export function ReceiptReviewDoorway() {
     retireAsync(); const token = generation.current; projectionRef.current = null; walletRef.current = null;
     setProjection(null); setWallet(null); setRetiredWallet(null); setRuntimeStale(false); setPreflight(null); void restore(token, true);
   }, [restore, retireAsync]);
-  const recoveryRef = copy.recoveryAction?.ref;
+  const recoveryRef = actionCopy.recoveryAction?.ref;
   const recover = recoveryRef?.startsWith("wallet.access") ? connect
     : recoveryRef === "receipt.preflight.retry" ? check
       : recoveryRef === "receipt.review.restore" ? restoreAcknowledged
@@ -226,12 +231,12 @@ export function ReceiptReviewDoorway() {
         <div aria-busy={phase === "loading" || phase === "requesting" || phase === "preflight" ? "true" : undefined}><Status copy={copy} headingRef={statusRef} /></div>
         <div className="sr-only" aria-live="polite" aria-atomic="true">{announcement}</div>
         {!projection ? <section className="access-stage" aria-labelledby="wallet-access-title"><h3 id="wallet-access-title">Wallet account required</h3>{doorway ? <><p>Required network: <strong>{doorway.network.label} · non-production · no real value</strong></p><p>{doorway.access}</p></> : null}
-          {doorway && phase !== "loading" && phase !== "requesting" && copy.recoveryAction ? <div className="review-actions"><button className="primary-action" type="button" onClick={() => void connect()}>{copy.recoveryAction.label}</button><button type="button" className="text-action" onClick={close}>Not now</button></div> : <button type="button" className="text-action" onClick={close}>Not now</button>}
+          {doorway && phase !== "loading" && phase !== "requesting" && recover && actionCopy.recoveryAction ? <div className="review-actions"><button className="primary-action" type="button" onClick={() => void recover()}>{actionCopy.recoveryAction.label}</button><button type="button" className="text-action" onClick={close}>Not now</button></div> : <button type="button" className="text-action" onClick={close}>Not now</button>}
         </section> : <>
           {doorway ? <ReceiptFacts projection={projection} doorway={doorway} generationToken={generation.current} commit={commitClipboard} /> : null}
           <section aria-labelledby="current-wallet"><h3 id="current-wallet">Current wallet</h3>{wallet ? <dl><div className="review-fact"><dt>Provider</dt><dd>{wallet.providerId}</dd></div><CopyFact label="Wallet account" value={wallet.account} compact generationToken={generation.current} commit={commitClipboard} /><CopyFact label="Wallet chain ID" value={wallet.chainId} generationToken={generation.current} commit={commitClipboard} /><div className="review-fact"><dt>Permission</dt><dd>Account access</dd></div><div className="review-fact"><dt>Credential match</dt><dd>{wallet.credentialMatch ? "Exact active credential match" : "Not verified"}</dd></div></dl> : <p>Wallet disconnected. The receipt details remain read-only.</p>}</section>
           <section aria-labelledby="review-readiness"><h3 id="review-readiness">Review readiness</h3><p>{preflight?.status === "REVIEW_READY" ? "Exact current facts match." : preflight?.presentation.message ?? "Not checked."}</p>{preflight?.status === "NOT_READY" && preflight.presentation.reasonRef ? <p><strong>Safe reason:</strong> <span className="selectable-fact">{preflight.presentation.reasonRef}</span></p> : null}</section>
-          <div className="review-actions">{preflight?.status === "NOT_READY" ? <button type="button" className="text-action" onClick={() => void (recover ?? close)()}>{preflight.presentation.recoveryAction?.label ?? "Close review"}</button> : wallet?.credentialMatch && !runtimeStale ? <button type="button" className="primary-action" disabled={phase === "preflight"} onClick={() => void check()}>{phase === "preflight" ? "Checking…" : preflight?.status === "REVIEW_READY" ? "Check again" : "Check review readiness"}</button> : <button type="button" className="text-action" onClick={() => void (recover ?? connect)()}>{copy.recoveryAction?.label ?? "Reconnect matching wallet"}</button>}<button type="button" className="text-action" onClick={close}>Close review</button></div>
+          <div className="review-actions">{preflight?.status === "NOT_READY" && recover && preflight.presentation.recoveryAction ? <button type="button" className="text-action" onClick={() => void recover()}>{preflight.presentation.recoveryAction.label}</button> : wallet?.credentialMatch && !runtimeStale ? <button type="button" className="primary-action" disabled={phase === "preflight"} onClick={() => void check()}>{phase === "preflight" ? "Checking…" : preflight?.status === "REVIEW_READY" ? "Check again" : "Check review readiness"}</button> : recover && actionCopy.recoveryAction ? <button type="button" className="text-action" onClick={() => void recover()}>{actionCopy.recoveryAction.label}</button> : null}<button type="button" className="text-action" onClick={close}>Close review</button></div>
           {wallet?.credentialMatch && !runtimeStale ? <p className="check-helper">Checks only. No signature or operation will be requested.</p> : null}
         </>}
       </div>

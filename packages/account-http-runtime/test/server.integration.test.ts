@@ -554,7 +554,8 @@ describe("built account HTTP boundary", () => {
     expect(restoredBody).toMatchObject({ schemaVersion: 1, doorway: {
       network: { profile: "localnet", chainId: "NetXtJqPyJGB6Pc", label: "Localnet rehearsal" },
       actionLabel: "Connect wallet for Localnet rehearsal",
-    }, projection, walletAccess: { walletLinkRef: runtimeView.walletLinkRef, state: "ACTIVE_CREDENTIAL_MATCH",
+    }, accessPresentation: { ref: "wallet.access.disconnected", recoveryAction: { ref: "wallet.access.reconnect" } },
+    projection, walletAccess: { walletLinkRef: runtimeView.walletLinkRef, state: "ACTIVE_CREDENTIAL_MATCH",
       runtimeGeneration: runtimeView.runtimeGeneration, sessionRevision: runtimeView.sessionRevision } });
 
     const reviewDigest = createHash("sha256").update(canonicalJson(projection)).digest("hex");
@@ -605,6 +606,7 @@ describe("built account HTTP boundary", () => {
       runtimeGeneration: runtimeView.runtimeGeneration + 1, sessionRevision: 1 });
     const restoredReconnect = await requestJson(portOf(server), "/api/account/receipt/review/restore", "{}", playerCookie);
     expect(JSON.parse(restoredReconnect.body)).toMatchObject({ projection,
+      accessPresentation: { ref: "wallet.access.disconnected", recoveryAction: { ref: "wallet.access.reconnect" } },
       walletAccess: { walletLinkRef: reconnectedView.walletLinkRef, state: "ACTIVE_CREDENTIAL_MATCH" } });
     const reconnectDisconnect = await requestJson(portOf(server), "/api/account/wallet/link/disconnect", JSON.stringify({
       idempotencyKey: randomUUID(), walletLinkRef: reconnectedView.walletLinkRef,
@@ -819,6 +821,11 @@ describe("built account HTTP boundary", () => {
     expect(JSON.parse(playerSync.body)).toMatchObject({ state: "ACCOUNT_PROOF_UNAVAILABLE", credentialMatch: false,
       reason: "ACCOUNT_PROOF_UNAVAILABLE", walletLinkRef: expect.stringMatching(/^wl_[A-Za-z0-9_-]{22}$/),
       runtimeGeneration: 2, sessionRevision: 1, presentation: { ref: "wallet.access.account-proof-unavailable" } });
+    const proofUnavailableRestore = await requestJson(portOf(server), "/api/account/receipt/review/restore", "{}", playerCookie);
+    expect(proofUnavailableRestore.status, proofUnavailableRestore.body).toBe(200);
+    expect(JSON.parse(proofUnavailableRestore.body)).toMatchObject({ projection: null,
+      accessPresentation: { ref: "wallet.access.account-proof-unavailable", recoveryAction: null },
+      walletAccess: { state: "ACCOUNT_PROOF_UNAVAILABLE", credentialMatch: false } });
     expect((await admin.query<{ activeCredentials: string; links: string; challenges: string; intents: string }>(`SELECT
       (SELECT count(*)::text FROM samurai_persistence.wallet_credentials
         WHERE player_id=$1 AND chain_id='NetXtJqPyJGB6Pc' AND account=$2 AND state='active') AS "activeCredentials",

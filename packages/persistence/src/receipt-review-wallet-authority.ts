@@ -14,6 +14,7 @@ import {
   type NormalizedWalletRuntime,
   type ReceiptReviewPreflightResult,
   type WalletAccessView,
+  type WalletReviewCopy,
   type WalletRuntimeSyncView,
   type WalletLinkChallengeV1,
 } from "@samurai-sushi/wallet-link";
@@ -507,7 +508,8 @@ export class ReceiptReviewWalletAuthority {
   }
 
   async restoreReviewState(credential: ServiceSubjectCredential): Promise<Readonly<{
-    schemaVersion: 1; doorway: typeof RECEIPT_REVIEW_DOORWAY; projection: BrowserSafeReceiptReviewProjectionV1 | null;
+    schemaVersion: 1; doorway: typeof RECEIPT_REVIEW_DOORWAY; accessPresentation: WalletReviewCopy;
+    projection: BrowserSafeReceiptReviewProjectionV1 | null;
     walletAccess: WalletAccessView | null }>> {
     return this.service.runSettledTransaction(credential, "restore-receipt-review-state", async (context) => {
       const found = await context.client.query<{ readonly public_intent_ref: string }>(`SELECT i.public_intent_ref
@@ -523,7 +525,10 @@ export class ReceiptReviewWalletAuthority {
         ORDER BY changed_at DESC,id DESC LIMIT 1 FOR UPDATE`,
       [context.subjectId, context.playerSessionId, context.playerSessionDeliveryGeneration]);
       const walletAccess = runtime.rows[0] ? await this.#validatedPublicView(context.client, context, runtime.rows[0]) : null;
-      return Object.freeze({ schemaVersion: 1, doorway: RECEIPT_REVIEW_DOORWAY, projection, walletAccess });
+      const accessPresentation = walletAccess?.state === "ACCOUNT_PROOF_UNAVAILABLE"
+        ? WALLET_REVIEW_COPY["wallet.access.account-proof-unavailable"]
+        : projection ? WALLET_REVIEW_COPY["wallet.access.disconnected"] : WALLET_REVIEW_COPY["wallet.access.required"];
+      return Object.freeze({ schemaVersion: 1, doorway: RECEIPT_REVIEW_DOORWAY, accessPresentation, projection, walletAccess });
     });
   }
 
