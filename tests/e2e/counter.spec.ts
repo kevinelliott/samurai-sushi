@@ -405,6 +405,8 @@ test("projection-only first service completes with exact commands and one-shot c
   expect(await page.evaluate(() => (window as unknown as { __walletTripwires: { permission: number } }).__walletTripwires.permission)).toBe(0);
   await page.getByRole("button", { name: "Connect wallet for Localnet rehearsal" }).click();
   await expect(page.getByRole("heading", { name: "Verified account proof unavailable" })).toBeFocused();
+  await expect(page.getByRole("button", { name: /connect|reconnect/iu })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Not now" })).toBeVisible();
   const tripwires = await page.evaluate(() => (window as unknown as { __walletTripwires: Record<string, number> }).__walletTripwires);
   expect(tripwires).toEqual({ permission: 1, read: 0, disconnect: 0, sign: 0, send: 0, inject: 0, broadcast: 0, contract: 0, fee: 0, observe: 0 });
   expect(fixture.requests.filter((path) => path === "/api/account/receipt/review/prepare")).toEqual([]);
@@ -412,6 +414,9 @@ test("projection-only first service completes with exact commands and one-shot c
   expect(new Set(fixture.bodies.map((body) => JSON.parse(body).idempotencyKey)).size).toBe(29);
   const renderedText = await page.locator("body").innerText();
   for (const body of fixture.bodies) expect(renderedText).not.toContain((JSON.parse(body) as PublicCommand).idempotencyKey);
+  await page.getByRole("button", { name: "Not now" }).click();
+  await expect(page.getByRole("button", { name: "Review optional keepsake" })).toBeFocused();
+  expect((await reviewTripwires(page)).permission).toBe(1);
   expect(diagnostics.join("\n")).not.toMatch(/hostile|cookie|subject|checkpoint|signature|proof|database|digest|hmac/iu);
 });
 
@@ -432,6 +437,12 @@ test("@receipt-review a settled player without an active credential receives the
   await page.getByRole("button", { name: "Connect wallet for Localnet rehearsal" }).click();
   await expect(page.getByRole("heading", { name: "Verified account proof unavailable" })).toBeFocused();
   await expect(page.getByText("The wallet reported an account, but this phase cannot request the proof needed to verify it.", { exact: false })).toBeVisible();
+  await expect(page.getByRole("button", { name: /connect|reconnect/iu })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Not now" })).toBeVisible();
+  await page.keyboard.press("Tab");
+  await expect(page.getByRole("button", { name: "Not now" })).toBeFocused();
+  await page.keyboard.press("Enter");
+  await expect(page.getByRole("button", { name: "Review optional keepsake" })).toBeFocused();
   expect(fixture.requests.filter((path) => path === "/api/account/receipt/review/prepare")).toEqual([]);
   expect(await reviewTripwires(page)).toMatchObject({ permission: 1, sign: 0, send: 0, inject: 0, broadcast: 0, contract: 0, fee: 0, observe: 0 });
 });

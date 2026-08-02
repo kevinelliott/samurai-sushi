@@ -24,7 +24,7 @@ CREATE UNIQUE INDEX wallet_credentials_active_chain_account
 CREATE UNIQUE INDEX wallet_credentials_active_player_chain_account
   ON samurai_persistence.wallet_credentials (player_id, chain_id, account) WHERE state = 'active';
 
-CREATE FUNCTION samurai_persistence.reject_wallet_credential_identity_change()
+CREATE FUNCTION samurai_persistence.enforce_wallet_credential_lifecycle()
 RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
   IF NEW.credential_id IS DISTINCT FROM OLD.credential_id
@@ -37,13 +37,32 @@ BEGIN
     OR NEW.linked_at IS DISTINCT FROM OLD.linked_at THEN
     RAISE EXCEPTION 'wallet credential identity is immutable' USING ERRCODE = '23514';
   END IF;
+  IF OLD.state = 'revoked' THEN
+    RAISE EXCEPTION 'revoked wallet credentials are terminal' USING ERRCODE = '23514';
+  END IF;
+  IF NEW.state = 'active' THEN
+    IF NEW.credential_revision IS DISTINCT FROM OLD.credential_revision
+      OR NEW.updated_at IS DISTINCT FROM OLD.updated_at
+      OR NEW.revoked_at IS DISTINCT FROM OLD.revoked_at THEN
+      RAISE EXCEPTION 'active wallet credential lifecycle evidence is immutable' USING ERRCODE = '23514';
+    END IF;
+  ELSIF NEW.state = 'revoked' THEN
+    IF OLD.credential_revision >= 9007199254740991
+      OR NEW.credential_revision IS DISTINCT FROM OLD.credential_revision + 1
+      OR NEW.revoked_at IS NULL
+      OR NEW.updated_at IS DISTINCT FROM NEW.revoked_at
+      OR NEW.updated_at <= OLD.updated_at THEN
+      RAISE EXCEPTION 'wallet credential revocation must be exact and monotonic' USING ERRCODE = '23514';
+    END IF;
+  ELSE
+    RAISE EXCEPTION 'wallet credential lifecycle transition is invalid' USING ERRCODE = '23514';
+  END IF;
   RETURN NEW;
 END $$;
 
-CREATE TRIGGER wallet_credential_identity_immutable
-BEFORE UPDATE OF credential_id, player_id, chain_id, account, public_key, scheme, linked_claim_id, linked_at
-ON samurai_persistence.wallet_credentials
-FOR EACH ROW EXECUTE FUNCTION samurai_persistence.reject_wallet_credential_identity_change();
+CREATE TRIGGER wallet_credential_lifecycle_guard
+BEFORE UPDATE ON samurai_persistence.wallet_credentials
+FOR EACH ROW EXECUTE FUNCTION samurai_persistence.enforce_wallet_credential_lifecycle();
 
 ALTER TABLE samurai_persistence.player_sessions
   ADD UNIQUE (player_id, id, delivery_generation);

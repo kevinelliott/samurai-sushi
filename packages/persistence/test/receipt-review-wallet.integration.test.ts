@@ -196,6 +196,60 @@ describe("Phase 2C receipt review wallet authority", () => {
     [PLAYER, proofAccount])).rows[0]).toEqual({ active: "0", total: "1" });
   });
 
+  it("keeps revoked credentials terminal and requires a distinct credential for a fresh proof", async () => {
+    const { privateKey, publicKey } = generateKeyPairSync("ed25519");
+    const der = publicKey.export({ format: "der", type: "spki" });
+    const proofPublicKey = b58Encode(der.subarray(der.byteLength - 32), PrefixV2.Ed25519PublicKey);
+    const proofAccount = getPkhfromPk(proofPublicKey); const proofRuntime = { ...runtime, account: proofAccount };
+    const signChallenge = (challenge: Parameters<typeof walletLinkSigningBytes>[0]) => ({ challenge,
+      publicKey: proofPublicKey, signature: b58Encode(signMessage(null,
+        blake2b(walletLinkSigningBytes(challenge), { dkLen: 32 }), privateKey), PrefixV2.Ed25519Signature) });
+
+    const firstAccess = await review.syncRuntime(credential, { idempotencyKey: "phase2c-terminal-runtime-1",
+      runtimeGeneration: 40, sessionRevision: 40, runtime: proofRuntime });
+    const firstChallenge = await review.issueChallenge(credential, { idempotencyKey: "phase2c-terminal-challenge-1",
+      walletLinkRef: firstAccess.walletLinkRef, runtimeGeneration: firstAccess.runtimeGeneration,
+      sessionRevision: firstAccess.sessionRevision });
+    const firstLinked = await review.consumeProof(credential, { idempotencyKey: "phase2c-terminal-proof-1",
+      walletLinkRef: firstAccess.walletLinkRef, challengeRef: firstChallenge.challengeRef,
+      proof: signChallenge(firstChallenge.challenge) });
+    const firstCredential = (await raw.query<{ credential_id: string }>(`SELECT credential_id::text FROM
+      samurai_persistence.wallet_link_challenges WHERE public_challenge_ref=$1`, [firstChallenge.challengeRef])).rows[0]!.credential_id;
+    await review.revokeCredential(credential, { idempotencyKey: "phase2c-terminal-revoke-1",
+      walletLinkRef: firstLinked.walletLinkRef, runtimeGeneration: firstLinked.runtimeGeneration,
+      sessionRevision: firstLinked.sessionRevision });
+
+    await expect(raw.query(`UPDATE samurai_persistence.wallet_credentials SET state='active',revoked_at=NULL
+      WHERE credential_id=$1`, [firstCredential])).rejects.toMatchObject({ code: "23514" });
+    await expect(raw.query(`UPDATE samurai_persistence.wallet_credentials SET credential_revision=credential_revision+1,
+      updated_at=updated_at + interval '1 second',revoked_at=revoked_at + interval '1 second'
+      WHERE credential_id=$1`, [firstCredential])).rejects.toMatchObject({ code: "23514" });
+    const afterHostile = (await raw.query<{ state: string; credential_revision: string; revoked_at: Date }>(`SELECT
+      state,credential_revision::text,revoked_at FROM samurai_persistence.wallet_credentials WHERE credential_id=$1`,
+    [firstCredential])).rows[0]!;
+    expect(afterHostile).toMatchObject({ state: "revoked", credential_revision: "2", revoked_at: expect.any(Date) });
+
+    const secondAccess = await review.syncRuntime(credential, { idempotencyKey: "phase2c-terminal-runtime-2",
+      runtimeGeneration: 41, sessionRevision: 43, runtime: proofRuntime });
+    expect(secondAccess).toMatchObject({ state: "ACCOUNT_PROOF_UNAVAILABLE", credentialMatch: false,
+      reason: "ACCOUNT_PROOF_UNAVAILABLE" });
+    const secondChallenge = await review.issueChallenge(credential, { idempotencyKey: "phase2c-terminal-challenge-2",
+      walletLinkRef: secondAccess.walletLinkRef, runtimeGeneration: secondAccess.runtimeGeneration,
+      sessionRevision: secondAccess.sessionRevision });
+    const secondLinked = await review.consumeProof(credential, { idempotencyKey: "phase2c-terminal-proof-2",
+      walletLinkRef: secondAccess.walletLinkRef, challengeRef: secondChallenge.challengeRef,
+      proof: signChallenge(secondChallenge.challenge) });
+    expect(secondLinked).toMatchObject({ state: "ACTIVE_CREDENTIAL_MATCH", credentialMatch: true });
+    const credentials = (await raw.query<{ credential_id: string; state: string; credential_revision: string }>(`SELECT
+      credential_id::text,state,credential_revision::text FROM samurai_persistence.wallet_credentials
+      WHERE player_id=$1 AND chain_id=$2 AND account=$3 ORDER BY linked_at,credential_id`,
+    [PLAYER, proofRuntime.chainId, proofAccount])).rows;
+    expect(credentials).toHaveLength(2);
+    expect(credentials).toContainEqual({ credential_id: firstCredential, state: "revoked", credential_revision: "2" });
+    expect(credentials).toContainEqual({ credential_id: expect.not.stringMatching(new RegExp(`^${firstCredential}$`, "u")),
+      state: "active", credential_revision: "1" });
+  });
+
   it("consumes a deterministic purpose proof once and replays only its exact committed public result", async () => {
     const { privateKey, publicKey } = generateKeyPairSync("ed25519");
     const der = publicKey.export({ format: "der", type: "spki" });
