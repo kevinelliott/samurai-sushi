@@ -674,7 +674,8 @@ test("@receipt-review distinct access, drift, preflight, keyboard, announcement,
   const setMode = (mode: string, runtime?: Record<string, unknown>) => page.evaluate(({ mode: next, runtime: facts }) => {
     const state = (window as unknown as { __walletTest: { mode: string; runtime: unknown } }).__walletTest; state.mode = next; if (facts) state.runtime = facts;
   }, { mode, runtime });
-  const openReview = async () => { await page.getByRole("button", { name: "Review optional keepsake" }).click();
+  const invoker = page.getByRole("button", { name: "Review optional keepsake" });
+  const openReview = async () => { await invoker.click();
     await expect(page.getByRole("heading", { name: "Review optional service keepsake" })).toBeFocused(); };
   await page.goto("/");
   for (const [mode, heading] of [["CANCELLED", "Wallet access cancelled"], ["REJECTED", "Wallet access declined"]] as const) {
@@ -719,17 +720,25 @@ test("@receipt-review distinct access, drift, preflight, keyboard, announcement,
   await page.getByRole("button", { name: "Reconnect matching wallet" }).click();
   await expect(page.getByRole("heading", { name: "Wallet connected for review" })).toBeFocused();
   await page.evaluate(() => { (window as unknown as { __walletTest: { holdDigest: boolean } }).__walletTest.holdDigest = true; });
+  const preflightBeforeDigest = fixture.requests.filter((path) => path === "/api/account/receipt/review/preflight").length;
   await page.getByRole("button", { name: /check review readiness/i }).click();
   await expect.poll(() => page.evaluate(() => (window as unknown as { __walletTest: { digestStarted: number } }).__walletTest.digestStarted)).toBe(1);
-  await page.getByRole("button", { name: "Close review" }).first().click();
+  await expect(page.getByRole("button", { name: "Not now" })).toBeVisible();
+  await expect(page.getByRole("button", { name: /checking|check review readiness|check again/iu })).toHaveCount(0);
+  await page.getByRole("button", { name: "Not now" }).click();
   await page.evaluate(() => { const state = (window as unknown as { __walletTest: { holdDigest: boolean; digestResolver: null | (() => void) } }).__walletTest;
     state.holdDigest = false; state.digestResolver?.(); state.digestResolver = null; });
-  await expect(page.getByRole("dialog")).toHaveCount(0);
+  await expect(page.getByRole("dialog")).toHaveCount(0); await expect(invoker).toBeFocused();
+  expect(fixture.requests.filter((path) => path === "/api/account/receipt/review/preflight")).toHaveLength(preflightBeforeDigest);
   await openReview(); await page.getByRole("button", { name: "Reconnect matching wallet" }).click();
   await expect(page.getByRole("heading", { name: "Wallet connected for review" })).toBeFocused();
   const heldPreflight = fixture.holdNextReview("/api/account/receipt/review/preflight");
   await page.getByRole("button", { name: /check review readiness/i }).click(); await heldPreflight.started;
-  await page.getByRole("button", { name: "Close review" }).first().click(); heldPreflight.release(); await expect(page.getByRole("dialog")).toHaveCount(0);
+  const preflightAtBarrier = fixture.requests.filter((path) => path === "/api/account/receipt/review/preflight").length;
+  await expect(page.getByRole("button", { name: "Not now" })).toBeVisible();
+  await page.getByRole("button", { name: "Not now" }).click(); heldPreflight.release();
+  await expect(page.getByRole("dialog")).toHaveCount(0); await expect(invoker).toBeFocused();
+  expect(fixture.requests.filter((path) => path === "/api/account/receipt/review/preflight")).toHaveLength(preflightAtBarrier);
   await openReview(); await page.getByRole("button", { name: "Reconnect matching wallet" }).click();
   await expect(page.getByRole("heading", { name: "Wallet connected for review" })).toBeFocused();
   await emit({ status: "PERMISSION_CHANGED" }); await expect(page.getByRole("heading", { name: "Wallet permission changed" })).toBeFocused();
@@ -814,7 +823,13 @@ for (const boundary of ["headers", "body"] as const) {
       await barrier.started();
       const requestCounts = Object.fromEntries(fixture.requests.map((request) => [request,
         fixture.requests.filter((candidate) => candidate === request).length]));
-      await page.getByRole("button", { name: "Close review" }).first().click(); await barrier.release();
+      const tripwiresAtBarrier = await reviewTripwires(page);
+      if (path === "/api/account/receipt/review/preflight") {
+        await expect(page.getByRole("button", { name: "Not now" })).toBeVisible();
+        await expect(page.getByRole("button", { name: /checking|check review readiness|check again/iu })).toHaveCount(0);
+        await page.getByRole("button", { name: "Not now" }).click();
+      } else await page.getByRole("button", { name: "Close review" }).first().click();
+      await barrier.release();
       await expect(page.getByRole("dialog")).toHaveCount(0); await expect(invoker).toBeFocused();
       await page.evaluate(() => Promise.resolve());
       if (path === "/api/account/receipt/review/restore") expect((await reviewTripwires(page)).permission).toBe(0);
@@ -822,8 +837,12 @@ for (const boundary of ["headers", "body"] as const) {
         expect(fixture.requests.filter((request) => request === "/api/account/receipt/review/prepare")).toHaveLength(0);
       }
       if (path === "/api/account/receipt/review/prepare") expect((await reviewTripwires(page)).subscribe).toBe(0);
+      if (path === "/api/account/receipt/review/preflight") {
+        const after = await reviewTripwires(page); expect(after.permission).toBe(tripwiresAtBarrier.permission);
+        expect(after.read).toBe(tripwiresAtBarrier.read); expect(after.subscribe).toBe(tripwiresAtBarrier.subscribe);
+      }
       expect(Object.fromEntries(fixture.requests.map((request) => [request,
-        fixture.requests.filter((candidate) => candidate === request).length]))).toMatchObject(requestCounts);
+        fixture.requests.filter((candidate) => candidate === request).length]))).toEqual(requestCounts);
       expect(await reviewTripwires(page)).toMatchObject({ sign: 0, send: 0, inject: 0, broadcast: 0, contract: 0, fee: 0, observe: 0 });
     });
   }
