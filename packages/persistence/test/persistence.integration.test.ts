@@ -1,5 +1,5 @@
 import { Pool } from "pg";
-import { generateKeyPairSync, sign as signMessage } from "node:crypto";
+import { generateKeyPairSync, randomBytes, randomUUID, sign as signMessage } from "node:crypto";
 import { blake2b } from "@noble/hashes/blake2b";
 import { b58Encode, getPkhfromPk, PrefixV2 } from "@taquito/utils";
 import type { JsonObject } from "@samurai-sushi/domain";
@@ -295,6 +295,68 @@ class ObservedQueryLockPool implements SqlPool {
   }
 }
 
+class ObservedScopeClockClient implements ConnectedSqlClient {
+  constructor(
+    private readonly delegate: ConnectedSqlClient,
+    private readonly scope: string,
+    private readonly attempted: Deferred<number>,
+    private readonly acquired: Deferred<number>,
+    private readonly nextNow: () => Date | undefined,
+    private readonly releaseAfterAcquisition?: Promise<void>,
+  ) {}
+
+  async query<Row extends object>(text: string, values?: readonly SqlValue[]): Promise<QueryResult<Row>> {
+    if (text.trim() === "SELECT clock_timestamp() AS now") {
+      const now = this.nextNow();
+      if (now) return { rows: [{ now }] as unknown as readonly Row[], rowCount: 1 };
+    }
+    if (!text.includes("pg_advisory_xact_lock") || values?.[0] !== this.scope) {
+      return this.delegate.query<Row>(text, values);
+    }
+    const backend = await this.delegate.query<{ readonly pid: string }>("SELECT pg_backend_pid()::text AS pid");
+    const pid = Number(backend.rows[0]?.pid);
+    this.attempted.resolve(pid);
+    const result = await this.delegate.query<Row>(text, values);
+    this.acquired.resolve(pid);
+    if (this.releaseAfterAcquisition) await this.releaseAfterAcquisition;
+    return result;
+  }
+
+  release(): void {
+    this.delegate.release();
+  }
+}
+
+class ObservedScopeClockPool implements SqlPool {
+  private readonly sequence: Date[];
+
+  constructor(
+    private readonly delegate: SqlPool,
+    private readonly scope: string,
+    readonly attempted: Deferred<number>,
+    readonly acquired: Deferred<number>,
+    sequence: readonly Date[] = [],
+    private readonly releaseAfterAcquisition?: Promise<void>,
+  ) {
+    this.sequence = [...sequence];
+  }
+
+  query<Row extends object>(text: string, values?: readonly SqlValue[]): Promise<QueryResult<Row>> {
+    return this.delegate.query<Row>(text, values);
+  }
+
+  async connect(): Promise<ConnectedSqlClient> {
+    return new ObservedScopeClockClient(
+      await this.delegate.connect(),
+      this.scope,
+      this.attempted,
+      this.acquired,
+      () => this.sequence.shift(),
+      this.releaseAfterAcquisition,
+    );
+  }
+}
+
 class ObservedReplayFenceClient implements ConnectedSqlClient {
   constructor(
     private readonly delegate: ConnectedSqlClient,
@@ -583,6 +645,141 @@ describe("PostgreSQL persistence spine", () => {
     await rawPool.query("TRUNCATE samurai_persistence.players, samurai_persistence.claim_challenges CASCADE");
     await rawPool.query("DELETE FROM samurai_persistence.deletion_tombstones");
   });
+
+  const stage3Wallet = () => {
+    const { privateKey, publicKey } = generateKeyPairSync("ed25519");
+    const publicDer = publicKey.export({ format: "der", type: "spki" });
+    const publicKeyText = b58Encode(publicDer.subarray(publicDer.byteLength - 32), PrefixV2.Ed25519PublicKey);
+    return { privateKey, publicKey: publicKeyText, account: getPkhfromPk(publicKeyText) };
+  };
+
+  const stage3Service = (servicePool: SqlPool = pool, options: Partial<{
+    readonly issueUuid: () => string;
+    readonly issueNonce: () => string;
+    readonly issuePlayerSecret: () => string;
+  }> = {}) => new AccountClaimService(servicePool, claimAuthority, {
+    origin: "https://game.samurai-sushi.example",
+    chainId: "NetXdQprcVkpaWU",
+    ...options,
+  });
+
+  const stage3Fixture = async (wallet = stage3Wallet()) => {
+    const claimCapability = randomBytes(32).toString("base64url");
+    const guest = await new GuestSessionService(pool, authority, {
+      claimKeys: guestClaimKeys,
+      issueClaimCapability: () => claimCapability,
+    }).issue({
+      consentVersion: "consent-v1",
+      contentVersion: "phase0-salmon@1",
+      checkpointSchemaVersion: 1,
+      checkpoint: { orders: ["rice"] },
+    });
+    const firstExport = await recovery.createExport({
+      resumeSecret: guest.resumeSecret,
+      expectedRevision: 0,
+      validityMs: 24 * 60 * 60 * 1_000,
+    });
+    const importId = randomUUID();
+    const imported = await recovery.import({ importId, envelope: firstExport });
+    const authoritativeRevision = imported.revision + 1;
+    await rawPool.query(
+      "UPDATE samurai_persistence.guest_progress SET revision=$2,updated_at=clock_timestamp() WHERE guest_session_id=$1",
+      [guest.session.id, authoritativeRevision],
+    );
+    const liveExport = await recovery.createExport({
+      resumeSecret: imported.rotatedResumeSecret,
+      expectedRevision: authoritativeRevision,
+      validityMs: 24 * 60 * 60 * 1_000,
+    });
+    await rawPool.query(
+      `INSERT INTO samurai_persistence.command_receipts
+        (guest_session_id,idempotency_key,command_name,expected_revision,content_version,payload_hash,
+         response_schema_version,response_payload,result_hash,committed_revision,created_at,expires_at)
+       VALUES ($1,$2,'checkpoint.advance',$3-1,'phase0-salmon@1',decode(repeat('31',32),'hex'),
+               1,'{}',decode(repeat('32',32),'hex'),$3,clock_timestamp(),clock_timestamp()+interval '1 day')`,
+      [guest.session.id, randomUUID(), authoritativeRevision],
+    );
+    const eventId = `claim-race-${randomUUID()}`;
+    await rawPool.query(
+      `INSERT INTO samurai_persistence.domain_events
+        (event_id,guest_session_id,event_type,schema_version,payload,committed_revision,created_at)
+       VALUES ($1,$2,'checkpoint.advanced',1,'{}',$3,clock_timestamp())`,
+      [eventId, guest.session.id, authoritativeRevision],
+    );
+    await rawPool.query(
+      "INSERT INTO samurai_persistence.outbox_deliveries (event_id,available_at) VALUES ($1,clock_timestamp())",
+      [eventId],
+    );
+    const intent = {
+      claimId: randomUUID(),
+      guestClaimCommitment: claimCapability,
+      createPlayer: true,
+      guestRevision: authoritativeRevision,
+      idempotencyKey: randomUUID(),
+      contentVersion: "phase0-salmon@1",
+      cosmeticSelections: { counter: "moonwake" },
+    } as const;
+    const challenge = await stage3Service().issueClaimChallenge({
+      resumeSecret: imported.rotatedResumeSecret,
+      intent,
+      account: wallet.account,
+    });
+    if ("code" in challenge) throw new Error("Stage 3 fixture challenge issuance failed.");
+    const proof = {
+      challenge: challenge.challenge,
+      publicKey: wallet.publicKey,
+      signature: b58Encode(
+        signMessage(null, blake2b(walletSigningBytes(challenge.challenge), { dkLen: 32 }), wallet.privateKey),
+        PrefixV2.Ed25519Signature,
+      ),
+    };
+    return {
+      wallet,
+      guest,
+      resumeSecret: imported.rotatedResumeSecret,
+      intent,
+      challenge,
+      proof,
+      liveExport,
+      liveExportId: liveExport.exportId,
+      importId,
+      claimInput: {
+        resumeSecret: imported.rotatedResumeSecret,
+        intent,
+        challengeId: challenge.challengeId,
+        proof,
+      },
+    };
+  };
+
+  const stage3Matrix = async () => (await rawPool.query(`
+    SELECT
+      (SELECT count(*)::integer FROM samurai_persistence.guest_sessions) AS guests,
+      (SELECT count(*)::integer FROM samurai_persistence.guest_progress) AS guest_progress,
+      (SELECT count(*)::integer FROM samurai_persistence.guest_claim_capabilities) AS claim_capabilities,
+      (SELECT count(*)::integer FROM samurai_persistence.guest_resume_digests) AS guest_digests,
+      (SELECT count(*)::integer FROM samurai_persistence.players) AS players,
+      (SELECT count(*)::integer FROM samurai_persistence.player_progress) AS player_progress,
+      (SELECT count(*)::integer FROM samurai_persistence.wallet_credentials) AS wallets,
+      (SELECT count(*)::integer FROM samurai_persistence.player_sessions) AS player_sessions,
+      (SELECT count(*)::integer FROM samurai_persistence.player_session_digests) AS player_digests,
+      (SELECT count(*)::integer FROM samurai_persistence.command_receipts) AS commands,
+      (SELECT count(*)::integer FROM samurai_persistence.domain_events) AS events,
+      (SELECT count(*)::integer FROM samurai_persistence.outbox_deliveries) AS outbox,
+      (SELECT count(*)::integer FROM samurai_persistence.save_exports) AS exports,
+      (SELECT count(*)::integer FROM samurai_persistence.recovery_imports) AS imports,
+      (SELECT count(*)::integer FROM samurai_persistence.claim_challenges) AS challenges,
+      (SELECT count(*)::integer FROM samurai_persistence.claim_challenges WHERE consumed_at IS NULL) AS virgin_challenges,
+      (SELECT count(*)::integer FROM samurai_persistence.progress_merges) AS merges,
+      COALESCE((SELECT jsonb_object_agg(kind,total) FROM (
+        SELECT kind,count(*)::integer AS total FROM samurai_persistence.deletion_tombstones GROUP BY kind ORDER BY kind
+      ) tombstone_counts),'{}'::jsonb) AS tombstones
+  `)).rows[0];
+
+  const resetStage3Rows = async () => {
+    await rawPool.query("TRUNCATE samurai_persistence.players, samurai_persistence.guest_sessions, samurai_persistence.claim_challenges CASCADE");
+    await rawPool.query("DELETE FROM samurai_persistence.deletion_tombstones");
+  };
 
   afterAll(async () => {
     await rawPool.end();
@@ -4057,6 +4254,30 @@ describe("PostgreSQL persistence spine", () => {
       publicKey: "edpkuZpp81M8NmaFbueXY8bk7EP9V54XTnwsFFt77Z5FTPs2QzLU9r",
       signature: "edsigu1EdH9zrocmLnTumfutDWqnYfvY3H73y7qbPmQJANttSDZiqWsSaV1e26TR73LWi7Deu1c11UR3J4BBCLo1TKJgwe83ocE",
     };
+    await rawPool.query(
+      `CREATE TABLE samurai_persistence.hostile_guest_owned (
+         id text PRIMARY KEY,
+         guest_session_id text NOT NULL REFERENCES samurai_persistence.guest_sessions(id) ON DELETE CASCADE
+       )`,
+    );
+    await rawPool.query(
+      "INSERT INTO samurai_persistence.hostile_guest_owned (id, guest_session_id) VALUES ('unknown-owned-row', $1)",
+      [issued.session.id],
+    );
+    expect(await claimService.claimGuest({
+      resumeSecret: issued.resumeSecret,
+      intent: claimIntent,
+      challengeId: challenge.challengeId,
+      proof,
+    })).toEqual(ACCOUNT_CLAIM_PUBLIC_FAILURE);
+    const guarded = await rawPool.query<{ readonly guests: string; readonly players: string; readonly challenges: string }>(`
+      SELECT
+        (SELECT count(*)::text FROM samurai_persistence.guest_sessions) AS guests,
+        (SELECT count(*)::text FROM samurai_persistence.players) AS players,
+        (SELECT count(*)::text FROM samurai_persistence.claim_challenges WHERE consumed_at IS NULL) AS challenges
+    `);
+    expect(guarded.rows[0]).toEqual({ guests: "1", players: "0", challenges: "1" });
+    await rawPool.query("DROP TABLE samurai_persistence.hostile_guest_owned");
     const claimed = await claimService.claimGuest({
       resumeSecret: issued.resumeSecret,
       intent: claimIntent,
@@ -4839,6 +5060,359 @@ describe("PostgreSQL persistence spine", () => {
     expect(state.rows[0]).toEqual({
       revision: Number.MAX_SAFE_INTEGER.toString(), guest: "1", consumed: null, merges: "1",
     });
+  });
+
+  it("rolls back challenge consumption and every guest ownership rewrite, revocation, and deletion boundary", async () => {
+    const boundaries = [
+      "UPDATE samurai_persistence.claim_challenges",
+      "UPDATE samurai_persistence.command_receipts",
+      "UPDATE samurai_persistence.domain_events",
+      "DELETE FROM samurai_persistence.claim_challenges WHERE guest_session_id",
+      "DELETE FROM samurai_persistence.save_exports WHERE guest_session_id",
+      "DELETE FROM samurai_persistence.recovery_imports WHERE guest_session_id",
+      "DELETE FROM samurai_persistence.guest_claim_capabilities WHERE guest_session_id",
+      "DELETE FROM samurai_persistence.guest_sessions WHERE id",
+    ];
+    for (const boundary of boundaries) {
+      await resetStage3Rows();
+      const fixture = await stage3Fixture();
+      const before = await stage3Matrix();
+      const result = await stage3Service(new FailAfterStatementPool(pool, boundary)).claimGuest(fixture.claimInput);
+      expect(result).toEqual(ACCOUNT_CLAIM_PUBLIC_FAILURE);
+      expect(await stage3Matrix()).toEqual(before);
+    }
+  });
+
+  it("rejects at exact challenge expiry after waiting on the final player-session replay fence", async () => {
+    const fixture = await stage3Fixture();
+    const before = await stage3Matrix();
+    const expiry = new Date(fixture.challenge.challenge.expiresAt);
+    const justBefore = new Date(expiry.getTime() - 1);
+    const forcedSecret = randomBytes(32).toString("base64url");
+    const forcedDigest = playerSessionKeys.digest(forcedSecret, justBefore);
+    const scope = `player-session-replay:player-session:v${forcedDigest.keyVersion}:${Buffer.from(forcedDigest.digest).toString("base64url")}`;
+    const blocker = await rawPool.connect();
+    await blocker.query("BEGIN");
+    await blocker.query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))", [scope]);
+    const attempted = deferred<number>();
+    const acquired = deferred<number>();
+    const observedPool = new ObservedScopeClockPool(
+      pool,
+      scope,
+      attempted,
+      acquired,
+      [justBefore, justBefore, justBefore, justBefore, expiry, expiry],
+    );
+    const claim = stage3Service(observedPool, { issuePlayerSecret: () => forcedSecret }).claimGuest(fixture.claimInput);
+    const pid = await attempted.promise;
+    await expectAdvisoryWait(rawPool, pid);
+    await blocker.query("COMMIT");
+    blocker.release();
+    await acquired.promise;
+    await expect(claim).resolves.toEqual(ACCOUNT_CLAIM_PUBLIC_FAILURE);
+    expect(await stage3Matrix()).toEqual(before);
+  });
+
+  it("serializes concurrent create-player claims for one wallet in both observed winner orders", async () => {
+    for (const reverse of [false, true]) {
+      await resetStage3Rows();
+      const wallet = stage3Wallet();
+      const fixtures = [await stage3Fixture(wallet), await stage3Fixture(wallet)];
+      if (reverse) fixtures.reverse();
+      const scope = `wallet:NetXdQprcVkpaWU:${wallet.account}`;
+      const blocker = await rawPool.connect();
+      await blocker.query("BEGIN");
+      await blocker.query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))", [scope]);
+      const firstAttempted = deferred<number>();
+      const firstAcquired = deferred<number>();
+      const secondAttempted = deferred<number>();
+      const secondAcquired = deferred<number>();
+      const firstClaim = stage3Service(new ObservedScopeClockPool(
+        pool, scope, firstAttempted, firstAcquired,
+      )).claimGuest(fixtures[0]!.claimInput);
+      await expectAdvisoryWait(rawPool, await firstAttempted.promise);
+      const secondClaim = stage3Service(new ObservedScopeClockPool(
+        pool, scope, secondAttempted, secondAcquired,
+      )).claimGuest(fixtures[1]!.claimInput);
+      await expectAdvisoryWait(rawPool, await secondAttempted.promise);
+      await blocker.query("COMMIT");
+      blocker.release();
+      const first = await firstClaim;
+      const second = await secondClaim;
+      expect(first).toMatchObject({ disposition: "claimed", claimId: fixtures[0]!.intent.claimId });
+      expect(second).toEqual(ACCOUNT_CLAIM_PUBLIC_FAILURE);
+      const matrix = await stage3Matrix();
+      expect(matrix).toEqual({
+        guests: 1,
+        guest_progress: 1,
+        claim_capabilities: 1,
+        guest_digests: 1,
+        players: 1,
+        player_progress: 1,
+        wallets: 1,
+        player_sessions: 1,
+        player_digests: 1,
+        commands: 2,
+        events: 2,
+        outbox: 2,
+        exports: 1,
+        imports: 1,
+        challenges: 2,
+        virgin_challenges: 1,
+        merges: 1,
+        tombstones: {
+          "claim-challenge": 2,
+          "claim-id": 1,
+          "claim-idempotency": 1,
+          "guest-claim": 1,
+          "guest-session": 3,
+          "save-export": 3,
+          "save-import": 2,
+        },
+      });
+    }
+  });
+
+  it("serializes claim against import and explicit deletion in both guest-parent winner orders", async () => {
+    for (const operation of ["import", "delete"] as const) {
+      for (const claimFirst of [true, false]) {
+        await resetStage3Rows();
+        const fixture = await stage3Fixture();
+        let deletionSecret = fixture.resumeSecret;
+        if (operation === "delete") {
+          await rawPool.query(
+            "UPDATE samurai_persistence.guest_sessions SET rotate_after=clock_timestamp()-interval '1 millisecond' WHERE id=$1",
+            [fixture.guest.session.id],
+          );
+          deletionSecret = (await sessionService.rotate(fixture.resumeSecret)).rotatedResumeSecret;
+        }
+        const claimAttempted = deferred<number>();
+        const claimAcquired = deferred<number>();
+        const otherAttempted = deferred<number>();
+        const otherAcquired = deferred<number>();
+        const releaseWinner = deferred<void>();
+        const claimMatcher = (text: string) => text.includes("FOR UPDATE OF s");
+        const otherMatcher = operation === "import"
+          ? (text: string) => text.includes("FROM samurai_persistence.guest_sessions WHERE id = $1 FOR UPDATE")
+          : claimMatcher;
+        const runClaim = (observedPool: SqlPool) => stage3Service(observedPool).claimGuest(fixture.claimInput);
+        const runOther = (observedPool: SqlPool) => operation === "import"
+          ? new PortableRecoveryService(
+              observedPool,
+              authority,
+              recoveryAuthority,
+              { async describe() { return recoveryContent; } },
+            ).import({ importId: randomUUID(), envelope: fixture.liveExport })
+          : new GuestSessionService(
+              observedPool,
+              authority,
+            ).delete(deletionSecret);
+        const first = claimFirst
+          ? runClaim(new ObservedQueryLockPool(pool, claimMatcher, claimAttempted, claimAcquired, releaseWinner.promise))
+          : runOther(new ObservedQueryLockPool(pool, otherMatcher, otherAttempted, otherAcquired, releaseWinner.promise));
+        await (claimFirst ? claimAcquired.promise : otherAcquired.promise);
+        const second = claimFirst
+          ? runOther(new ObservedQueryLockPool(pool, otherMatcher, otherAttempted, otherAcquired))
+          : runClaim(new ObservedQueryLockPool(pool, claimMatcher, claimAttempted, claimAcquired));
+        await expectLockWait(rawPool, await (claimFirst ? otherAttempted.promise : claimAttempted.promise));
+        releaseWinner.resolve();
+        const [firstResult, secondResult] = await Promise.allSettled([first, second]);
+        const claimResult = claimFirst ? firstResult : secondResult;
+        const otherResult = claimFirst ? secondResult : firstResult;
+        if (claimFirst) {
+          expect(claimResult).toMatchObject({ status: "fulfilled", value: { disposition: "claimed" } });
+          expect(otherResult.status).toBe("rejected");
+          expect(await stage3Matrix()).toEqual({
+            guests: 0, guest_progress: 0, claim_capabilities: 0, guest_digests: 0,
+            players: 1, player_progress: 1, wallets: 1, player_sessions: 1, player_digests: 1,
+            commands: 1, events: 1, outbox: 1, exports: 0, imports: 0,
+            challenges: 1, virgin_challenges: 0, merges: 1,
+            tombstones: {
+              "claim-challenge": 2,
+              "claim-id": 1,
+              "claim-idempotency": 1,
+              "guest-claim": 1,
+              "guest-session": operation === "delete" ? 3 : 2,
+              "save-export": 2,
+              "save-import": 1,
+            },
+          });
+        } else if (operation === "import") {
+          expect(otherResult).toMatchObject({ status: "fulfilled", value: { disposition: "committed" } });
+          expect(claimResult).toMatchObject({ status: "fulfilled", value: ACCOUNT_CLAIM_PUBLIC_FAILURE });
+          expect(await stage3Matrix()).toEqual({
+            guests: 1, guest_progress: 1, claim_capabilities: 1, guest_digests: 1,
+            players: 0, player_progress: 0, wallets: 0, player_sessions: 0, player_digests: 0,
+            commands: 1, events: 1, outbox: 1, exports: 0, imports: 2,
+            challenges: 1, virgin_challenges: 1, merges: 0,
+            tombstones: {
+              "guest-session": 2,
+              "save-export": 2,
+              "save-import": 2,
+            },
+          });
+        } else {
+          expect(otherResult).toMatchObject({ status: "fulfilled", value: undefined });
+          expect(claimResult).toMatchObject({ status: "fulfilled", value: ACCOUNT_CLAIM_PUBLIC_FAILURE });
+          expect(await stage3Matrix()).toEqual({
+            guests: 0, guest_progress: 0, claim_capabilities: 0, guest_digests: 0,
+            players: 0, player_progress: 0, wallets: 0, player_sessions: 0, player_digests: 0,
+            commands: 0, events: 0, outbox: 0, exports: 0, imports: 0,
+            challenges: 0, virgin_challenges: 0, merges: 0,
+            tombstones: {
+              "claim-challenge": 2,
+              command: 1,
+              "guest-claim": 1,
+              "guest-session": 3,
+              "save-export": 2,
+              "save-import": 1,
+            },
+          });
+        }
+      }
+    }
+  }, 20_000);
+
+  it("serializes claim against expiry deletion in both guest-parent winner orders", async () => {
+    for (const claimWinsParent of [true, false]) {
+      await resetStage3Rows();
+      const fixture = await stage3Fixture();
+      await rawPool.query(
+        `UPDATE samurai_persistence.guest_sessions
+            SET created_at=clock_timestamp()-interval '31 days',
+                last_seen_at=clock_timestamp()-interval '31 days',
+                rotate_after=clock_timestamp()-interval '30 days',
+                expires_at=clock_timestamp()-interval '1 millisecond'
+          WHERE id=$1`,
+        [fixture.guest.session.id],
+      );
+      if (claimWinsParent) {
+        const attempted = deferred<number>();
+        const acquired = deferred<number>();
+        const release = deferred<void>();
+        const claim = stage3Service(new ObservedQueryLockPool(
+          pool,
+          (text) => text.includes("FOR UPDATE OF s"),
+          attempted,
+          acquired,
+          release.promise,
+        )).claimGuest(fixture.claimInput);
+        await acquired.promise;
+        await expect(new GuestSessionService(pool, authority).deleteExpired()).resolves.toBe(0);
+        release.resolve();
+        await expect(claim).resolves.toEqual(ACCOUNT_CLAIM_PUBLIC_FAILURE);
+        await expect(new GuestSessionService(pool, authority).deleteExpired()).resolves.toBe(1);
+      } else {
+        const attempted = deferred<number>();
+        const acquired = deferred<number>();
+        const release = deferred<void>();
+        const cleanup = new GuestSessionService(new ObservedQueryLockPool(
+          pool,
+          (text) => text.includes("FROM samurai_persistence.guest_resume_digests WHERE guest_session_id"),
+          attempted,
+          acquired,
+          release.promise,
+        ), authority).deleteExpired();
+        await acquired.promise;
+        const claimAttempted = deferred<number>();
+        const claimAcquired = deferred<number>();
+        const claim = stage3Service(new ObservedSessionLockPool(
+          pool, claimAttempted, claimAcquired,
+        )).claimGuest(fixture.claimInput);
+        await expectLockWait(rawPool, await claimAttempted.promise);
+        release.resolve();
+        await expect(cleanup).resolves.toBe(1);
+        await expect(claim).resolves.toEqual(ACCOUNT_CLAIM_PUBLIC_FAILURE);
+      }
+      const matrix = await stage3Matrix();
+      expect(matrix).toEqual({
+        guests: 0, guest_progress: 0, claim_capabilities: 0, guest_digests: 0,
+        players: 0, player_progress: 0, wallets: 0, player_sessions: 0, player_digests: 0,
+        commands: 0, events: 0, outbox: 0, exports: 0, imports: 0,
+        challenges: 0, virgin_challenges: 0, merges: 0,
+        tombstones: {
+          "claim-challenge": 2,
+          command: 1,
+          "guest-claim": 1,
+          "guest-session": 2,
+          "save-export": 2,
+          "save-import": 1,
+        },
+      });
+    }
+  });
+
+  it("revalidates the exact target-player revision after an observed parent-lock wait", async () => {
+    const wallet = stage3Wallet();
+    const ownerFixture = await stage3Fixture(wallet);
+    const owner = await stage3Service().claimGuest(ownerFixture.claimInput);
+    if ("code" in owner) throw new Error("Owner fixture claim failed.");
+    const contender = await stage3Fixture(wallet);
+    const existingIntent = {
+      ...contender.intent,
+      createPlayer: false,
+      targetPlayerId: owner.playerId,
+      playerRevision: owner.playerRevision,
+    } as const;
+    const challenge = await stage3Service().issueClaimChallenge({
+      resumeSecret: contender.resumeSecret,
+      intent: existingIntent,
+      account: wallet.account,
+    });
+    if ("code" in challenge) throw new Error("Existing-player challenge issuance failed.");
+    const proof = {
+      challenge: challenge.challenge,
+      publicKey: wallet.publicKey,
+      signature: b58Encode(
+        signMessage(null, blake2b(walletSigningBytes(challenge.challenge), { dkLen: 32 }), wallet.privateKey),
+        PrefixV2.Ed25519Signature,
+      ),
+    };
+    const blocker = await rawPool.connect();
+    await blocker.query("BEGIN");
+    await blocker.query("SELECT id FROM samurai_persistence.players WHERE id=$1 FOR UPDATE", [owner.playerId]);
+    const attempted = deferred<number>();
+    const acquired = deferred<number>();
+    const claim = stage3Service(new ObservedQueryLockPool(
+      pool,
+      (text) => text.includes("SELECT id FROM samurai_persistence.players WHERE id = $1 FOR UPDATE"),
+      attempted,
+      acquired,
+    )).claimGuest({
+      resumeSecret: contender.resumeSecret,
+      intent: existingIntent,
+      challengeId: challenge.challengeId,
+      proof,
+    });
+    await expectLockWait(rawPool, await attempted.promise);
+    await blocker.query(
+      "UPDATE samurai_persistence.player_progress SET revision=revision+1,updated_at=clock_timestamp() WHERE player_id=$1",
+      [owner.playerId],
+    );
+    await blocker.query("COMMIT");
+    blocker.release();
+    await expect(claim).resolves.toEqual(ACCOUNT_CLAIM_PUBLIC_FAILURE);
+    const matrix = await stage3Matrix();
+    expect(matrix).toEqual({
+      guests: 1, guest_progress: 1, claim_capabilities: 1, guest_digests: 1,
+      players: 1, player_progress: 1, wallets: 1,
+      player_sessions: 1, player_digests: 1, merges: 1,
+      commands: 2, events: 2, outbox: 2, exports: 1, imports: 1,
+      challenges: 3, virgin_challenges: 2,
+      tombstones: {
+        "claim-challenge": 2,
+        "claim-id": 1,
+        "claim-idempotency": 1,
+        "guest-claim": 1,
+        "guest-session": 3,
+        "save-export": 3,
+        "save-import": 2,
+      },
+    });
+    expect((await rawPool.query<{ readonly revision: string }>(
+      "SELECT revision::text FROM samurai_persistence.player_progress WHERE player_id=$1",
+      [owner.playerId],
+    )).rows[0]?.revision).toBe("1");
   });
 
   it("enforces the seven-day player-session idle boundary, touches accepted use, and cleans at equality", async () => {

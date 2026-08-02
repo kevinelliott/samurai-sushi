@@ -121,6 +121,24 @@ interface KeyReferenceRow {
   readonly required_until: Date;
 }
 interface ReferenceCountRow { readonly reference_count: string }
+interface GuestOwnershipForeignKeyRow {
+  readonly table_name: string;
+  readonly column_name: string;
+  readonly referenced_column_name: string;
+  readonly column_count: number;
+  readonly delete_action: "cascade" | "restrict" | "set-null" | "set-default" | "no-action";
+}
+
+const GUEST_OWNERSHIP_FOREIGN_KEYS = Object.freeze([
+  { table_name: "claim_challenges", column_name: "guest_session_id", referenced_column_name: "id", column_count: 1, delete_action: "restrict", disposition: "revoke" },
+  { table_name: "command_receipts", column_name: "guest_session_id", referenced_column_name: "id", column_count: 1, delete_action: "cascade", disposition: "transfer" },
+  { table_name: "domain_events", column_name: "guest_session_id", referenced_column_name: "id", column_count: 1, delete_action: "cascade", disposition: "transfer" },
+  { table_name: "guest_claim_capabilities", column_name: "guest_session_id", referenced_column_name: "id", column_count: 1, delete_action: "restrict", disposition: "revoke" },
+  { table_name: "guest_progress", column_name: "guest_session_id", referenced_column_name: "id", column_count: 1, delete_action: "cascade", disposition: "revoke" },
+  { table_name: "guest_resume_digests", column_name: "guest_session_id", referenced_column_name: "id", column_count: 1, delete_action: "cascade", disposition: "revoke" },
+  { table_name: "recovery_imports", column_name: "guest_session_id", referenced_column_name: "id", column_count: 1, delete_action: "cascade", disposition: "revoke" },
+  { table_name: "save_exports", column_name: "guest_session_id", referenced_column_name: "id", column_count: 1, delete_action: "cascade", disposition: "revoke" },
+] as const);
 
 export type AccountClaimPublicErrorCode =
   | "CLAIM_REJECTED"
@@ -2055,12 +2073,44 @@ export class AccountClaimService {
   }
 
   private async lockGuestOwnedRows(client: SqlClient, guestId: string): Promise<void> {
-    for (const table of [
-      "guest_claim_capabilities", "guest_progress", "command_receipts", "domain_events",
-      "save_exports", "recovery_imports", "guest_resume_digests",
-    ]) {
-      await client.query(`SELECT 1 FROM samurai_persistence.${table} WHERE guest_session_id = $1 FOR UPDATE`, [guestId]);
+    await this.assertGuestOwnershipInventory(client);
+    for (const { table_name: table, column_name: column } of GUEST_OWNERSHIP_FOREIGN_KEYS) {
+      // Challenges use the later claim-scope -> nonce-fence -> row-lock protocol.
+      if (table === "claim_challenges") continue;
+      await client.query(`SELECT 1 FROM samurai_persistence.${table} WHERE ${column} = $1 FOR UPDATE`, [guestId]);
     }
+  }
+
+  private async assertGuestOwnershipInventory(client: SqlClient): Promise<void> {
+    const inventory = await client.query<GuestOwnershipForeignKeyRow>(
+      `SELECT child.relname AS table_name,
+              child_column.attname AS column_name,
+              parent_column.attname AS referenced_column_name,
+              cardinality(constraint_row.conkey)::integer AS column_count,
+              CASE constraint_row.confdeltype
+                WHEN 'c' THEN 'cascade'
+                WHEN 'r' THEN 'restrict'
+                WHEN 'n' THEN 'set-null'
+                WHEN 'd' THEN 'set-default'
+                ELSE 'no-action'
+              END AS delete_action
+         FROM pg_catalog.pg_constraint constraint_row
+         JOIN pg_catalog.pg_class child ON child.oid = constraint_row.conrelid
+         JOIN pg_catalog.pg_namespace child_namespace ON child_namespace.oid = child.relnamespace
+         JOIN pg_catalog.pg_class parent ON parent.oid = constraint_row.confrelid
+         JOIN pg_catalog.pg_namespace parent_namespace ON parent_namespace.oid = parent.relnamespace
+         JOIN pg_catalog.pg_attribute child_column
+           ON child_column.attrelid = child.oid AND child_column.attnum = constraint_row.conkey[1]
+         JOIN pg_catalog.pg_attribute parent_column
+           ON parent_column.attrelid = parent.oid AND parent_column.attnum = constraint_row.confkey[1]
+        WHERE constraint_row.contype = 'f'
+          AND child_namespace.nspname = 'samurai_persistence'
+          AND parent_namespace.nspname = 'samurai_persistence'
+          AND parent.relname = 'guest_sessions'
+        ORDER BY child.relname, child_column.attname`,
+    );
+    const expected = GUEST_OWNERSHIP_FOREIGN_KEYS.map(({ disposition: _disposition, ...row }) => row);
+    if (JSON.stringify(inventory.rows) !== JSON.stringify(expected)) invalid("CLAIM_OWNERSHIP_INVENTORY_DRIFT");
   }
 
   private async lockChallengesForRemovalByClaimId(
@@ -2107,18 +2157,15 @@ export class AccountClaimService {
   }
 
   private async rewriteGuestRows(client: SqlClient, guestId: string, playerId: string, claimId: string): Promise<void> {
-    await client.query(
-      `UPDATE samurai_persistence.command_receipts
+    for (const { table_name: table, disposition } of GUEST_OWNERSHIP_FOREIGN_KEYS) {
+      if (disposition !== "transfer") continue;
+      await client.query(
+        `UPDATE samurai_persistence.${table}
           SET player_id = $2, guest_session_id = NULL, origin_claim_id = $3::uuid
         WHERE guest_session_id = $1`,
-      [guestId, playerId, claimId],
-    );
-    await client.query(
-      `UPDATE samurai_persistence.domain_events
-          SET player_id = $2, guest_session_id = NULL, origin_claim_id = $3::uuid
-        WHERE guest_session_id = $1`,
-      [guestId, playerId, claimId],
-    );
+        [guestId, playerId, claimId],
+      );
+    }
   }
 
   private async revokeGuestPrivateRows(
