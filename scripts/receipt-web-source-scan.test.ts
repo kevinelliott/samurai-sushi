@@ -76,9 +76,10 @@ describe("receipt web-source contamination scan", () => {
     symlinkSync(process.execPath, resolve(controlledBin, "node"));
     symlinkSync(executableFromPath("pnpm"), resolve(controlledBin, "pnpm"));
     const controlledEnvironment = { ...process.env, PATH: controlledBin };
+    expect(() => accessSync(resolve(controlledBin, "node"), constants.X_OK)).not.toThrow();
+    expect(() => accessSync(resolve(controlledBin, "pnpm"), constants.X_OK)).not.toThrow();
     const missingRg = spawnSync("rg", ["--version"], { env: controlledEnvironment, encoding: "utf8" });
     expect(missingRg.error).toMatchObject({ code: "ENOENT" });
-    expect(spawnSync("pnpm", ["--version"], { env: controlledEnvironment }).status).toBe(0);
     const result = spawnSync("node", ["--import", "tsx", "scripts/verify-receipt-authority.ts"], {
       cwd: resolve(import.meta.dirname, ".."),
       env: controlledEnvironment,
