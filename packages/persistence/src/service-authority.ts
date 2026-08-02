@@ -110,6 +110,14 @@ interface AuthenticatedSubject {
   revalidate(client: SqlClient): Promise<Date>;
 }
 
+export interface SettledServiceTransactionContext {
+  readonly client: SqlClient;
+  readonly subjectKind: "guest" | "player";
+  readonly subjectId: string;
+  readonly checkpoint: EveningServiceCheckpoint;
+  readonly now: Date;
+}
+
 function deepFreeze<T>(value: T): T {
   if (value && typeof value === "object" && !Object.isFrozen(value)) {
     Object.freeze(value);
@@ -295,6 +303,37 @@ export class EveningServiceAuthority {
       if (authenticated.subjectKind === "guest") await this.#guests.touch(client, authenticated.subjectId, now);
       const checkpoint = this.#checkpointFromProgress(progress);
       return { checkpoint, revision: checkpoint.revision, contentVersion: FIRST_EVENING_CONTENT_VERSION };
+    });
+  }
+
+  /** Server-only composition seam for post-SETTLED authorities that must share the subject/progress lock. */
+  async runSettledTransaction<T>(
+    credential: ServiceSubjectCredential,
+    idempotencyScope: string,
+    operation: (context: SettledServiceTransactionContext) => Promise<T>,
+  ): Promise<T> {
+    if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{15,127}$/.test(idempotencyScope)) {
+      throw new PersistenceError("SERVICE_REQUEST_INVALID", "The settled transaction idempotency scope is invalid.");
+    }
+    return this.#runner.run(async (client) => {
+      const authenticated = await this.#authenticate(client, credential);
+      await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [
+        `settled-authority:${authenticated.subjectKind}:${authenticated.subjectId}:${idempotencyScope}`,
+      ]);
+      const progress = await this.#lockProgress(client, authenticated);
+      const checkpoint = this.#checkpointFromProgress(progress);
+      if (checkpoint.phase !== "SETTLED") {
+        throw new PersistenceError("SERVICE_NOT_SETTLED", "Receipt intent preparation requires the exact settled checkpoint.");
+      }
+      const now = await authenticated.revalidate(client);
+      if (authenticated.subjectKind === "guest") await this.#guests.touch(client, authenticated.subjectId, now);
+      return operation({
+        client,
+        subjectKind: authenticated.subjectKind,
+        subjectId: authenticated.subjectId,
+        checkpoint,
+        now,
+      });
     });
   }
 

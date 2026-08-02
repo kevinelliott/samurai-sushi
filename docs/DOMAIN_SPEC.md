@@ -18,9 +18,9 @@ The terms MUST, SHOULD, and MAY are used in their RFC sense.
 
 ```text
 Intent: DRAFT -> REVIEWED -> AWAITING_SIGNATURE -> SUBMITTED -> INCLUDED
-                                             \-> CANCELLED     -> CONFIRMED -> FINALIZED
-                                             \-> REJECTED          \-> REORGED
-                                             \-> EXPIRED
+          \-> EXPIRED         \-> CANCELLED     -> CONFIRMED -> FINALIZED
+                 \-> EXPIRED  \-> REJECTED          \-> REORGED
+                                \-> EXPIRED
 
 Attempt: SUBMITTED -> INCLUDED -> CONFIRMED -> FINALIZED
                   \-> FAILED      \-> REORGED -> INCLUDED
@@ -33,6 +33,17 @@ chain failure. Submitted is not included. Included is provisional. Confirmed is
 reached after the manifest-configured confirmation threshold and may settle the
 normal projection. Finalized is reached only after the manifest-configured
 finality/cemented-block policy and is terminal.
+
+`DRAFT`, `REVIEWED`, and `AWAITING_SIGNATURE` become `EXPIRED` exactly when
+PostgreSQL `clock_timestamp() >= expires_at`; equality is expired. No other
+state gains an expiry transition. The named
+`localnet-two-confirmation-rehearsal-v1` evaluator derives confirmations as
+`canonicalHeadLevel - includedLevel + 1`, treats inclusion as confirmation one,
+and satisfies both confirmation and rehearsal finality at confirmation two only
+when exact canonical head/block evidence is valid. Adapter-supplied confirmation
+counts or finalized booleans have no authority. When one observation reaches
+both boundaries, the ordered `CONFIRMED` and `FINALIZED` lifecycle facts commit
+atomically.
 
 An old attempt marked `REPLACED` records the replacement hash; a new attempt
 starts at `SUBMITTED` under the same intent. Contract uniqueness ensures at most
@@ -56,7 +67,9 @@ rechecked”; `DROPPED/FAILED/REJECTED` state that no receipt was recorded.
 | From | To | Condition |
 | --- | --- | --- |
 | DRAFT | REVIEWED | canonical permit and dispatch preview accepted |
+| DRAFT | EXPIRED | PostgreSQL clock is at or after permit expiry |
 | REVIEWED | AWAITING_SIGNATURE | wallet request begins after final preflight |
+| REVIEWED | EXPIRED | PostgreSQL clock is at or after permit expiry |
 | AWAITING_SIGNATURE | CANCELLED/REJECTED/EXPIRED | user/system terminal pre-submission result |
 | AWAITING_SIGNATURE | SUBMITTED | wallet returns an operation hash |
 | SUBMITTED | INCLUDED | RPC evidence places attempt in canonical block |

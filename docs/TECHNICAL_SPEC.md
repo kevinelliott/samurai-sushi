@@ -241,12 +241,22 @@ drop, and reorg compensation are normative in `DOMAIN_SPEC.md`.
 
 `ReceiptIntent.id` is the durable local correlation key and parent of one or
 more `OperationAttempt` rows. `(chainId, hash)` and `(intentId, id)` are unique.
+A separate CSPRNG `publicIntentRef` and `publicAttemptRef` provide at least 128
+bits of non-semantic browser-safe correlation entropy; persistence primary keys,
+subject links, replacement keys, and worker fences remain server-only.
 A replacement creates a new attempt under the same intent and links both rows;
 it never overwrites the prior hash or evidence. Inclusion and reorg processing
 records canonical and orphaned block identities and timestamps. Exactly one
 accepted canonical attempt may populate `ServiceReceipt.operationHash`; all
 other attempts remain durable history. Re-inclusion updates the same attempt
 idempotently rather than creating a new receipt or attempt.
+
+The Phase 2B observer port accepts only strict normalized evidence. Its first
+adapter is deterministic and network-free. RPC/indexer confirmation counts and
+finalized booleans are untrusted; the named policy evaluator recomputes both
+from canonical inclusion and head evidence. Fetching occurs outside the apply
+transaction, while the apply transaction revalidates its database-clock worker
+lease after all blocking locks and immediately before commit.
 
 ### Canonical receipt
 
