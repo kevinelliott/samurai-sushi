@@ -32,9 +32,14 @@ function viewFor(
 interface RouteFixture {
   readonly install: (page: Page) => Promise<void>;
   readonly bodies: string[];
+  readonly requests: string[];
   readonly setDropNextAfterCommit: () => void;
   readonly setUnavailable: (value: boolean) => void;
   readonly setAuthorityRejected: (value: boolean) => void;
+  readonly setWrongAuthorityResponse: (value: boolean) => void;
+  readonly setCredentialRefreshNext: () => void;
+  readonly setMalformedNextQuery: () => void;
+  readonly setConflictNextQuery: () => void;
   readonly setIdentity: (identity: "guest" | "player") => void;
   readonly holdNextQuery: () => { readonly release: () => void; readonly started: Promise<void> };
   readonly holdNextCommand: () => { readonly release: () => void; readonly started: Promise<void> };
@@ -46,15 +51,21 @@ function serviceFixture(initial = createInitialEveningServiceCheckpoint()): Rout
   let dropNextAfterCommit = false;
   let unavailable = false;
   let authorityRejected = false;
+  let wrongAuthorityResponse = false;
+  let credentialRefreshNext = false;
+  let malformedNextQuery = false;
+  let conflictNextQuery = false;
   let identity: "guest" | "player" = "guest";
   let heldQuery: { readonly started: () => void; readonly wait: Promise<void>; readonly release: () => void } | null = null;
   let heldCommand: { readonly started: () => void; readonly wait: Promise<void>; readonly release: () => void } | null = null;
   const receipts = new Map<string, { readonly body: string; readonly checkpoint: EveningServiceCheckpoint; readonly cue: string | null }>();
   const bodies: string[] = [];
+  const requests: string[] = [];
 
   const json = (route: Route, status: number, body: unknown) => route.fulfill({ status, contentType: "application/json", headers: { "Cache-Control": "no-store" }, body: JSON.stringify(body) });
   const handle = async (route: Route) => {
     const path = new URL(route.request().url()).pathname;
+    requests.push(path);
     if (path === "/api/account/cookies/reset") return json(route, 200, { reset: true });
     if (path === "/api/account/guest/issue") {
       checkpoint = createInitialEveningServiceCheckpoint();
@@ -67,9 +78,26 @@ function serviceFixture(initial = createInitialEveningServiceCheckpoint()): Rout
       if (path === "/api/account/service/command") bodies.push(route.request().postData() ?? "");
       return json(route, 503, { code: "SERVICE_UNAVAILABLE", message: "hostile-runtime-marker" });
     }
-    if (authorityRejected) return json(route, 400, { code: "REQUEST_REJECTED", message: "hostile-authority-marker" });
+    if (authorityRejected) return json(route, 401, { code: "SERVICE_AUTHORITY_REJECTED", message: "Service access could not be authenticated." });
+    if (wrongAuthorityResponse) return json(route, 401, { code: "REQUEST_REJECTED", message: "The request could not be processed." });
+    if (credentialRefreshNext) {
+      credentialRefreshNext = false;
+      if (path === "/api/account/service/command") bodies.push(route.request().postData() ?? "");
+      return json(route, 428, { code: "SERVICE_CREDENTIAL_REFRESHED", message: "Service access was refreshed. Requery the saved service." });
+    }
     if (path === "/api/account/service") {
-      const snapshot = { view: viewFor(checkpoint, "query", null, identity) };
+      if (conflictNextQuery) {
+        conflictNextQuery = false;
+        return json(route, 409, { code: "SERVICE_REQUEST_REJECTED", message: "The saved service could not be updated." });
+      }
+      const snapshot: { view: BrowserEveningServiceView | Record<string, unknown> } = { view: viewFor(checkpoint, "query", null, identity) };
+      if (malformedNextQuery) {
+        malformedNextQuery = false;
+        const mutated = JSON.parse(JSON.stringify(snapshot.view)) as Record<string, unknown>;
+        const choices = mutated.choices as Record<string, unknown>[];
+        choices[0] = { ...choices[0], id: "season", payload: { beat: "season" } };
+        snapshot.view = mutated;
+      }
       const held = heldQuery;
       if (held) { heldQuery = null; held.started(); await held.wait; }
       return json(route, 200, snapshot);
@@ -100,10 +128,14 @@ function serviceFixture(initial = createInitialEveningServiceCheckpoint()): Rout
     return json(route, 200, { view: viewFor(checkpoint, "committed", cue, identity) });
   };
   return {
-    install: (page) => page.route("**/api/account/**", handle), bodies,
+    install: (page) => page.route("**/api/account/**", handle), bodies, requests,
     setDropNextAfterCommit: () => { dropNextAfterCommit = true; },
     setUnavailable: (value) => { unavailable = value; },
     setAuthorityRejected: (value) => { authorityRejected = value; },
+    setWrongAuthorityResponse: (value) => { wrongAuthorityResponse = value; },
+    setCredentialRefreshNext: () => { credentialRefreshNext = true; },
+    setMalformedNextQuery: () => { malformedNextQuery = true; },
+    setConflictNextQuery: () => { conflictNextQuery = true; },
     setIdentity: (value) => { identity = value; },
     holdNextQuery: () => {
       let release!: () => void;
@@ -207,6 +239,25 @@ test("lost response requeries then retries the byte-identical envelope without c
   expect(fixture.bodies[1]).toBe(fixture.bodies[0]);
   await expect(page.locator(".serve-ceremony")).toHaveCount(0);
   await expect(page.getByRole("status")).toContainText("without repeating service ceremony");
+  expect(fixture.requests.filter((path) => path === "/api/account/cookies/reset" || path === "/api/account/guest/issue")).toEqual([]);
+});
+
+test("same-subject credential refresh requeries before an exact command retry without reset or duplicate gameplay", async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== "desktop", "credential refresh transport is covered once");
+  const fixture = serviceFixture();
+  fixture.setCredentialRefreshNext();
+  await fixture.install(page);
+  await page.goto("/");
+  await expect(page.getByRole("heading", { name: "Start the first shift." })).toBeVisible();
+  expect(fixture.requests.filter((path) => path === "/api/account/service")).toHaveLength(2);
+
+  fixture.setCredentialRefreshNext();
+  await page.locator(".perform-action .primary-action").click();
+  await expect(page.getByRole("heading", { name: /wash/i })).toBeVisible();
+  await expect.poll(() => fixture.bodies.length).toBe(2);
+  expect(fixture.bodies[1]).toBe(fixture.bodies[0]);
+  expect(fixture.checkpoint()).toMatchObject({ phase: "OPEN", revision: 1, generation: 0 });
+  expect(fixture.requests.filter((path) => path === "/api/account/cookies/reset" || path === "/api/account/guest/issue")).toEqual([]);
 });
 
 test("a pending command keeps the acknowledged projection inert and disables a second intent", async ({ page }, testInfo) => {
@@ -260,6 +311,7 @@ test("runtime failure retains the exact envelope and never invokes authority res
   await expect(page.getByRole("heading", { name: /wash/i })).toBeVisible();
   expect(await page.locator("body").innerText()).not.toContain("hostile-runtime-marker");
   expect(diagnostics.join("\n")).not.toMatch(/hostile-runtime-marker|cookie|subject|checkpoint|signature|proof|database|digest|hmac/iu);
+  expect(fixture.requests.filter((path) => path === "/api/account/cookies/reset" || path === "/api/account/guest/issue")).toEqual([]);
 });
 
 test("two tabs fence a stale revision and converge on the canonical projection", async ({ context, page }, testInfo) => {
@@ -276,6 +328,7 @@ test("two tabs fence a stale revision and converge on the canonical projection",
   ]);
   expect(fixture.checkpoint().revision).toBe(1);
   expect(new Set(fixture.bodies.map((body) => JSON.parse(body).idempotencyKey)).size).toBe(2);
+  expect(fixture.requests.filter((path) => path === "/api/account/cookies/reset" || path === "/api/account/guest/issue")).toEqual([]);
 });
 
 test("a delayed old query cannot overwrite a newer canonical requery", async ({ context, page }, testInfo) => {
@@ -347,6 +400,44 @@ test("a malformed projection fails closed without rendering raw server fields", 
   expect(await page.locator("body").innerText()).not.toContain("hostile-projection-marker");
 });
 
+test("known-but-wrong projection fields cannot replace an acknowledged view or trigger cookie recovery", async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== "desktop", "mounted decoder failure is covered once");
+  const fixture = serviceFixture();
+  await fixture.install(page);
+  await page.goto("/");
+  await expect(page.getByRole("heading", { name: "Start the first shift." })).toBeVisible();
+  fixture.setMalformedNextQuery();
+  await page.evaluate(() => document.dispatchEvent(new Event("visibilitychange")));
+  await expect(page.locator(".blocking-banner")).toContainText("temporarily unavailable");
+  await expect(page.getByRole("heading", { name: "Start the first shift." })).toBeVisible();
+  expect(fixture.requests.filter((path) => path === "/api/account/cookies/reset" || path === "/api/account/guest/issue")).toEqual([]);
+});
+
+test("only the exact authority rejection enables destructive recovery", async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== "desktop", "negative authentication classification is covered once");
+  const fixture = serviceFixture();
+  await fixture.install(page);
+  await page.goto("/");
+  await expect(page.getByRole("heading", { name: "Start the first shift." })).toBeVisible();
+  fixture.setWrongAuthorityResponse(true);
+  await page.evaluate(() => document.dispatchEvent(new Event("visibilitychange")));
+  await expect(page.locator(".blocking-banner")).toContainText("temporarily unavailable");
+  await expect(page.getByRole("button", { name: "Recover service access" })).toHaveCount(0);
+  expect(fixture.requests.filter((path) => path === "/api/account/cookies/reset" || path === "/api/account/guest/issue")).toEqual([]);
+});
+
+test("a query conflict preserves cookies and offers only nondestructive requery", async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== "desktop", "query conflict classification is covered once");
+  const fixture = serviceFixture();
+  await fixture.install(page);
+  await page.goto("/");
+  await expect(page.getByRole("heading", { name: "Start the first shift." })).toBeVisible();
+  fixture.setConflictNextQuery();
+  await page.evaluate(() => document.dispatchEvent(new Event("visibilitychange")));
+  await expect(page.locator(".blocking-banner").getByRole("button", { name: "Requery saved service" })).toBeVisible();
+  expect(fixture.requests.filter((path) => path === "/api/account/cookies/reset" || path === "/api/account/guest/issue")).toEqual([]);
+});
+
 test("abandon confirmation is modal, restores focus, and never claims settlement", async ({ page }, testInfo) => {
   test.skip(testInfo.project.name !== "desktop", "dialog journey is covered once");
   const fixture = serviceFixture();
@@ -369,6 +460,107 @@ test("abandon confirmation is modal, restores focus, and never claims settlement
   await expect(page.getByText("Service abandoned", { exact: true })).toBeVisible();
   await expect(page.getByText("No settlement or unlock was recorded.", { exact: true })).toBeVisible();
   await expect(page.getByText("Saved cosmetic restoration", { exact: true })).toHaveCount(0);
+});
+
+test("dark-surface focus indicators use the high-contrast focus token", async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== "desktop", "focus contrast is covered once");
+  const fixture = serviceFixture();
+  await fixture.install(page);
+  await page.goto("/");
+  await page.locator(".perform-action .primary-action").click();
+  await page.keyboard.press("Tab");
+
+  const contrast = await page.evaluate(() => {
+    const parse = (color: string) => color.match(/[\d.]+/g)!.slice(0, 3).map(Number);
+    const luminance = (color: string) => {
+      const channels = parse(color).map((value) => {
+        const normalized = value / 255;
+        return normalized <= 0.04045 ? normalized / 12.92 : ((normalized + 0.055) / 1.055) ** 2.4;
+      });
+      return 0.2126 * channels[0]! + 0.7152 * channels[1]! + 0.0722 * channels[2]!;
+    };
+    const ratio = (foreground: string, background: string) => {
+      const [lighter, darker] = [luminance(foreground), luminance(background)].sort((a, b) => b - a);
+      return (lighter! + 0.05) / (darker! + 0.05);
+    };
+    const nav = document.querySelector<HTMLElement>('.bottom-nav a[aria-current="page"]')!;
+    const disclosure = document.querySelector<HTMLElement>(".runtime-disclosure summary")!;
+    nav.focus();
+    const navStyle = getComputedStyle(nav);
+    const navColor = navStyle.outlineColor;
+    const navContrast = ratio(navColor, getComputedStyle(nav.closest(".bottom-nav")!).backgroundColor);
+    disclosure.focus();
+    const disclosureStyle = getComputedStyle(disclosure);
+    const disclosureColor = disclosureStyle.outlineColor;
+    const disclosureContrast = ratio(disclosureColor, getComputedStyle(disclosure.closest(".ingredient-rail")!).backgroundColor);
+    const choice = document.querySelector<HTMLInputElement>(".choice-tile input")!;
+    choice.focus();
+    const choiceColor = getComputedStyle(choice).outlineColor;
+    const choiceContrast = ratio(choiceColor, getComputedStyle(choice.closest(".choice-tile")!).backgroundColor);
+    return { navColor, disclosureColor, choiceColor, navContrast, disclosureContrast, choiceContrast };
+  });
+
+  expect(contrast.navColor).toBe("rgb(244, 208, 111)");
+  expect(contrast.disclosureColor).toBe("rgb(244, 208, 111)");
+  expect(contrast.choiceColor).toBe("rgb(36, 68, 94)");
+  expect(contrast.navContrast).toBeGreaterThanOrEqual(3);
+  expect(contrast.disclosureContrast).toBeGreaterThanOrEqual(3);
+  expect(contrast.choiceContrast).toBeGreaterThanOrEqual(3);
+});
+
+test("abandoned guest and player projections start a canonical fresh run without replacing authority", async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== "desktop", "terminal authority preservation is covered once");
+  for (const identity of ["guest", "player"] as const) {
+    const fixture = serviceFixture();
+    fixture.setIdentity(identity);
+    await page.unrouteAll({ behavior: "ignoreErrors" });
+    await fixture.install(page);
+    await page.goto("/");
+    await page.locator(".perform-action .primary-action").click();
+    await page.getByRole("button", { name: "End shift early" }).click();
+    await page.getByRole("dialog", { name: "End this shift early?" }).getByRole("button", { name: "End shift" }).click();
+    await expect(page.getByText("Service abandoned", { exact: true })).toBeVisible();
+    const abandoned = fixture.checkpoint();
+    const continuation = page.getByRole("button", { name: "Start a fresh shift" });
+    await expect(continuation).toBeEnabled();
+    fixture.setDropNextAfterCommit();
+    await continuation.click();
+    await expect.poll(() => fixture.bodies.filter((body) => JSON.parse(body).commandName === "service.start-new").length).toBe(2);
+    await expect(page.locator("header").getByText(identity === "guest" ? "Guest play · no wallet" : "Saved play · no wallet", { exact: true })).toBeVisible();
+    await expect(page.getByRole("heading", { name: /wash/i })).toBeVisible();
+    expect(fixture.checkpoint()).toMatchObject({ phase: "OPEN", generation: abandoned.generation + 1, revision: abandoned.revision + 1,
+      storyFlags: abandoned.storyFlags, unlocks: abandoned.unlocks });
+    const startBodies = fixture.bodies.filter((body) => JSON.parse(body).commandName === "service.start-new");
+    expect(startBodies[1]).toBe(startBodies[0]);
+    expect(JSON.parse(startBodies[0]!)).toMatchObject({ expectedRevision: abandoned.revision, commandName: "service.start-new", payload: {} });
+    expect(fixture.requests.filter((path) => path === "/api/account/cookies/reset" || path === "/api/account/guest/issue")).toEqual([]);
+  }
+});
+
+test("two abandoned tabs admit one new generation and converge without cookie recovery", async ({ context, page }, testInfo) => {
+  test.skip(testInfo.project.name !== "desktop", "fresh-run contention is covered once");
+  const abandoned = (compiledFirstEveningService.abandonmentReplay.at(-1) as { readonly response: { readonly checkpoint: EveningServiceCheckpoint } }).response.checkpoint;
+  const fixture = serviceFixture(abandoned);
+  const second = await context.newPage();
+  await fixture.install(page);
+  await fixture.install(second);
+  await Promise.all([page.goto("/"), second.goto("/")]);
+  await Promise.all([
+    expect(page.getByText("Service abandoned", { exact: true })).toBeVisible(),
+    expect(second.getByText("Service abandoned", { exact: true })).toBeVisible(),
+  ]);
+  await Promise.all([
+    page.getByRole("button", { name: "Start a fresh shift" }).click(),
+    second.getByRole("button", { name: "Start a fresh shift" }).click(),
+  ]);
+  await Promise.all([
+    expect(page.getByRole("heading", { name: /wash/i })).toBeVisible(),
+    expect(second.getByRole("heading", { name: /wash/i })).toBeVisible(),
+  ]);
+  expect(fixture.checkpoint()).toMatchObject({ phase: "OPEN", generation: abandoned.generation + 1, revision: abandoned.revision + 1 });
+  const bodies = fixture.bodies.filter((body) => JSON.parse(body).commandName === "service.start-new");
+  expect(new Set(bodies.map((body) => JSON.parse(body).idempotencyKey)).size).toBe(2);
+  expect(fixture.requests.filter((path) => path === "/api/account/cookies/reset" || path === "/api/account/guest/issue")).toEqual([]);
 });
 
 test("every canonical revision reloads from the server with no replay ceremony", async ({ page }, testInfo) => {

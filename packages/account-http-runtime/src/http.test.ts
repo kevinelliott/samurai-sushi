@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
-import { ACCOUNT_CLAIM_REAUTH_REQUIRED, ACCOUNT_PLAYER_DELETE_PUBLIC_FAILURE } from "@samurai-sushi/persistence";
+import { ACCOUNT_CLAIM_REAUTH_REQUIRED, ACCOUNT_PLAYER_DELETE_PUBLIC_FAILURE, CommandAuthenticationError, GuestRotationRequiredError } from "@samurai-sushi/persistence";
 import { createInitialEveningServiceCheckpoint } from "@samurai-sushi/domain/evening-service";
 import { ACCOUNT_COOKIE_NAMES } from "./cookies";
 import { ACCOUNT_ROUTE_PATHS, MAX_JSON_BODY_BYTES, type AccountRouteId } from "./contract";
@@ -118,8 +118,8 @@ describe("account HTTP boundary", () => {
     expect(issue).toHaveBeenCalledWith(expect.objectContaining({
       consentVersion: "first-service-browser-v1",
       contentVersion: "phase-1-evening-service-v1",
-      checkpointSchemaVersion: 1,
-      checkpoint: expect.objectContaining({ phase: "IDLE", revision: 0 }),
+      checkpointSchemaVersion: 2,
+      checkpoint: expect.objectContaining({ phase: "IDLE", revision: 0, generation: 0 }),
     }));
 
     const rejected = await handleAccountHttpRequest("guest.issue", request("guest.issue", JSON.stringify({
@@ -281,6 +281,37 @@ describe("account HTTP boundary", () => {
     expect(playerRuntime.evening!.query).toHaveBeenCalledWith({ kind: "player", sessionSecret: playerSecret });
   });
 
+  it("maps an invalid credential to one privacy-safe service authentication response", async () => {
+    const error = new CommandAuthenticationError();
+    const runtime = services({ evening: { query: vi.fn(async () => { throw error; }) } });
+    const result = await handleAccountHttpRequest("service.query", request("service.query", "{}", cookie("guest")), runtime, config);
+    expect(result.status).toBe(401);
+    expect(result.headers.has("set-cookie")).toBe(false);
+    expect(await result.json()).toEqual({ code: "SERVICE_AUTHORITY_REJECTED", message: "Service access could not be authenticated." });
+  });
+
+  it("refreshes a rotation-due guest without replacing its subject authority", async () => {
+    const runtime = services({
+      evening: { query: vi.fn(async () => { throw new GuestRotationRequiredError(); }) },
+      guests: { resume: vi.fn(async () => ({ session: { id: "guest-id-0000001", expiresAt: new Date("2026-09-01T00:00:00.000Z") }, credentialKind: "current", rotatedResumeSecret: replacementSecret })) },
+    });
+    const result = await handleAccountHttpRequest("service.query", request("service.query", "{}", cookie("guest", "claim")), runtime, config);
+    expect(result.status).toBe(428);
+    expect(result.headers.get("set-cookie")).toContain("__Host-samurai-guest=");
+    expect(runtime.guests.resume).toHaveBeenCalledWith(guestSecret);
+    expect(runtime.guests.issue).not.toHaveBeenCalled();
+    expect(await result.json()).toEqual({ code: "SERVICE_CREDENTIAL_REFRESHED", message: "Service access was refreshed. Requery the saved service." });
+  });
+
+  it("keeps service body errors and repository conflicts distinct from authentication", async () => {
+    const malformed = await handleAccountHttpRequest("service.command", request("service.command", "{}", cookie("guest")), services(), config);
+    expect(malformed.status).toBe(400);
+    const conflict = await handleAccountHttpRequest("service.query", request("service.query", "{}", cookie("guest")),
+      services({ evening: { query: vi.fn(async () => { throw new Error("hostile-conflict-marker"); }) } }), config);
+    expect(conflict.status).toBe(409);
+    expect(await conflict.json()).toEqual({ code: "SERVICE_REQUEST_REJECTED", message: "The saved service could not be updated." });
+  });
+
   it.each(["subjectKind", "guestId", "playerId", "account", "publicKey", "signature", "claimId", "chainId", "origin", "clock", "rngSeed", "keyVersion"])(
     "rejects forbidden gameplay authority field %s before repository work",
     async (field) => {
@@ -333,7 +364,12 @@ describe("account HTTP boundary", () => {
         const key = [...kinds].sort().join(",");
         const result = await handleAccountHttpRequest(operation,
           request(operation, bodies[operation], cookie(...kinds)), services(), config);
-        expect(result.status, `${operation} with ${key || "no authority"}`).toBe(allowed[operation].includes(key) ? 200 : 400);
+        const expected = allowed[operation].includes(key) ? 200
+          : operation === "service.query" || operation === "service.command" ? 401 : 400;
+        expect(result.status, `${operation} with ${key || "no authority"}`).toBe(expected);
+        if (expected === 401 && operation.startsWith("service.")) {
+          expect(await result.json()).toEqual({ code: "SERVICE_AUTHORITY_REJECTED", message: "Service access could not be authenticated." });
+        }
       }
     }
   });

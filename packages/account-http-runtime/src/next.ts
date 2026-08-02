@@ -15,7 +15,10 @@ const runtimeGlobal = globalThis as RuntimeGlobal;
 
 function configIdentity(config: AccountRuntimeConfig): string {
   return [config.canonicalOrigin, config.chainId, config.databaseUrl, config.rawHeaderGuard,
-    ...Object.values(config.keys).map((key) => `${key.version}:${key.keyIdentity}:${key.activatedAt.toISOString()}`)].join("|");
+    ...Object.values(config.keys).map((key) => `${key.version}:${key.keyIdentity}:${key.activatedAt.toISOString()}`),
+    ...config.resumeVerificationKeys.map((key) => [key.version, key.keyIdentity, key.activatedAt.toISOString(),
+      key.retiredAt?.toISOString() ?? "", key.verifyUntil?.toISOString() ?? "", key.compromisedAt?.toISOString() ?? ""].join(":")),
+  ].join("|");
 }
 
 function unavailable(): Response {

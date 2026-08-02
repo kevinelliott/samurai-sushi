@@ -9,6 +9,10 @@ body { margin:0; color:var(--sumi); background:var(--washi); font-family:ui-sans
 button,a,input,summary { font:inherit; }
 button { color:inherit; }
 button:focus-visible,a:focus-visible,input:focus-visible,summary:focus-visible,[tabindex="-1"]:focus-visible { outline:3px solid var(--indigo); outline-offset:3px; }
+.counter-header > :is(button,a,input,summary):focus-visible,
+.order-rail > :is(button,a,input,summary):focus-visible,
+.runtime-disclosure > summary:focus-visible,
+.bottom-nav :is(button,a,input,summary):focus-visible { outline-color:var(--focus); }
 .counter-shell { min-width:0; width:100%; max-width:100%; min-height:100svh; display:grid; grid-template-rows:auto 1fr auto; }
 .counter-header { min-width:0; width:100%; max-width:100%; min-height:74px; padding:12px clamp(16px,3vw,40px); display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:20px; color:var(--rice); background:var(--sumi); border-bottom:4px solid var(--brass); }
 .wordmark,.identity-plaque { display:flex; align-items:center; gap:12px; }

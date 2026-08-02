@@ -253,13 +253,27 @@ export class EveningServiceAuthority {
   }
 
   async #authenticatePlayer(client: SqlClient, sessionSecret: string): Promise<AuthenticatedSubject> {
-    const initial = await this.accounts.lockActivePlayerSessionForService(client, sessionSecret);
+    const isPlayerAuthenticationFailure = (error: unknown): boolean => Boolean(error && typeof error === "object"
+      && ["PLAYER_SESSION_INVALID", "PLAYER_SESSION_REPLAY"].includes(String((error as { readonly code?: unknown }).code)));
+    let initial;
+    try {
+      initial = await this.accounts.lockActivePlayerSessionForService(client, sessionSecret);
+    } catch (error) {
+      if (isPlayerAuthenticationFailure(error)) throw new CommandAuthenticationError();
+      throw error;
+    }
     return {
       subject: { kind: "player", playerId: initial.playerId },
       subjectKind: "player",
       subjectId: initial.playerId,
       revalidate: async (revalidationClient) => {
-        const fresh = await this.accounts.lockActivePlayerSessionForService(revalidationClient, sessionSecret);
+        let fresh;
+        try {
+          fresh = await this.accounts.lockActivePlayerSessionForService(revalidationClient, sessionSecret);
+        } catch (error) {
+          if (isPlayerAuthenticationFailure(error)) throw new CommandAuthenticationError();
+          throw error;
+        }
         if (fresh.playerId !== initial.playerId || fresh.sessionId !== initial.sessionId) throw new CommandAuthenticationError();
         return fresh.now;
       },

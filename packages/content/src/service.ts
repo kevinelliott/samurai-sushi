@@ -69,11 +69,13 @@ export interface CompiledFirstServiceContent {
   readonly replayHash: string;
   readonly correctiveReplayHash: string;
   readonly abandonmentReplayHash: string;
+  readonly newRunReplayHash: string;
   readonly terminalReplayHash: string;
   readonly source: FirstServiceContentSource;
   readonly goldenReplay: readonly JsonObject[];
   readonly correctiveReplay: readonly JsonObject[];
   readonly abandonmentReplay: readonly JsonObject[];
+  readonly newRunReplay: readonly JsonObject[];
   readonly terminalReplay: readonly JsonObject[];
   readonly projectionManifest: EveningServiceProjectionManifest;
 }
@@ -284,6 +286,25 @@ export function buildFirstServiceAbandonmentReplay(): readonly JsonObject[] {
   return replay;
 }
 
+export function buildFirstServiceNewRunReplay(): readonly JsonObject[] {
+  const replay = buildReplayVector([
+    ["service.start", {}],
+    ["service.prepare-rice", { beat: "wash" }],
+    ["service.abandon", {}],
+    ["service.start-new", {}],
+  ], 950);
+  const abandoned = (replay.at(-2) as { response: { checkpoint: EveningServiceCheckpoint } }).response.checkpoint;
+  const restarted = (replay.at(-1) as { response: { checkpoint: EveningServiceCheckpoint } }).response.checkpoint;
+  if (abandoned.phase !== "ABANDONED" || restarted.phase !== "OPEN" || restarted.generation !== abandoned.generation + 1
+    || restarted.revision !== abandoned.revision + 1 || restarted.riceBeatIndex !== 0 || restarted.activeOrderIndex !== 0
+    || restarted.presentationChoice !== null || restarted.restorationChoice !== null
+    || restarted.orders.some((order) => order.state !== "OFFERED" || order.stepIndex !== 0)
+    || restarted.components.some((row) => row.placed !== 0 || row.served !== 0 || row.discarded !== 0)) {
+    fail("new-run replay must advance generation and reset only the run-scoped service graph");
+  }
+  return replay;
+}
+
 export function buildFirstServiceTerminalReplay(goldenReplay: readonly JsonObject[]): readonly JsonObject[] {
   const settlement = goldenReplay.at(-1)!;
   const response = (settlement as { response: { checkpoint: EveningServiceCheckpoint; settledNow: boolean; unlockedNow: readonly string[] } }).response;
@@ -341,9 +362,9 @@ export function compileFirstServiceContent(input: unknown): CompiledFirstService
   const runtimeRefs = [
     "cue.abandon.invalid", "cue.ledger.orders-incomplete", "cue.orders.complete", "cue.orders.served", "cue.presentation.invalid",
     "cue.restoration.invalid", "cue.rice.complete", "cue.rice.expected.season", "cue.rice.expected.steam", "cue.rice.expected.wash",
-    "cue.service.complete", "cue.start.invalid", "feedback.ledger.closed", "feedback.presentation.indigo-rim",
+    "cue.service.complete", "cue.start-new.invalid", "cue.start.invalid", "feedback.ledger.closed", "feedback.presentation.indigo-rim",
     "feedback.presentation.sand-speckle", "feedback.rice.season.saved", "feedback.rice.steam.saved", "feedback.rice.wash.saved",
-    "feedback.service.abandoned", "feedback.service.opened", "feedback.service.settled", "prompt.presentation.choose",
+    "feedback.service.abandoned", "feedback.service.new-shift", "feedback.service.opened", "feedback.service.settled", "prompt.presentation.choose",
     ...source.serviceDefinition.orders.flatMap((order) => [
       `cue.order.accept.${order.id}`, `cue.order.expected.${order.id}`, `cue.plate.required.${order.id}`, `cue.serve.required.${order.id}`,
     ]),
@@ -358,6 +379,7 @@ export function compileFirstServiceContent(input: unknown): CompiledFirstService
   const goldenReplay = buildFirstServiceGoldenReplay();
   const correctiveReplay = buildFirstServiceCorrectiveReplay();
   const abandonmentReplay = buildFirstServiceAbandonmentReplay();
+  const newRunReplay = buildFirstServiceNewRunReplay();
   const terminalReplay = buildFirstServiceTerminalReplay(goldenReplay);
   const semanticRefs = [
     "dish.kappa-maki", "dish.salmon-nigiri", "dish.tamago-nigiri", "guest.ceramicist", "guest.courier", "guest.fishmonger",
@@ -384,11 +406,13 @@ export function compileFirstServiceContent(input: unknown): CompiledFirstService
     replayHash: contentHashFor(goldenReplay),
     correctiveReplayHash: contentHashFor(correctiveReplay),
     abandonmentReplayHash: contentHashFor(abandonmentReplay),
+    newRunReplayHash: contentHashFor(newRunReplay),
     terminalReplayHash: contentHashFor(terminalReplay),
     source,
     goldenReplay,
     correctiveReplay,
     abandonmentReplay,
+    newRunReplay,
     terminalReplay,
     projectionManifest,
   });
@@ -416,6 +440,7 @@ export const firstEveningServiceSource: FirstServiceContentSource = deepFreeze({
   firstServiceCatalog,
   salmonSashimiUnlockCatalog,
   copy: [
+    copy("action.service.start-new", "Start a fresh shift"),
     copy("action.service.abandon", "End shift early"),
     copy("action.presentation.indigo-rim", "Use the double-rim plate"),
     copy("action.presentation.sand-speckle", "Use the speckled-field plate"),
@@ -445,6 +470,7 @@ export const firstEveningServiceSource: FirstServiceContentSource = deepFreeze({
     copy("cue.serve.required.courier-salmon", "Plate the salmon nigiri before serving it."),
     copy("cue.serve.required.fishmonger-tamago", "Plate the tamago nigiri before serving it."),
     copy("cue.service.complete", "This service is already complete."),
+    copy("cue.start-new.invalid", "Start a fresh shift only after the current shift closes early."),
     copy("cue.start.invalid", "Open the service only from the idle ledger."),
     copy("cue.step.ceramicist-kappa.cut-kappa", "Cut the completed roll only after rolling it."),
     copy("cue.step.ceramicist-kappa.layer-nori", "Layer nori on the rolling mat first."),
@@ -475,6 +501,7 @@ export const firstEveningServiceSource: FirstServiceContentSource = deepFreeze({
     copy("feedback.rice.steam.saved", "The steaming beat is saved."),
     copy("feedback.rice.wash.saved", "The washing beat is saved."),
     copy("feedback.service.abandoned", "Shift closed early without settlement or unlocks."),
+    copy("feedback.service.new-shift", "A fresh shift is open on the same saved service."),
     copy("feedback.service.opened", "The counter is open for the first service."),
     copy("feedback.service.settled", "The counter is restored and salmon sashimi is now available."),
     copy("guest.ceramicist.dialogue", "The ceramicist asks for the authored cucumber roll."),

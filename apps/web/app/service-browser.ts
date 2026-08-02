@@ -6,6 +6,14 @@ export const SERVICE_QUERY_PATH = "/api/account/service";
 export const SERVICE_COMMAND_PATH = "/api/account/service/command";
 export const COOKIE_RESET_PATH = "/api/account/cookies/reset";
 export const GUEST_ISSUE_PATH = "/api/account/guest/issue";
+const SERVICE_AUTHORITY_REJECTION = Object.freeze({
+  code: "SERVICE_AUTHORITY_REJECTED",
+  message: "Service access could not be authenticated.",
+});
+const SERVICE_CREDENTIAL_REFRESHED = Object.freeze({
+  code: "SERVICE_CREDENTIAL_REFRESHED",
+  message: "Service access was refreshed. Requery the saved service.",
+});
 
 export type ServicePhase = "IDLE" | "OPEN" | "CLOSING" | "SETTLED" | "ABANDONED";
 export type ServiceDisposition = "query" | "committed" | "replayed" | "restored";
@@ -69,6 +77,7 @@ export interface ServiceView {
   readonly schemaVersion: 1;
   readonly contentVersion: "phase-1-evening-service-v1";
   readonly revision: number;
+  readonly generation: number;
   readonly identity: "guest" | "player";
   readonly identityLabel: "Guest play · no wallet" | "Saved play · no wallet";
   readonly phase: ServicePhase;
@@ -103,8 +112,24 @@ const SCENE_ANCHORS = FIRST_SERVICE_BROWSER_INVENTORY.sceneAnchors as Readonly<R
 const ORDER_STATUS_REFS = new Set<string>(FIRST_SERVICE_BROWSER_INVENTORY.orderStatusRefs);
 const ORDER_IDS = FIRST_SERVICE_BROWSER_INVENTORY.orderIds as readonly string[];
 const ORDER_BINDINGS = FIRST_SERVICE_BROWSER_INVENTORY.orderBindings as Readonly<Record<string, { readonly guestRef: string; readonly dishRef: string }>>;
+const LEDGER_BINDINGS = FIRST_SERVICE_BROWSER_INVENTORY.ledgerBindings as Readonly<Record<string, {
+  readonly guestRef: string; readonly dishRef: string; readonly outcomeRef: string; readonly plateFeedbackRef: string;
+  readonly serveFeedbackRef: string; readonly storyFlagRef: string; readonly consequenceRef: string;
+}>>;
 const COMMANDS = new Set<string>(FIRST_SERVICE_BROWSER_INVENTORY.commandNames);
 const PROMPT_COMMANDS = FIRST_SERVICE_BROWSER_INVENTORY.promptCommands as Readonly<Record<string, string>>;
+interface PromptViewSpec {
+  readonly phase: ServicePhase;
+  readonly choices: readonly { readonly id: string; readonly labelRef: string; readonly actionLabelRef: string; readonly commandName: string; readonly payload: Readonly<Record<string, unknown>>; readonly assetKey: string | null }[];
+  readonly facts: readonly string[];
+  readonly orders: readonly { readonly orderId: string; readonly statusRef: string; readonly stepIndex: number; readonly stepTotal: number; readonly active: boolean; readonly portraitKey: string; readonly dishAssetKey: string }[];
+  readonly ledgerOrderIds: readonly string[];
+  readonly sceneKey: string;
+  readonly sceneLayers: readonly { readonly assetKey: string; readonly x: number; readonly y: number }[];
+  readonly restorationKey: string | null;
+  readonly unlockKey: string;
+}
+const PROMPT_VIEWS = FIRST_SERVICE_BROWSER_INVENTORY.promptViews as Readonly<Record<string, PromptViewSpec>>;
 const STEPS = FIRST_SERVICE_BROWSER_INVENTORY.steps as Readonly<Record<string, readonly string[]>>;
 
 function deepFreeze<T>(value: T): T {
@@ -207,6 +232,7 @@ function validChoice(choiceItem: ViewChoice, activeOrderId: string | null): bool
   const value = choiceItem.payload;
   switch (choiceItem.commandName) {
     case "service.start":
+    case "service.start-new":
     case "service.close-ledger": return choiceItem.id === "primary" && exactPayload(value, []);
     case "service.prepare-rice": return exactPayload(value, ["beat"]) && value.beat === choiceItem.id && FIRST_SERVICE_BROWSER_INVENTORY.riceBeats.includes(choiceItem.id as never);
     case "service.accept-order": return exactPayload(value, ["orderId"]) && value.orderId === choiceItem.id && ORDER_IDS.includes(choiceItem.id);
@@ -220,9 +246,68 @@ function validChoice(choiceItem: ViewChoice, activeOrderId: string | null): bool
   }
 }
 
+function sameJson(left: unknown, right: unknown): boolean {
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+
+function choiceMatchesSpec(actual: ViewChoice, expected: PromptViewSpec["choices"][number]): boolean {
+  return actual.id === expected.id && actual.label.ref === expected.labelRef && actual.actionLabel.ref === expected.actionLabelRef
+    && actual.commandName === expected.commandName && sameJson(actual.payload, expected.payload)
+    && (actual.asset?.key ?? null) === expected.assetKey;
+}
+
+function orderMatchesSpec(actual: ViewOrder, expected: PromptViewSpec["orders"][number]): boolean {
+  return actual.orderId === expected.orderId && actual.status.ref === expected.statusRef && actual.stepIndex === expected.stepIndex
+    && actual.stepTotal === expected.stepTotal && actual.active === expected.active && actual.portrait.key === expected.portraitKey
+    && actual.dishAsset.key === expected.dishAssetKey;
+}
+
+function ledgerMatchesBinding(row: ViewLedgerRow): boolean {
+  const expected = LEDGER_BINDINGS[row.orderId];
+  return Boolean(expected && row.guest.ref === expected.guestRef && row.dish.ref === expected.dishRef
+    && row.outcome.ref === expected.outcomeRef && row.plateFeedback.ref === expected.plateFeedbackRef
+    && row.serveFeedback.ref === expected.serveFeedbackRef && row.storyFlag.ref === expected.storyFlagRef
+    && row.consequence.ref === expected.consequenceRef);
+}
+
+function normalizeVariantFact(ref: string): string {
+  if (FIRST_SERVICE_BROWSER_INVENTORY.presentationChoices.some((choiceId) => ref === `presentation.${choiceId}`)) return "presentation.indigo-rim";
+  if (FIRST_SERVICE_BROWSER_INVENTORY.restorationChoices.some((choiceId) => ref === `restoration.${choiceId}`)) return "restoration.mend-counter-stool";
+  return ref;
+}
+
+function factsMatchSpec(actual: readonly ViewCopy[], expected: readonly string[]): boolean {
+  return sameJson(actual.map((item) => normalizeVariantFact(item.ref)), expected.map(normalizeVariantFact));
+}
+
+function abandonedShapeIsExact(orders: readonly ViewOrder[], ledgerRows: readonly ViewLedgerRow[], facts: readonly ViewCopy[]): boolean {
+  const servedCount = ledgerRows.length;
+  if (servedCount > ORDER_IDS.length || ledgerRows.some((row, index) => row.orderId !== ORDER_IDS[index] || !ledgerMatchesBinding(row))) return false;
+  const discarded = PROMPT_VIEWS["prompt.service.abandoned"]?.orders;
+  const served = PROMPT_VIEWS["prompt.service.settled"]?.orders;
+  if (!discarded || !served) return false;
+  for (const [index, orderItem] of orders.entries()) {
+    const expected = index < servedCount ? served[index] : discarded[index];
+    if (!expected || orderItem.orderId !== expected.orderId || orderItem.status.ref !== expected.statusRef || orderItem.stepTotal !== expected.stepTotal
+      || orderItem.active || orderItem.portrait.key !== expected.portraitKey || orderItem.dishAsset.key !== expected.dishAssetKey) return false;
+    if (index < servedCount && orderItem.stepIndex !== orderItem.stepTotal) return false;
+    if (index > servedCount && orderItem.stepIndex !== 0) return false;
+  }
+  const expectedFacts = ["service.first-evening", "phase.abandoned"];
+  for (const row of ledgerRows) {
+    const binding = LEDGER_BINDINGS[row.orderId]!;
+    expectedFacts.push(binding.guestRef, binding.dishRef, binding.outcomeRef, binding.plateFeedbackRef,
+      binding.serveFeedbackRef, binding.storyFlagRef, binding.consequenceRef);
+  }
+  const presentation = facts.map((item) => item.ref).filter((ref) => ref.startsWith("presentation."));
+  if (presentation.length > 1) return false;
+  expectedFacts.push(...presentation);
+  return factsMatchSpec(facts, expectedFacts);
+}
+
 export function decodeServiceResponse(value: unknown): ServiceView {
   const outer = record(value, ["view"], "$response");
-  const row = record(outer.view, ["schemaVersion", "contentVersion", "revision", "identity", "identityLabel", "phase", "prompt", "correctiveCue", "facts", "choices", "abandonChoice", "orders", "ledgerRows", "scene", "sceneLayers", "restoration", "unlock", "disposition", "announceCeremony"], "$response.view");
+  const row = record(outer.view, ["schemaVersion", "contentVersion", "revision", "generation", "identity", "identityLabel", "phase", "prompt", "correctiveCue", "facts", "choices", "abandonChoice", "orders", "ledgerRows", "scene", "sceneLayers", "restoration", "unlock", "disposition", "announceCeremony"], "$response.view");
   if (row.schemaVersion !== 1 || row.contentVersion !== "phase-1-evening-service-v1" || !["guest", "player"].includes(row.identity as string)
     || (row.identity === "guest" ? row.identityLabel !== "Guest play · no wallet" : row.identityLabel !== "Saved play · no wallet")
     || !["IDLE", "OPEN", "CLOSING", "SETTLED", "ABANDONED"].includes(row.phase as string)
@@ -235,24 +320,67 @@ export function decodeServiceResponse(value: unknown): ServiceView {
   const abandonChoice = row.abandonChoice === null ? null : choice(row.abandonChoice, "$response.view.abandonChoice");
   const prompt = copy(row.prompt, "$response.view.prompt");
   const phase = row.phase as ServicePhase;
+  const generation = safeInteger(row.generation, "$response.view.generation");
   const activeOrder = orders.find((item) => item.active)?.orderId ?? null;
   const expectedCommand = PROMPT_COMMANDS[prompt.ref];
+  const promptView = PROMPT_VIEWS[prompt.ref];
+  const scene = asset(row.scene, "$response.view.scene");
+  const restoration = row.restoration === null ? null : asset(row.restoration, "$response.view.restoration");
+  const unlock = asset(row.unlock, "$response.view.unlock");
+  const correctiveCue = row.correctiveCue === null ? null : copy(row.correctiveCue, "$response.view.correctiveCue");
+  const exactAbandonChoice = abandonChoice === null || (abandonChoice.id === "abandon"
+    && abandonChoice.label.ref === "action.service.abandon" && abandonChoice.actionLabel.ref === "action.service.abandon"
+    && abandonChoice.commandName === "service.abandon" && sameJson(abandonChoice.payload, {}) && abandonChoice.asset === null);
+  const exactPromptShape = Boolean(promptView && phase === promptView.phase
+    && choices.length === promptView.choices.length && choices.every((item, index) => choiceMatchesSpec(item, promptView.choices[index]!))
+    && (phase === "ABANDONED" ? abandonedShapeIsExact(orders, ledgerRows, facts)
+      : orders.length === promptView.orders.length && orders.every((item, index) => orderMatchesSpec(item, promptView.orders[index]!))
+        && sameJson(ledgerRows.map((item) => item.orderId), promptView.ledgerOrderIds) && factsMatchSpec(facts, promptView.facts)));
+  const disposition = row.disposition as ServiceDisposition;
+  const exactCeremony = row.announceCeremony === (disposition === "committed" && correctiveCue === null)
+    && (!["query", "restored"].includes(disposition) || correctiveCue === null);
+  const exactScene = scene.key === promptView?.sceneKey && (phase === "SETTLED"
+    ? Boolean(restoration && FIRST_SERVICE_BROWSER_INVENTORY.restorationChoices.some((choiceId) => restoration.key === `restoration-${choiceId.replace("mend-counter-stool", "counter-stool").replace("polish-display-shelf", "display-shelf").replace("refresh-menu-board", "menu-board")}`)
+      && sceneLayers.length === 2 && sceneLayers[1]?.asset.key === restoration.key)
+    : restoration === null && sceneLayers.length === 1)
+    && (phase === "SETTLED" ? unlock.key === "dish-salmon-sashimi" : ["dish-salmon-sashimi-locked", "dish-salmon-sashimi"].includes(unlock.key));
   if (orders.length !== 3 || orders.some((item, index) => item.orderId !== ORDER_IDS[index]
     || item.guest.ref !== ORDER_BINDINGS[item.orderId]?.guestRef || item.dish.ref !== ORDER_BINDINGS[item.orderId]?.dishRef)
+    || !exactPromptShape || !exactCeremony || !exactScene || (phase === "IDLE" && generation !== 0)
     || new Set(choices.map((item) => item.id)).size !== choices.length || choices.some((item) => !validChoice(item, activeOrder))
     || (choices.length > 0 && (!expectedCommand || choices.some((item) => item.commandName !== expectedCommand)))
-    || (["SETTLED", "ABANDONED"].includes(phase) ? choices.length !== 0 : choices.length === 0)
-    || (["OPEN", "CLOSING"].includes(phase) ? !abandonChoice || !validChoice(abandonChoice, activeOrder) : abandonChoice !== null)
+    || (phase === "SETTLED" ? choices.length !== 0 : choices.length === 0)
+    || !exactAbandonChoice || (["OPEN", "CLOSING"].includes(phase) ? !abandonChoice || !validChoice(abandonChoice, activeOrder) : abandonChoice !== null)
     || orders.filter((item) => item.active).length > 1 || (phase !== "OPEN" && activeOrder !== null)
     || sceneLayers.length < 1 || sceneLayers.some((layer) => {
       const expected = SCENE_ANCHORS[layer.asset.key];
       return !expected || expected[0] !== layer.x || expected[1] !== layer.y;
     }) || sceneLayers[0]?.asset.key !== "counter-lamp-lit"
     || (row.restoration === null ? sceneLayers.length !== 1 : sceneLayers.length !== 2 || sceneLayers[1]?.asset.key !== (row.restoration as Record<string, unknown>).key)
-    || ledgerRows.some((item) => !ORDER_IDS.includes(item.orderId) || item.guest.ref !== ORDER_BINDINGS[item.orderId]?.guestRef || item.dish.ref !== ORDER_BINDINGS[item.orderId]?.dishRef)) {
+    || ledgerRows.some((item) => !ORDER_IDS.includes(item.orderId) || !ledgerMatchesBinding(item))) {
     throw new Error("$response.view unavailable");
   }
-  return deepFreeze({ schemaVersion: 1, contentVersion: "phase-1-evening-service-v1", revision: safeInteger(row.revision, "$response.view.revision"), identity: row.identity as "guest" | "player", identityLabel: row.identityLabel as ServiceView["identityLabel"], phase, prompt, correctiveCue: row.correctiveCue === null ? null : copy(row.correctiveCue, "$response.view.correctiveCue"), facts, choices, abandonChoice, orders, ledgerRows, scene: asset(row.scene, "$response.view.scene"), sceneLayers, restoration: row.restoration === null ? null : asset(row.restoration, "$response.view.restoration"), unlock: asset(row.unlock, "$response.view.unlock"), disposition: row.disposition as ServiceDisposition, announceCeremony: row.announceCeremony });
+  return deepFreeze({ schemaVersion: 1, contentVersion: "phase-1-evening-service-v1", revision: safeInteger(row.revision, "$response.view.revision"), generation, identity: row.identity as "guest" | "player", identityLabel: row.identityLabel as ServiceView["identityLabel"], phase, prompt, correctiveCue, facts, choices, abandonChoice, orders, ledgerRows, scene, sceneLayers, restoration, unlock, disposition, announceCeremony: row.announceCeremony });
+}
+
+export async function isServiceAuthorityRejection(response: Response): Promise<boolean> {
+  if (response.status !== 401) return false;
+  try {
+    const row = record(await response.json(), ["code", "message"], "$response");
+    return row.code === SERVICE_AUTHORITY_REJECTION.code && row.message === SERVICE_AUTHORITY_REJECTION.message;
+  } catch {
+    return false;
+  }
+}
+
+export async function isServiceCredentialRefreshed(response: Response): Promise<boolean> {
+  if (response.status !== 428) return false;
+  try {
+    const row = record(await response.json(), ["code", "message"], "$response");
+    return row.code === SERVICE_CREDENTIAL_REFRESHED.code && row.message === SERVICE_CREDENTIAL_REFRESHED.message;
+  } catch {
+    return false;
+  }
 }
 
 export function createIntentEnvelope(view: ServiceView, choice: ViewChoice): IntentEnvelope {

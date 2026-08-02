@@ -33,4 +33,19 @@ describe("server-only account runtime configuration", () => {
     source.SAMURAI_ALLOW_LOOPBACK_HTTP = "true";
     expect(loadAccountRuntimeConfig(source).canonicalOrigin).toBe("http://127.0.0.1:3000");
   });
+
+  it("admits one exact verification-only resume key only as a complete lifecycle tuple", () => {
+    const source: NodeJS.ProcessEnv = {
+      ...environment(),
+      SAMURAI_HMAC_RESUME_KEY: Buffer.alloc(32, 19).toString("base64url"),
+      SAMURAI_HMAC_RESUME_PREVIOUS_KEY: key,
+      SAMURAI_HMAC_RESUME_PREVIOUS_RETIRED_AT: "2026-08-01T12:00:00.000Z",
+      SAMURAI_HMAC_RESUME_PREVIOUS_VERIFY_UNTIL: "2026-09-01T00:00:00.000Z",
+    };
+    const config = loadAccountRuntimeConfig(source);
+    expect(config.keys.resume.version).toBe(2);
+    expect(config.resumeVerificationKeys).toMatchObject([{ version: 1 }]);
+    delete source.SAMURAI_HMAC_RESUME_PREVIOUS_VERIFY_UNTIL;
+    expect(() => loadAccountRuntimeConfig(source)).toThrow(RuntimeConfigurationError);
+  });
 });

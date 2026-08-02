@@ -8,6 +8,8 @@ import {
   SERVICE_QUERY_PATH,
   createIntentEnvelope,
   decodeServiceResponse,
+  isServiceAuthorityRejection,
+  isServiceCredentialRefreshed,
   postJson,
   type IntentEnvelope,
   type ServiceView,
@@ -85,7 +87,7 @@ export function CounterShell() {
     setInFlight(null);
   }, []);
 
-  const reconcile = useCallback(async (envelope: IntentEnvelope) => {
+  const reconcile: (envelope: IntentEnvelope, refreshAttempted?: boolean) => Promise<void> = useCallback(async (envelope: IntentEnvelope, refreshAttempted = false) => {
     const token = ++generation.current;
     setPhase("requerying");
     const timeout = requestTimeout();
@@ -93,8 +95,20 @@ export function CounterShell() {
       const queried = await postJson(SERVICE_QUERY_PATH, "{}", timeout.signal);
       if (token !== generation.current || envelopeRef.current !== envelope) return;
       if (!queried.ok) {
-        setPhase(queried.status === 400 || queried.status === 401 ? "authority" : "outcome-unknown");
-        setAnnouncement("The command outcome is still unknown. Requery before retrying.");
+        const refreshed = await isServiceCredentialRefreshed(queried.clone());
+        const authority = !refreshed && await isServiceAuthorityRejection(queried);
+        if (token !== generation.current || envelopeRef.current !== envelope) return;
+        if (refreshed && !refreshAttempted) {
+          setAnnouncement("Service access was refreshed for this guest. Requerying the saved service.");
+          void reconcile(envelope, true);
+        } else if (authority) {
+          clearEnvelope();
+          setPhase("authority");
+          setAnnouncement("Service access needs recovery.");
+        } else {
+          setPhase("outcome-unknown");
+          setAnnouncement("The command outcome is still unknown. Requery before retrying.");
+        }
         return;
       }
       const canonical = decodeServiceResponse(await queried.json());
@@ -110,8 +124,21 @@ export function CounterShell() {
         return;
       }
       if (!retry.ok) {
-        setPhase(retry.status === 400 || retry.status === 401 ? "authority" : "outcome-unknown");
-        setAnnouncement("The exact command is retained in memory; its outcome remains unknown.");
+        const refreshed = await isServiceCredentialRefreshed(retry.clone());
+        const authority = !refreshed && await isServiceAuthorityRejection(retry);
+        if (token !== generation.current || envelopeRef.current !== envelope) return;
+        if (refreshed && !refreshAttempted) {
+          setPhase("requerying");
+          setAnnouncement("Service access was refreshed for this guest. Requerying before exact retry.");
+          void reconcile(envelope, true);
+        } else if (authority) {
+          clearEnvelope();
+          setPhase("authority");
+          setAnnouncement("Service access needs recovery.");
+        } else {
+          setPhase("outcome-unknown");
+          setAnnouncement("The exact command is retained in memory; its outcome remains unknown.");
+        }
         return;
       }
       const recovered = decodeServiceResponse(await retry.json());
@@ -128,7 +155,7 @@ export function CounterShell() {
     }
   }, [clearEnvelope, publishView]);
 
-  const query = useCallback(async () => {
+  const query: (refreshAttempted?: boolean) => Promise<void> = useCallback(async (refreshAttempted = false) => {
     const token = ++generation.current;
     setPhase(viewRef.current ? "requerying" : "loading");
     const timeout = requestTimeout();
@@ -136,8 +163,17 @@ export function CounterShell() {
       const response = await postJson(SERVICE_QUERY_PATH, "{}", timeout.signal);
       if (token !== generation.current) return;
       if (!response.ok) {
-        setPhase(response.status === 400 || response.status === 401 ? "authority" : "unavailable");
-        setAnnouncement(response.status === 400 || response.status === 401 ? "Service access needs recovery." : "The service is temporarily unavailable.");
+        const refreshed = await isServiceCredentialRefreshed(response.clone());
+        const authority = !refreshed && await isServiceAuthorityRejection(response);
+        if (token !== generation.current) return;
+        if (refreshed && !refreshAttempted) {
+          setPhase("requerying");
+          setAnnouncement("Service access was refreshed for this guest. Requerying the saved service.");
+          void query(true);
+        } else {
+          setPhase(authority ? "authority" : "unavailable");
+          setAnnouncement(authority ? "Service access needs recovery." : "The service is temporarily unavailable.");
+        }
         return;
       }
       publishView(decodeServiceResponse(await response.json()), null);
@@ -190,9 +226,22 @@ export function CounterShell() {
       const response = await postJson(SERVICE_COMMAND_PATH, envelope.canonicalBody, timeout.signal);
       if (token !== generation.current || envelopeRef.current !== envelope) return;
       if (!response.ok) {
-        setPhase("outcome-unknown");
-        setAnnouncement("The outcome is unknown. Requerying before exact retry.");
-        void reconcile(envelope);
+        const refreshed = await isServiceCredentialRefreshed(response.clone());
+        const authority = !refreshed && await isServiceAuthorityRejection(response);
+        if (token !== generation.current || envelopeRef.current !== envelope) return;
+        if (refreshed) {
+          setPhase("requerying");
+          setAnnouncement("Service access was refreshed for this guest. Requerying before exact retry.");
+          void reconcile(envelope, true);
+        } else if (authority) {
+          clearEnvelope();
+          setPhase("authority");
+          setAnnouncement("Service access needs recovery.");
+        } else {
+          setPhase("outcome-unknown");
+          setAnnouncement("The outcome is unknown. Requerying before exact retry.");
+          void reconcile(envelope);
+        }
         return;
       }
       const next = decodeServiceResponse(await response.json());
@@ -286,7 +335,7 @@ export function CounterShell() {
                 {terminal ? (
                   <section className="terminal-state" aria-label="Service result">
                     <PixelAsset asset={view.unlock} scale={2} />
-                    <div><strong>{view.phase === "SETTLED" ? "Service settled" : "Service abandoned"}</strong><p>{view.phase === "SETTLED" ? view.facts.at(-1)?.text : "No settlement or unlock was recorded."}</p>{view.phase === "SETTLED" ? <button className="primary-action" type="button" disabled={phase !== "ready"} onClick={() => { setShowLedger(true); window.requestAnimationFrame(() => document.querySelector<HTMLElement>(".ingredient-rail")?.focus()); }}>Keep playing</button> : <button className="primary-action" type="button" disabled={phase !== "ready"} onClick={() => void recoverAuthority()}>Start a fresh shift</button>}</div>
+                    <div><strong>{view.phase === "SETTLED" ? "Service settled" : "Service abandoned"}</strong><p>{view.phase === "SETTLED" ? view.facts.at(-1)?.text : "No settlement or unlock was recorded."}</p>{view.phase === "SETTLED" ? <button className="primary-action" type="button" disabled={phase !== "ready"} onClick={() => { setShowLedger(true); window.requestAnimationFrame(() => document.querySelector<HTMLElement>(".ingredient-rail")?.focus()); }}>Keep playing</button> : <button className="primary-action" type="button" disabled={phase !== "ready" || view.choices.length !== 1} onClick={() => void execute(view.choices[0]!)}>{view.choices[0]?.actionLabel.text}</button>}</div>
                   </section>
                 ) : null}
                 </>}

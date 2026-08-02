@@ -11,6 +11,7 @@ export const FIRST_SERVICE_BROWSER_INVENTORY = Object.freeze({
     "action.restoration.polish-display-shelf",
     "action.restoration.refresh-menu-board",
     "action.service.abandon",
+    "action.service.start-new",
     "cue.abandon.invalid",
     "cue.ledger.orders-incomplete",
     "cue.order.accept.ceramicist-kappa",
@@ -34,6 +35,7 @@ export const FIRST_SERVICE_BROWSER_INVENTORY = Object.freeze({
     "cue.serve.required.courier-salmon",
     "cue.serve.required.fishmonger-tamago",
     "cue.service.complete",
+    "cue.start-new.invalid",
     "cue.start.invalid",
     "cue.step.ceramicist-kappa.cut-kappa",
     "cue.step.ceramicist-kappa.layer-nori",
@@ -64,6 +66,7 @@ export const FIRST_SERVICE_BROWSER_INVENTORY = Object.freeze({
     "feedback.serve.courier-salmon",
     "feedback.serve.fishmonger-tamago",
     "feedback.service.abandoned",
+    "feedback.service.new-shift",
     "feedback.service.opened",
     "feedback.service.settled",
     "guest.ceramicist",
@@ -168,6 +171,11 @@ export const FIRST_SERVICE_BROWSER_INVENTORY = Object.freeze({
     },
     "action.service.abandon": {
       "text": "End shift early",
+      "reviewId": "phase-1-service-review-pending-v1",
+      "reviewStatus": "review-pending"
+    },
+    "action.service.start-new": {
+      "text": "Start a fresh shift",
       "reviewId": "phase-1-service-review-pending-v1",
       "reviewStatus": "review-pending"
     },
@@ -283,6 +291,11 @@ export const FIRST_SERVICE_BROWSER_INVENTORY = Object.freeze({
     },
     "cue.service.complete": {
       "text": "This service is already complete.",
+      "reviewId": "phase-1-service-review-pending-v1",
+      "reviewStatus": "review-pending"
+    },
+    "cue.start-new.invalid": {
+      "text": "Start a fresh shift only after the current shift closes early.",
       "reviewId": "phase-1-service-review-pending-v1",
       "reviewStatus": "review-pending"
     },
@@ -433,6 +446,11 @@ export const FIRST_SERVICE_BROWSER_INVENTORY = Object.freeze({
     },
     "feedback.service.abandoned": {
       "text": "Shift closed early without settlement or unlocks.",
+      "reviewId": "phase-1-service-review-pending-v1",
+      "reviewStatus": "review-pending"
+    },
+    "feedback.service.new-shift": {
+      "text": "A fresh shift is open on the same saved service.",
       "reviewId": "phase-1-service-review-pending-v1",
       "reviewStatus": "review-pending"
     },
@@ -1390,8 +1408,38 @@ export const FIRST_SERVICE_BROWSER_INVENTORY = Object.freeze({
       "dishRef": "dish.salmon-nigiri"
     }
   },
+  "ledgerBindings": {
+    "ceramicist-kappa": {
+      "guestRef": "guest.ceramicist",
+      "dishRef": "dish.kappa-maki",
+      "outcomeRef": "outcome.delighted",
+      "plateFeedbackRef": "feedback.plate.ceramicist-kappa",
+      "serveFeedbackRef": "feedback.serve.ceramicist-kappa",
+      "storyFlagRef": "story-flag.ceramicist-first-service-served",
+      "consequenceRef": "story.ceramicist.first-service"
+    },
+    "fishmonger-tamago": {
+      "guestRef": "guest.fishmonger",
+      "dishRef": "dish.tamago-nigiri",
+      "outcomeRef": "outcome.content",
+      "plateFeedbackRef": "feedback.plate.fishmonger-tamago",
+      "serveFeedbackRef": "feedback.serve.fishmonger-tamago",
+      "storyFlagRef": "story-flag.fishmonger-first-service-served",
+      "consequenceRef": "story.fishmonger.first-service"
+    },
+    "courier-salmon": {
+      "guestRef": "guest.courier",
+      "dishRef": "dish.salmon-nigiri",
+      "outcomeRef": "outcome.content",
+      "plateFeedbackRef": "feedback.plate.courier-salmon",
+      "serveFeedbackRef": "feedback.serve.courier-salmon",
+      "storyFlagRef": "story-flag.courier-first-service-served",
+      "consequenceRef": "story.courier.first-service"
+    }
+  },
   "commandNames": [
     "service.start",
+    "service.start-new",
     "service.prepare-rice",
     "service.accept-order",
     "service.perform-step",
@@ -1439,6 +1487,7 @@ export const FIRST_SERVICE_BROWSER_INVENTORY = Object.freeze({
   },
   "promptCommands": {
     "prompt.service.start": "service.start",
+    "prompt.service.abandoned": "service.start-new",
     "prompt.rice.wash": "service.prepare-rice",
     "prompt.rice.steam": "service.prepare-rice",
     "prompt.rice.season": "service.prepare-rice",
@@ -1467,5 +1516,2204 @@ export const FIRST_SERVICE_BROWSER_INVENTORY = Object.freeze({
     "prompt.presentation.choose": "service.choose-presentation",
     "prompt.ledger.close": "service.close-ledger",
     "prompt.restoration.choose": "service.choose-restoration"
+  },
+  "promptViews": {
+    "prompt.service.start": {
+      "phase": "IDLE",
+      "choices": [
+        {
+          "id": "primary",
+          "labelRef": "prompt.service.start",
+          "actionLabelRef": "prompt.service.start",
+          "commandName": "service.start",
+          "payload": {},
+          "assetKey": null
+        }
+      ],
+      "facts": [
+        "service.first-evening",
+        "phase.idle"
+      ],
+      "orders": [
+        {
+          "orderId": "ceramicist-kappa",
+          "statusRef": "order-state.offered",
+          "stepIndex": 0,
+          "stepTotal": 5,
+          "active": false,
+          "portraitKey": "guest-ceramicist-neutral",
+          "dishAssetKey": "dish-kappa-maki"
+        },
+        {
+          "orderId": "fishmonger-tamago",
+          "statusRef": "order-state.offered",
+          "stepIndex": 0,
+          "stepTotal": 4,
+          "active": false,
+          "portraitKey": "guest-fishmonger-neutral",
+          "dishAssetKey": "dish-tamago-nigiri"
+        },
+        {
+          "orderId": "courier-salmon",
+          "statusRef": "order-state.offered",
+          "stepIndex": 0,
+          "stepTotal": 4,
+          "active": false,
+          "portraitKey": "guest-courier-neutral",
+          "dishAssetKey": "dish-salmon-nigiri"
+        }
+      ],
+      "ledgerOrderIds": [],
+      "sceneKey": "counter-curtain-closed",
+      "sceneLayers": [
+        {
+          "assetKey": "counter-lamp-lit",
+          "x": 232,
+          "y": 12
+        }
+      ],
+      "restorationKey": null,
+      "unlockKey": "dish-salmon-sashimi-locked"
+    },
+    "prompt.rice.wash": {
+      "phase": "OPEN",
+      "choices": [
+        {
+          "id": "wash",
+          "labelRef": "prompt.rice.wash",
+          "actionLabelRef": "prompt.rice.wash",
+          "commandName": "service.prepare-rice",
+          "payload": {
+            "beat": "wash"
+          },
+          "assetKey": "rice-washed"
+        }
+      ],
+      "facts": [
+        "service.first-evening",
+        "phase.open",
+        "rice.wash",
+        "station.rice-hearth"
+      ],
+      "orders": [
+        {
+          "orderId": "ceramicist-kappa",
+          "statusRef": "order-state.offered",
+          "stepIndex": 0,
+          "stepTotal": 5,
+          "active": false,
+          "portraitKey": "guest-ceramicist-neutral",
+          "dishAssetKey": "dish-kappa-maki"
+        },
+        {
+          "orderId": "fishmonger-tamago",
+          "statusRef": "order-state.offered",
+          "stepIndex": 0,
+          "stepTotal": 4,
+          "active": false,
+          "portraitKey": "guest-fishmonger-neutral",
+          "dishAssetKey": "dish-tamago-nigiri"
+        },
+        {
+          "orderId": "courier-salmon",
+          "statusRef": "order-state.offered",
+          "stepIndex": 0,
+          "stepTotal": 4,
+          "active": false,
+          "portraitKey": "guest-courier-neutral",
+          "dishAssetKey": "dish-salmon-nigiri"
+        }
+      ],
+      "ledgerOrderIds": [],
+      "sceneKey": "counter-curtain-open",
+      "sceneLayers": [
+        {
+          "assetKey": "counter-lamp-lit",
+          "x": 232,
+          "y": 12
+        }
+      ],
+      "restorationKey": null,
+      "unlockKey": "dish-salmon-sashimi-locked"
+    },
+    "prompt.rice.steam": {
+      "phase": "OPEN",
+      "choices": [
+        {
+          "id": "steam",
+          "labelRef": "prompt.rice.steam",
+          "actionLabelRef": "prompt.rice.steam",
+          "commandName": "service.prepare-rice",
+          "payload": {
+            "beat": "steam"
+          },
+          "assetKey": "rice-cooked"
+        }
+      ],
+      "facts": [
+        "service.first-evening",
+        "phase.open",
+        "rice.steam",
+        "station.rice-hearth"
+      ],
+      "orders": [
+        {
+          "orderId": "ceramicist-kappa",
+          "statusRef": "order-state.offered",
+          "stepIndex": 0,
+          "stepTotal": 5,
+          "active": false,
+          "portraitKey": "guest-ceramicist-neutral",
+          "dishAssetKey": "dish-kappa-maki"
+        },
+        {
+          "orderId": "fishmonger-tamago",
+          "statusRef": "order-state.offered",
+          "stepIndex": 0,
+          "stepTotal": 4,
+          "active": false,
+          "portraitKey": "guest-fishmonger-neutral",
+          "dishAssetKey": "dish-tamago-nigiri"
+        },
+        {
+          "orderId": "courier-salmon",
+          "statusRef": "order-state.offered",
+          "stepIndex": 0,
+          "stepTotal": 4,
+          "active": false,
+          "portraitKey": "guest-courier-neutral",
+          "dishAssetKey": "dish-salmon-nigiri"
+        }
+      ],
+      "ledgerOrderIds": [],
+      "sceneKey": "counter-curtain-open",
+      "sceneLayers": [
+        {
+          "assetKey": "counter-lamp-lit",
+          "x": 232,
+          "y": 12
+        }
+      ],
+      "restorationKey": null,
+      "unlockKey": "dish-salmon-sashimi-locked"
+    },
+    "prompt.rice.season": {
+      "phase": "OPEN",
+      "choices": [
+        {
+          "id": "season",
+          "labelRef": "prompt.rice.season",
+          "actionLabelRef": "prompt.rice.season",
+          "commandName": "service.prepare-rice",
+          "payload": {
+            "beat": "season"
+          },
+          "assetKey": "rice-seasoned"
+        }
+      ],
+      "facts": [
+        "service.first-evening",
+        "phase.open",
+        "rice.season",
+        "station.rice-hearth"
+      ],
+      "orders": [
+        {
+          "orderId": "ceramicist-kappa",
+          "statusRef": "order-state.offered",
+          "stepIndex": 0,
+          "stepTotal": 5,
+          "active": false,
+          "portraitKey": "guest-ceramicist-neutral",
+          "dishAssetKey": "dish-kappa-maki"
+        },
+        {
+          "orderId": "fishmonger-tamago",
+          "statusRef": "order-state.offered",
+          "stepIndex": 0,
+          "stepTotal": 4,
+          "active": false,
+          "portraitKey": "guest-fishmonger-neutral",
+          "dishAssetKey": "dish-tamago-nigiri"
+        },
+        {
+          "orderId": "courier-salmon",
+          "statusRef": "order-state.offered",
+          "stepIndex": 0,
+          "stepTotal": 4,
+          "active": false,
+          "portraitKey": "guest-courier-neutral",
+          "dishAssetKey": "dish-salmon-nigiri"
+        }
+      ],
+      "ledgerOrderIds": [],
+      "sceneKey": "counter-curtain-open",
+      "sceneLayers": [
+        {
+          "assetKey": "counter-lamp-lit",
+          "x": 232,
+          "y": 12
+        }
+      ],
+      "restorationKey": null,
+      "unlockKey": "dish-salmon-sashimi-locked"
+    },
+    "prompt.order.accept.ceramicist-kappa": {
+      "phase": "OPEN",
+      "choices": [
+        {
+          "id": "ceramicist-kappa",
+          "labelRef": "prompt.order.accept.ceramicist-kappa",
+          "actionLabelRef": "prompt.order.accept.ceramicist-kappa",
+          "commandName": "service.accept-order",
+          "payload": {
+            "orderId": "ceramicist-kappa"
+          },
+          "assetKey": null
+        }
+      ],
+      "facts": [
+        "service.first-evening",
+        "phase.open",
+        "guest.ceramicist.dialogue",
+        "dish.kappa-maki",
+        "guest.ceramicist"
+      ],
+      "orders": [
+        {
+          "orderId": "ceramicist-kappa",
+          "statusRef": "order-state.offered",
+          "stepIndex": 0,
+          "stepTotal": 5,
+          "active": true,
+          "portraitKey": "guest-ceramicist-neutral",
+          "dishAssetKey": "dish-kappa-maki"
+        },
+        {
+          "orderId": "fishmonger-tamago",
+          "statusRef": "order-state.offered",
+          "stepIndex": 0,
+          "stepTotal": 4,
+          "active": false,
+          "portraitKey": "guest-fishmonger-neutral",
+          "dishAssetKey": "dish-tamago-nigiri"
+        },
+        {
+          "orderId": "courier-salmon",
+          "statusRef": "order-state.offered",
+          "stepIndex": 0,
+          "stepTotal": 4,
+          "active": false,
+          "portraitKey": "guest-courier-neutral",
+          "dishAssetKey": "dish-salmon-nigiri"
+        }
+      ],
+      "ledgerOrderIds": [],
+      "sceneKey": "counter-curtain-open",
+      "sceneLayers": [
+        {
+          "assetKey": "counter-lamp-lit",
+          "x": 232,
+          "y": 12
+        }
+      ],
+      "restorationKey": null,
+      "unlockKey": "dish-salmon-sashimi-locked"
+    },
+    "prompt.step.ceramicist-kappa.layer-nori": {
+      "phase": "OPEN",
+      "choices": [
+        {
+          "id": "layer-nori",
+          "labelRef": "prompt.step.ceramicist-kappa.layer-nori",
+          "actionLabelRef": "prompt.step.ceramicist-kappa.layer-nori",
+          "commandName": "service.perform-step",
+          "payload": {
+            "orderId": "ceramicist-kappa",
+            "stepId": "layer-nori"
+          },
+          "assetKey": "ingredient-nori"
+        }
+      ],
+      "facts": [
+        "service.first-evening",
+        "phase.open",
+        "dish.kappa-maki",
+        "guest.ceramicist",
+        "station.rolling-mat"
+      ],
+      "orders": [
+        {
+          "orderId": "ceramicist-kappa",
+          "statusRef": "order-state.accepted",
+          "stepIndex": 0,
+          "stepTotal": 5,
+          "active": true,
+          "portraitKey": "guest-ceramicist-neutral",
+          "dishAssetKey": "dish-kappa-maki-build"
+        },
+        {
+          "orderId": "fishmonger-tamago",
+          "statusRef": "order-state.offered",
+          "stepIndex": 0,
+          "stepTotal": 4,
+          "active": false,
+          "portraitKey": "guest-fishmonger-neutral",
+          "dishAssetKey": "dish-tamago-nigiri"
+        },
+        {
+          "orderId": "courier-salmon",
+          "statusRef": "order-state.offered",
+          "stepIndex": 0,
+          "stepTotal": 4,
+          "active": false,
+          "portraitKey": "guest-courier-neutral",
+          "dishAssetKey": "dish-salmon-nigiri"
+        }
+      ],
+      "ledgerOrderIds": [],
+      "sceneKey": "counter-curtain-open",
+      "sceneLayers": [
+        {
+          "assetKey": "counter-lamp-lit",
+          "x": 232,
+          "y": 12
+        }
+      ],
+      "restorationKey": null,
+      "unlockKey": "dish-salmon-sashimi-locked"
+    },
+    "prompt.step.ceramicist-kappa.portion-rice": {
+      "phase": "OPEN",
+      "choices": [
+        {
+          "id": "portion-rice",
+          "labelRef": "prompt.step.ceramicist-kappa.portion-rice",
+          "actionLabelRef": "prompt.step.ceramicist-kappa.portion-rice",
+          "commandName": "service.perform-step",
+          "payload": {
+            "orderId": "ceramicist-kappa",
+            "stepId": "portion-rice"
+          },
+          "assetKey": "ingredient-sushi-rice"
+        }
+      ],
+      "facts": [
+        "service.first-evening",
+        "phase.open",
+        "dish.kappa-maki",
+        "guest.ceramicist",
+        "station.rolling-mat"
+      ],
+      "orders": [
+        {
+          "orderId": "ceramicist-kappa",
+          "statusRef": "order-state.preparing",
+          "stepIndex": 1,
+          "stepTotal": 5,
+          "active": true,
+          "portraitKey": "guest-ceramicist-neutral",
+          "dishAssetKey": "dish-kappa-maki-build"
+        },
+        {
+          "orderId": "fishmonger-tamago",
+          "statusRef": "order-state.offered",
+          "stepIndex": 0,
+          "stepTotal": 4,
+          "active": false,
+          "portraitKey": "guest-fishmonger-neutral",
+          "dishAssetKey": "dish-tamago-nigiri"
+        },
+        {
+          "orderId": "courier-salmon",
+          "statusRef": "order-state.offered",
+          "stepIndex": 0,
+          "stepTotal": 4,
+          "active": false,
+          "portraitKey": "guest-courier-neutral",
+          "dishAssetKey": "dish-salmon-nigiri"
+        }
+      ],
+      "ledgerOrderIds": [],
+      "sceneKey": "counter-curtain-open",
+      "sceneLayers": [
+        {
+          "assetKey": "counter-lamp-lit",
+          "x": 232,
+          "y": 12
+        }
+      ],
+      "restorationKey": null,
+      "unlockKey": "dish-salmon-sashimi-locked"
+    },
+    "prompt.step.ceramicist-kappa.place-cucumber": {
+      "phase": "OPEN",
+      "choices": [
+        {
+          "id": "place-cucumber",
+          "labelRef": "prompt.step.ceramicist-kappa.place-cucumber",
+          "actionLabelRef": "prompt.step.ceramicist-kappa.place-cucumber",
+          "commandName": "service.perform-step",
+          "payload": {
+            "orderId": "ceramicist-kappa",
+            "stepId": "place-cucumber"
+          },
+          "assetKey": "ingredient-cucumber"
+        }
+      ],
+      "facts": [
+        "service.first-evening",
+        "phase.open",
+        "dish.kappa-maki",
+        "guest.ceramicist",
+        "station.rolling-mat"
+      ],
+      "orders": [
+        {
+          "orderId": "ceramicist-kappa",
+          "statusRef": "order-state.preparing",
+          "stepIndex": 2,
+          "stepTotal": 5,
+          "active": true,
+          "portraitKey": "guest-ceramicist-neutral",
+          "dishAssetKey": "dish-kappa-maki-build"
+        },
+        {
+          "orderId": "fishmonger-tamago",
+          "statusRef": "order-state.offered",
+          "stepIndex": 0,
+          "stepTotal": 4,
+          "active": false,
+          "portraitKey": "guest-fishmonger-neutral",
+          "dishAssetKey": "dish-tamago-nigiri"
+        },
+        {
+          "orderId": "courier-salmon",
+          "statusRef": "order-state.offered",
+          "stepIndex": 0,
+          "stepTotal": 4,
+          "active": false,
+          "portraitKey": "guest-courier-neutral",
+          "dishAssetKey": "dish-salmon-nigiri"
+        }
+      ],
+      "ledgerOrderIds": [],
+      "sceneKey": "counter-curtain-open",
+      "sceneLayers": [
+        {
+          "assetKey": "counter-lamp-lit",
+          "x": 232,
+          "y": 12
+        }
+      ],
+      "restorationKey": null,
+      "unlockKey": "dish-salmon-sashimi-locked"
+    },
+    "prompt.step.ceramicist-kappa.roll-kappa": {
+      "phase": "OPEN",
+      "choices": [
+        {
+          "id": "roll-kappa",
+          "labelRef": "prompt.step.ceramicist-kappa.roll-kappa",
+          "actionLabelRef": "prompt.step.ceramicist-kappa.roll-kappa",
+          "commandName": "service.perform-step",
+          "payload": {
+            "orderId": "ceramicist-kappa",
+            "stepId": "roll-kappa"
+          },
+          "assetKey": "station-rolling-mat"
+        }
+      ],
+      "facts": [
+        "service.first-evening",
+        "phase.open",
+        "dish.kappa-maki",
+        "guest.ceramicist",
+        "station.rolling-mat"
+      ],
+      "orders": [
+        {
+          "orderId": "ceramicist-kappa",
+          "statusRef": "order-state.preparing",
+          "stepIndex": 3,
+          "stepTotal": 5,
+          "active": true,
+          "portraitKey": "guest-ceramicist-neutral",
+          "dishAssetKey": "dish-kappa-maki-build"
+        },
+        {
+          "orderId": "fishmonger-tamago",
+          "statusRef": "order-state.offered",
+          "stepIndex": 0,
+          "stepTotal": 4,
+          "active": false,
+          "portraitKey": "guest-fishmonger-neutral",
+          "dishAssetKey": "dish-tamago-nigiri"
+        },
+        {
+          "orderId": "courier-salmon",
+          "statusRef": "order-state.offered",
+          "stepIndex": 0,
+          "stepTotal": 4,
+          "active": false,
+          "portraitKey": "guest-courier-neutral",
+          "dishAssetKey": "dish-salmon-nigiri"
+        }
+      ],
+      "ledgerOrderIds": [],
+      "sceneKey": "counter-curtain-open",
+      "sceneLayers": [
+        {
+          "assetKey": "counter-lamp-lit",
+          "x": 232,
+          "y": 12
+        }
+      ],
+      "restorationKey": null,
+      "unlockKey": "dish-salmon-sashimi-locked"
+    },
+    "prompt.step.ceramicist-kappa.cut-kappa": {
+      "phase": "OPEN",
+      "choices": [
+        {
+          "id": "cut-kappa",
+          "labelRef": "prompt.step.ceramicist-kappa.cut-kappa",
+          "actionLabelRef": "prompt.step.ceramicist-kappa.cut-kappa",
+          "commandName": "service.perform-step",
+          "payload": {
+            "orderId": "ceramicist-kappa",
+            "stepId": "cut-kappa"
+          },
+          "assetKey": "station-rolling-mat"
+        }
+      ],
+      "facts": [
+        "service.first-evening",
+        "phase.open",
+        "dish.kappa-maki",
+        "guest.ceramicist",
+        "station.rolling-mat"
+      ],
+      "orders": [
+        {
+          "orderId": "ceramicist-kappa",
+          "statusRef": "order-state.preparing",
+          "stepIndex": 4,
+          "stepTotal": 5,
+          "active": true,
+          "portraitKey": "guest-ceramicist-neutral",
+          "dishAssetKey": "dish-kappa-maki-build"
+        },
+        {
+          "orderId": "fishmonger-tamago",
+          "statusRef": "order-state.offered",
+          "stepIndex": 0,
+          "stepTotal": 4,
+          "active": false,
+          "portraitKey": "guest-fishmonger-neutral",
+          "dishAssetKey": "dish-tamago-nigiri"
+        },
+        {
+          "orderId": "courier-salmon",
+          "statusRef": "order-state.offered",
+          "stepIndex": 0,
+          "stepTotal": 4,
+          "active": false,
+          "portraitKey": "guest-courier-neutral",
+          "dishAssetKey": "dish-salmon-nigiri"
+        }
+      ],
+      "ledgerOrderIds": [],
+      "sceneKey": "counter-curtain-open",
+      "sceneLayers": [
+        {
+          "assetKey": "counter-lamp-lit",
+          "x": 232,
+          "y": 12
+        }
+      ],
+      "restorationKey": null,
+      "unlockKey": "dish-salmon-sashimi-locked"
+    },
+    "prompt.presentation.choose": {
+      "phase": "OPEN",
+      "choices": [
+        {
+          "id": "indigo-rim",
+          "labelRef": "presentation.indigo-rim",
+          "actionLabelRef": "action.presentation.indigo-rim",
+          "commandName": "service.choose-presentation",
+          "payload": {
+            "orderId": "ceramicist-kappa",
+            "choice": "indigo-rim"
+          },
+          "assetKey": "presentation-indigo-rim"
+        },
+        {
+          "id": "sand-speckle",
+          "labelRef": "presentation.sand-speckle",
+          "actionLabelRef": "action.presentation.sand-speckle",
+          "commandName": "service.choose-presentation",
+          "payload": {
+            "orderId": "ceramicist-kappa",
+            "choice": "sand-speckle"
+          },
+          "assetKey": "presentation-sand-speckle"
+        }
+      ],
+      "facts": [
+        "service.first-evening",
+        "phase.open"
+      ],
+      "orders": [
+        {
+          "orderId": "ceramicist-kappa",
+          "statusRef": "order-state.ready-to-plate",
+          "stepIndex": 5,
+          "stepTotal": 5,
+          "active": true,
+          "portraitKey": "guest-ceramicist-neutral",
+          "dishAssetKey": "dish-kappa-maki-build"
+        },
+        {
+          "orderId": "fishmonger-tamago",
+          "statusRef": "order-state.offered",
+          "stepIndex": 0,
+          "stepTotal": 4,
+          "active": false,
+          "portraitKey": "guest-fishmonger-neutral",
+          "dishAssetKey": "dish-tamago-nigiri"
+        },
+        {
+          "orderId": "courier-salmon",
+          "statusRef": "order-state.offered",
+          "stepIndex": 0,
+          "stepTotal": 4,
+          "active": false,
+          "portraitKey": "guest-courier-neutral",
+          "dishAssetKey": "dish-salmon-nigiri"
+        }
+      ],
+      "ledgerOrderIds": [],
+      "sceneKey": "counter-curtain-open",
+      "sceneLayers": [
+        {
+          "assetKey": "counter-lamp-lit",
+          "x": 232,
+          "y": 12
+        }
+      ],
+      "restorationKey": null,
+      "unlockKey": "dish-salmon-sashimi-locked"
+    },
+    "prompt.plate.ceramicist-kappa": {
+      "phase": "OPEN",
+      "choices": [
+        {
+          "id": "ceramicist-kappa",
+          "labelRef": "prompt.plate.ceramicist-kappa",
+          "actionLabelRef": "prompt.plate.ceramicist-kappa",
+          "commandName": "service.plate-order",
+          "payload": {
+            "orderId": "ceramicist-kappa"
+          },
+          "assetKey": null
+        }
+      ],
+      "facts": [
+        "service.first-evening",
+        "phase.open",
+        "presentation.indigo-rim"
+      ],
+      "orders": [
+        {
+          "orderId": "ceramicist-kappa",
+          "statusRef": "order-state.ready-to-plate",
+          "stepIndex": 5,
+          "stepTotal": 5,
+          "active": true,
+          "portraitKey": "guest-ceramicist-neutral",
+          "dishAssetKey": "dish-kappa-maki-build"
+        },
+        {
+          "orderId": "fishmonger-tamago",
+          "statusRef": "order-state.offered",
+          "stepIndex": 0,
+          "stepTotal": 4,
+          "active": false,
+          "portraitKey": "guest-fishmonger-neutral",
+          "dishAssetKey": "dish-tamago-nigiri"
+        },
+        {
+          "orderId": "courier-salmon",
+          "statusRef": "order-state.offered",
+          "stepIndex": 0,
+          "stepTotal": 4,
+          "active": false,
+          "portraitKey": "guest-courier-neutral",
+          "dishAssetKey": "dish-salmon-nigiri"
+        }
+      ],
+      "ledgerOrderIds": [],
+      "sceneKey": "counter-curtain-open",
+      "sceneLayers": [
+        {
+          "assetKey": "counter-lamp-lit",
+          "x": 232,
+          "y": 12
+        }
+      ],
+      "restorationKey": null,
+      "unlockKey": "dish-salmon-sashimi-locked"
+    },
+    "prompt.serve.ceramicist-kappa": {
+      "phase": "OPEN",
+      "choices": [
+        {
+          "id": "ceramicist-kappa",
+          "labelRef": "prompt.serve.ceramicist-kappa",
+          "actionLabelRef": "prompt.serve.ceramicist-kappa",
+          "commandName": "service.serve-order",
+          "payload": {
+            "orderId": "ceramicist-kappa"
+          },
+          "assetKey": null
+        }
+      ],
+      "facts": [
+        "service.first-evening",
+        "phase.open",
+        "feedback.plate.ceramicist-kappa",
+        "presentation.indigo-rim"
+      ],
+      "orders": [
+        {
+          "orderId": "ceramicist-kappa",
+          "statusRef": "order-state.plated",
+          "stepIndex": 5,
+          "stepTotal": 5,
+          "active": true,
+          "portraitKey": "guest-ceramicist-neutral",
+          "dishAssetKey": "dish-kappa-maki-plated"
+        },
+        {
+          "orderId": "fishmonger-tamago",
+          "statusRef": "order-state.offered",
+          "stepIndex": 0,
+          "stepTotal": 4,
+          "active": false,
+          "portraitKey": "guest-fishmonger-neutral",
+          "dishAssetKey": "dish-tamago-nigiri"
+        },
+        {
+          "orderId": "courier-salmon",
+          "statusRef": "order-state.offered",
+          "stepIndex": 0,
+          "stepTotal": 4,
+          "active": false,
+          "portraitKey": "guest-courier-neutral",
+          "dishAssetKey": "dish-salmon-nigiri"
+        }
+      ],
+      "ledgerOrderIds": [],
+      "sceneKey": "counter-curtain-open",
+      "sceneLayers": [
+        {
+          "assetKey": "counter-lamp-lit",
+          "x": 232,
+          "y": 12
+        }
+      ],
+      "restorationKey": null,
+      "unlockKey": "dish-salmon-sashimi-locked"
+    },
+    "prompt.order.accept.fishmonger-tamago": {
+      "phase": "OPEN",
+      "choices": [
+        {
+          "id": "fishmonger-tamago",
+          "labelRef": "prompt.order.accept.fishmonger-tamago",
+          "actionLabelRef": "prompt.order.accept.fishmonger-tamago",
+          "commandName": "service.accept-order",
+          "payload": {
+            "orderId": "fishmonger-tamago"
+          },
+          "assetKey": null
+        }
+      ],
+      "facts": [
+        "service.first-evening",
+        "phase.open",
+        "guest.fishmonger.dialogue",
+        "dish.tamago-nigiri",
+        "guest.fishmonger",
+        "guest.ceramicist",
+        "dish.kappa-maki",
+        "outcome.delighted",
+        "feedback.plate.ceramicist-kappa",
+        "feedback.serve.ceramicist-kappa",
+        "story-flag.ceramicist-first-service-served",
+        "story.ceramicist.first-service",
+        "presentation.indigo-rim"
+      ],
+      "orders": [
+        {
+          "orderId": "ceramicist-kappa",
+          "statusRef": "order-state.served",
+          "stepIndex": 5,
+          "stepTotal": 5,
+          "active": false,
+          "portraitKey": "guest-ceramicist-delighted",
+          "dishAssetKey": "dish-kappa-maki-plated"
+        },
+        {
+          "orderId": "fishmonger-tamago",
+          "statusRef": "order-state.offered",
+          "stepIndex": 0,
+          "stepTotal": 4,
+          "active": true,
+          "portraitKey": "guest-fishmonger-neutral",
+          "dishAssetKey": "dish-tamago-nigiri"
+        },
+        {
+          "orderId": "courier-salmon",
+          "statusRef": "order-state.offered",
+          "stepIndex": 0,
+          "stepTotal": 4,
+          "active": false,
+          "portraitKey": "guest-courier-neutral",
+          "dishAssetKey": "dish-salmon-nigiri"
+        }
+      ],
+      "ledgerOrderIds": [
+        "ceramicist-kappa"
+      ],
+      "sceneKey": "counter-curtain-open",
+      "sceneLayers": [
+        {
+          "assetKey": "counter-lamp-lit",
+          "x": 232,
+          "y": 12
+        }
+      ],
+      "restorationKey": null,
+      "unlockKey": "dish-salmon-sashimi-locked"
+    },
+    "prompt.step.fishmonger-tamago.portion-rice": {
+      "phase": "OPEN",
+      "choices": [
+        {
+          "id": "portion-rice",
+          "labelRef": "prompt.step.fishmonger-tamago.portion-rice",
+          "actionLabelRef": "prompt.step.fishmonger-tamago.portion-rice",
+          "commandName": "service.perform-step",
+          "payload": {
+            "orderId": "fishmonger-tamago",
+            "stepId": "portion-rice"
+          },
+          "assetKey": "ingredient-sushi-rice"
+        }
+      ],
+      "facts": [
+        "service.first-evening",
+        "phase.open",
+        "dish.tamago-nigiri",
+        "guest.fishmonger",
+        "station.nigiri-counter",
+        "guest.ceramicist",
+        "dish.kappa-maki",
+        "outcome.delighted",
+        "feedback.plate.ceramicist-kappa",
+        "feedback.serve.ceramicist-kappa",
+        "story-flag.ceramicist-first-service-served",
+        "story.ceramicist.first-service",
+        "presentation.indigo-rim"
+      ],
+      "orders": [
+        {
+          "orderId": "ceramicist-kappa",
+          "statusRef": "order-state.served",
+          "stepIndex": 5,
+          "stepTotal": 5,
+          "active": false,
+          "portraitKey": "guest-ceramicist-delighted",
+          "dishAssetKey": "dish-kappa-maki-plated"
+        },
+        {
+          "orderId": "fishmonger-tamago",
+          "statusRef": "order-state.accepted",
+          "stepIndex": 0,
+          "stepTotal": 4,
+          "active": true,
+          "portraitKey": "guest-fishmonger-neutral",
+          "dishAssetKey": "dish-tamago-nigiri-build"
+        },
+        {
+          "orderId": "courier-salmon",
+          "statusRef": "order-state.offered",
+          "stepIndex": 0,
+          "stepTotal": 4,
+          "active": false,
+          "portraitKey": "guest-courier-neutral",
+          "dishAssetKey": "dish-salmon-nigiri"
+        }
+      ],
+      "ledgerOrderIds": [
+        "ceramicist-kappa"
+      ],
+      "sceneKey": "counter-curtain-open",
+      "sceneLayers": [
+        {
+          "assetKey": "counter-lamp-lit",
+          "x": 232,
+          "y": 12
+        }
+      ],
+      "restorationKey": null,
+      "unlockKey": "dish-salmon-sashimi-locked"
+    },
+    "prompt.step.fishmonger-tamago.press-rice": {
+      "phase": "OPEN",
+      "choices": [
+        {
+          "id": "press-rice",
+          "labelRef": "prompt.step.fishmonger-tamago.press-rice",
+          "actionLabelRef": "prompt.step.fishmonger-tamago.press-rice",
+          "commandName": "service.perform-step",
+          "payload": {
+            "orderId": "fishmonger-tamago",
+            "stepId": "press-rice"
+          },
+          "assetKey": "station-nigiri-counter"
+        }
+      ],
+      "facts": [
+        "service.first-evening",
+        "phase.open",
+        "dish.tamago-nigiri",
+        "guest.fishmonger",
+        "station.nigiri-counter",
+        "guest.ceramicist",
+        "dish.kappa-maki",
+        "outcome.delighted",
+        "feedback.plate.ceramicist-kappa",
+        "feedback.serve.ceramicist-kappa",
+        "story-flag.ceramicist-first-service-served",
+        "story.ceramicist.first-service",
+        "presentation.indigo-rim"
+      ],
+      "orders": [
+        {
+          "orderId": "ceramicist-kappa",
+          "statusRef": "order-state.served",
+          "stepIndex": 5,
+          "stepTotal": 5,
+          "active": false,
+          "portraitKey": "guest-ceramicist-delighted",
+          "dishAssetKey": "dish-kappa-maki-plated"
+        },
+        {
+          "orderId": "fishmonger-tamago",
+          "statusRef": "order-state.preparing",
+          "stepIndex": 1,
+          "stepTotal": 4,
+          "active": true,
+          "portraitKey": "guest-fishmonger-neutral",
+          "dishAssetKey": "dish-tamago-nigiri-build"
+        },
+        {
+          "orderId": "courier-salmon",
+          "statusRef": "order-state.offered",
+          "stepIndex": 0,
+          "stepTotal": 4,
+          "active": false,
+          "portraitKey": "guest-courier-neutral",
+          "dishAssetKey": "dish-salmon-nigiri"
+        }
+      ],
+      "ledgerOrderIds": [
+        "ceramicist-kappa"
+      ],
+      "sceneKey": "counter-curtain-open",
+      "sceneLayers": [
+        {
+          "assetKey": "counter-lamp-lit",
+          "x": 232,
+          "y": 12
+        }
+      ],
+      "restorationKey": null,
+      "unlockKey": "dish-salmon-sashimi-locked"
+    },
+    "prompt.step.fishmonger-tamago.place-tamago": {
+      "phase": "OPEN",
+      "choices": [
+        {
+          "id": "place-tamago",
+          "labelRef": "prompt.step.fishmonger-tamago.place-tamago",
+          "actionLabelRef": "prompt.step.fishmonger-tamago.place-tamago",
+          "commandName": "service.perform-step",
+          "payload": {
+            "orderId": "fishmonger-tamago",
+            "stepId": "place-tamago"
+          },
+          "assetKey": "ingredient-tamago"
+        }
+      ],
+      "facts": [
+        "service.first-evening",
+        "phase.open",
+        "dish.tamago-nigiri",
+        "guest.fishmonger",
+        "station.nigiri-counter",
+        "guest.ceramicist",
+        "dish.kappa-maki",
+        "outcome.delighted",
+        "feedback.plate.ceramicist-kappa",
+        "feedback.serve.ceramicist-kappa",
+        "story-flag.ceramicist-first-service-served",
+        "story.ceramicist.first-service",
+        "presentation.indigo-rim"
+      ],
+      "orders": [
+        {
+          "orderId": "ceramicist-kappa",
+          "statusRef": "order-state.served",
+          "stepIndex": 5,
+          "stepTotal": 5,
+          "active": false,
+          "portraitKey": "guest-ceramicist-delighted",
+          "dishAssetKey": "dish-kappa-maki-plated"
+        },
+        {
+          "orderId": "fishmonger-tamago",
+          "statusRef": "order-state.preparing",
+          "stepIndex": 2,
+          "stepTotal": 4,
+          "active": true,
+          "portraitKey": "guest-fishmonger-neutral",
+          "dishAssetKey": "dish-tamago-nigiri-build"
+        },
+        {
+          "orderId": "courier-salmon",
+          "statusRef": "order-state.offered",
+          "stepIndex": 0,
+          "stepTotal": 4,
+          "active": false,
+          "portraitKey": "guest-courier-neutral",
+          "dishAssetKey": "dish-salmon-nigiri"
+        }
+      ],
+      "ledgerOrderIds": [
+        "ceramicist-kappa"
+      ],
+      "sceneKey": "counter-curtain-open",
+      "sceneLayers": [
+        {
+          "assetKey": "counter-lamp-lit",
+          "x": 232,
+          "y": 12
+        }
+      ],
+      "restorationKey": null,
+      "unlockKey": "dish-salmon-sashimi-locked"
+    },
+    "prompt.step.fishmonger-tamago.bind-tamago": {
+      "phase": "OPEN",
+      "choices": [
+        {
+          "id": "bind-tamago",
+          "labelRef": "prompt.step.fishmonger-tamago.bind-tamago",
+          "actionLabelRef": "prompt.step.fishmonger-tamago.bind-tamago",
+          "commandName": "service.perform-step",
+          "payload": {
+            "orderId": "fishmonger-tamago",
+            "stepId": "bind-tamago"
+          },
+          "assetKey": "ingredient-nori"
+        }
+      ],
+      "facts": [
+        "service.first-evening",
+        "phase.open",
+        "dish.tamago-nigiri",
+        "guest.fishmonger",
+        "station.nigiri-counter",
+        "guest.ceramicist",
+        "dish.kappa-maki",
+        "outcome.delighted",
+        "feedback.plate.ceramicist-kappa",
+        "feedback.serve.ceramicist-kappa",
+        "story-flag.ceramicist-first-service-served",
+        "story.ceramicist.first-service",
+        "presentation.indigo-rim"
+      ],
+      "orders": [
+        {
+          "orderId": "ceramicist-kappa",
+          "statusRef": "order-state.served",
+          "stepIndex": 5,
+          "stepTotal": 5,
+          "active": false,
+          "portraitKey": "guest-ceramicist-delighted",
+          "dishAssetKey": "dish-kappa-maki-plated"
+        },
+        {
+          "orderId": "fishmonger-tamago",
+          "statusRef": "order-state.preparing",
+          "stepIndex": 3,
+          "stepTotal": 4,
+          "active": true,
+          "portraitKey": "guest-fishmonger-neutral",
+          "dishAssetKey": "dish-tamago-nigiri-build"
+        },
+        {
+          "orderId": "courier-salmon",
+          "statusRef": "order-state.offered",
+          "stepIndex": 0,
+          "stepTotal": 4,
+          "active": false,
+          "portraitKey": "guest-courier-neutral",
+          "dishAssetKey": "dish-salmon-nigiri"
+        }
+      ],
+      "ledgerOrderIds": [
+        "ceramicist-kappa"
+      ],
+      "sceneKey": "counter-curtain-open",
+      "sceneLayers": [
+        {
+          "assetKey": "counter-lamp-lit",
+          "x": 232,
+          "y": 12
+        }
+      ],
+      "restorationKey": null,
+      "unlockKey": "dish-salmon-sashimi-locked"
+    },
+    "prompt.plate.fishmonger-tamago": {
+      "phase": "OPEN",
+      "choices": [
+        {
+          "id": "fishmonger-tamago",
+          "labelRef": "prompt.plate.fishmonger-tamago",
+          "actionLabelRef": "prompt.plate.fishmonger-tamago",
+          "commandName": "service.plate-order",
+          "payload": {
+            "orderId": "fishmonger-tamago"
+          },
+          "assetKey": null
+        }
+      ],
+      "facts": [
+        "service.first-evening",
+        "phase.open",
+        "guest.ceramicist",
+        "dish.kappa-maki",
+        "outcome.delighted",
+        "feedback.plate.ceramicist-kappa",
+        "feedback.serve.ceramicist-kappa",
+        "story-flag.ceramicist-first-service-served",
+        "story.ceramicist.first-service",
+        "presentation.indigo-rim"
+      ],
+      "orders": [
+        {
+          "orderId": "ceramicist-kappa",
+          "statusRef": "order-state.served",
+          "stepIndex": 5,
+          "stepTotal": 5,
+          "active": false,
+          "portraitKey": "guest-ceramicist-delighted",
+          "dishAssetKey": "dish-kappa-maki-plated"
+        },
+        {
+          "orderId": "fishmonger-tamago",
+          "statusRef": "order-state.ready-to-plate",
+          "stepIndex": 4,
+          "stepTotal": 4,
+          "active": true,
+          "portraitKey": "guest-fishmonger-neutral",
+          "dishAssetKey": "dish-tamago-nigiri-build"
+        },
+        {
+          "orderId": "courier-salmon",
+          "statusRef": "order-state.offered",
+          "stepIndex": 0,
+          "stepTotal": 4,
+          "active": false,
+          "portraitKey": "guest-courier-neutral",
+          "dishAssetKey": "dish-salmon-nigiri"
+        }
+      ],
+      "ledgerOrderIds": [
+        "ceramicist-kappa"
+      ],
+      "sceneKey": "counter-curtain-open",
+      "sceneLayers": [
+        {
+          "assetKey": "counter-lamp-lit",
+          "x": 232,
+          "y": 12
+        }
+      ],
+      "restorationKey": null,
+      "unlockKey": "dish-salmon-sashimi-locked"
+    },
+    "prompt.serve.fishmonger-tamago": {
+      "phase": "OPEN",
+      "choices": [
+        {
+          "id": "fishmonger-tamago",
+          "labelRef": "prompt.serve.fishmonger-tamago",
+          "actionLabelRef": "prompt.serve.fishmonger-tamago",
+          "commandName": "service.serve-order",
+          "payload": {
+            "orderId": "fishmonger-tamago"
+          },
+          "assetKey": null
+        }
+      ],
+      "facts": [
+        "service.first-evening",
+        "phase.open",
+        "feedback.plate.fishmonger-tamago",
+        "guest.ceramicist",
+        "dish.kappa-maki",
+        "outcome.delighted",
+        "feedback.plate.ceramicist-kappa",
+        "feedback.serve.ceramicist-kappa",
+        "story-flag.ceramicist-first-service-served",
+        "story.ceramicist.first-service",
+        "presentation.indigo-rim"
+      ],
+      "orders": [
+        {
+          "orderId": "ceramicist-kappa",
+          "statusRef": "order-state.served",
+          "stepIndex": 5,
+          "stepTotal": 5,
+          "active": false,
+          "portraitKey": "guest-ceramicist-delighted",
+          "dishAssetKey": "dish-kappa-maki-plated"
+        },
+        {
+          "orderId": "fishmonger-tamago",
+          "statusRef": "order-state.plated",
+          "stepIndex": 4,
+          "stepTotal": 4,
+          "active": true,
+          "portraitKey": "guest-fishmonger-neutral",
+          "dishAssetKey": "dish-tamago-nigiri-plated"
+        },
+        {
+          "orderId": "courier-salmon",
+          "statusRef": "order-state.offered",
+          "stepIndex": 0,
+          "stepTotal": 4,
+          "active": false,
+          "portraitKey": "guest-courier-neutral",
+          "dishAssetKey": "dish-salmon-nigiri"
+        }
+      ],
+      "ledgerOrderIds": [
+        "ceramicist-kappa"
+      ],
+      "sceneKey": "counter-curtain-open",
+      "sceneLayers": [
+        {
+          "assetKey": "counter-lamp-lit",
+          "x": 232,
+          "y": 12
+        }
+      ],
+      "restorationKey": null,
+      "unlockKey": "dish-salmon-sashimi-locked"
+    },
+    "prompt.order.accept.courier-salmon": {
+      "phase": "OPEN",
+      "choices": [
+        {
+          "id": "courier-salmon",
+          "labelRef": "prompt.order.accept.courier-salmon",
+          "actionLabelRef": "prompt.order.accept.courier-salmon",
+          "commandName": "service.accept-order",
+          "payload": {
+            "orderId": "courier-salmon"
+          },
+          "assetKey": null
+        }
+      ],
+      "facts": [
+        "service.first-evening",
+        "phase.open",
+        "guest.courier.dialogue",
+        "dish.salmon-nigiri",
+        "guest.courier",
+        "guest.ceramicist",
+        "dish.kappa-maki",
+        "outcome.delighted",
+        "feedback.plate.ceramicist-kappa",
+        "feedback.serve.ceramicist-kappa",
+        "story-flag.ceramicist-first-service-served",
+        "story.ceramicist.first-service",
+        "guest.fishmonger",
+        "dish.tamago-nigiri",
+        "outcome.content",
+        "feedback.plate.fishmonger-tamago",
+        "feedback.serve.fishmonger-tamago",
+        "story-flag.fishmonger-first-service-served",
+        "story.fishmonger.first-service",
+        "presentation.indigo-rim"
+      ],
+      "orders": [
+        {
+          "orderId": "ceramicist-kappa",
+          "statusRef": "order-state.served",
+          "stepIndex": 5,
+          "stepTotal": 5,
+          "active": false,
+          "portraitKey": "guest-ceramicist-delighted",
+          "dishAssetKey": "dish-kappa-maki-plated"
+        },
+        {
+          "orderId": "fishmonger-tamago",
+          "statusRef": "order-state.served",
+          "stepIndex": 4,
+          "stepTotal": 4,
+          "active": false,
+          "portraitKey": "guest-fishmonger-content",
+          "dishAssetKey": "dish-tamago-nigiri-plated"
+        },
+        {
+          "orderId": "courier-salmon",
+          "statusRef": "order-state.offered",
+          "stepIndex": 0,
+          "stepTotal": 4,
+          "active": true,
+          "portraitKey": "guest-courier-neutral",
+          "dishAssetKey": "dish-salmon-nigiri"
+        }
+      ],
+      "ledgerOrderIds": [
+        "ceramicist-kappa",
+        "fishmonger-tamago"
+      ],
+      "sceneKey": "counter-curtain-open",
+      "sceneLayers": [
+        {
+          "assetKey": "counter-lamp-lit",
+          "x": 232,
+          "y": 12
+        }
+      ],
+      "restorationKey": null,
+      "unlockKey": "dish-salmon-sashimi-locked"
+    },
+    "prompt.step.courier-salmon.arrange-salmon": {
+      "phase": "OPEN",
+      "choices": [
+        {
+          "id": "arrange-salmon",
+          "labelRef": "prompt.step.courier-salmon.arrange-salmon",
+          "actionLabelRef": "prompt.step.courier-salmon.arrange-salmon",
+          "commandName": "service.perform-step",
+          "payload": {
+            "orderId": "courier-salmon",
+            "stepId": "arrange-salmon"
+          },
+          "assetKey": "station-prep-board"
+        }
+      ],
+      "facts": [
+        "service.first-evening",
+        "phase.open",
+        "dish.salmon-nigiri",
+        "guest.courier",
+        "station.prep-sashimi-board",
+        "guest.ceramicist",
+        "dish.kappa-maki",
+        "outcome.delighted",
+        "feedback.plate.ceramicist-kappa",
+        "feedback.serve.ceramicist-kappa",
+        "story-flag.ceramicist-first-service-served",
+        "story.ceramicist.first-service",
+        "guest.fishmonger",
+        "dish.tamago-nigiri",
+        "outcome.content",
+        "feedback.plate.fishmonger-tamago",
+        "feedback.serve.fishmonger-tamago",
+        "story-flag.fishmonger-first-service-served",
+        "story.fishmonger.first-service",
+        "presentation.indigo-rim"
+      ],
+      "orders": [
+        {
+          "orderId": "ceramicist-kappa",
+          "statusRef": "order-state.served",
+          "stepIndex": 5,
+          "stepTotal": 5,
+          "active": false,
+          "portraitKey": "guest-ceramicist-delighted",
+          "dishAssetKey": "dish-kappa-maki-plated"
+        },
+        {
+          "orderId": "fishmonger-tamago",
+          "statusRef": "order-state.served",
+          "stepIndex": 4,
+          "stepTotal": 4,
+          "active": false,
+          "portraitKey": "guest-fishmonger-content",
+          "dishAssetKey": "dish-tamago-nigiri-plated"
+        },
+        {
+          "orderId": "courier-salmon",
+          "statusRef": "order-state.accepted",
+          "stepIndex": 0,
+          "stepTotal": 4,
+          "active": true,
+          "portraitKey": "guest-courier-neutral",
+          "dishAssetKey": "dish-salmon-nigiri-build"
+        }
+      ],
+      "ledgerOrderIds": [
+        "ceramicist-kappa",
+        "fishmonger-tamago"
+      ],
+      "sceneKey": "counter-curtain-open",
+      "sceneLayers": [
+        {
+          "assetKey": "counter-lamp-lit",
+          "x": 232,
+          "y": 12
+        }
+      ],
+      "restorationKey": null,
+      "unlockKey": "dish-salmon-sashimi-locked"
+    },
+    "prompt.step.courier-salmon.portion-rice": {
+      "phase": "OPEN",
+      "choices": [
+        {
+          "id": "portion-rice",
+          "labelRef": "prompt.step.courier-salmon.portion-rice",
+          "actionLabelRef": "prompt.step.courier-salmon.portion-rice",
+          "commandName": "service.perform-step",
+          "payload": {
+            "orderId": "courier-salmon",
+            "stepId": "portion-rice"
+          },
+          "assetKey": "ingredient-sushi-rice"
+        }
+      ],
+      "facts": [
+        "service.first-evening",
+        "phase.open",
+        "dish.salmon-nigiri",
+        "guest.courier",
+        "station.nigiri-counter",
+        "guest.ceramicist",
+        "dish.kappa-maki",
+        "outcome.delighted",
+        "feedback.plate.ceramicist-kappa",
+        "feedback.serve.ceramicist-kappa",
+        "story-flag.ceramicist-first-service-served",
+        "story.ceramicist.first-service",
+        "guest.fishmonger",
+        "dish.tamago-nigiri",
+        "outcome.content",
+        "feedback.plate.fishmonger-tamago",
+        "feedback.serve.fishmonger-tamago",
+        "story-flag.fishmonger-first-service-served",
+        "story.fishmonger.first-service",
+        "presentation.indigo-rim"
+      ],
+      "orders": [
+        {
+          "orderId": "ceramicist-kappa",
+          "statusRef": "order-state.served",
+          "stepIndex": 5,
+          "stepTotal": 5,
+          "active": false,
+          "portraitKey": "guest-ceramicist-delighted",
+          "dishAssetKey": "dish-kappa-maki-plated"
+        },
+        {
+          "orderId": "fishmonger-tamago",
+          "statusRef": "order-state.served",
+          "stepIndex": 4,
+          "stepTotal": 4,
+          "active": false,
+          "portraitKey": "guest-fishmonger-content",
+          "dishAssetKey": "dish-tamago-nigiri-plated"
+        },
+        {
+          "orderId": "courier-salmon",
+          "statusRef": "order-state.preparing",
+          "stepIndex": 1,
+          "stepTotal": 4,
+          "active": true,
+          "portraitKey": "guest-courier-neutral",
+          "dishAssetKey": "dish-salmon-nigiri-build"
+        }
+      ],
+      "ledgerOrderIds": [
+        "ceramicist-kappa",
+        "fishmonger-tamago"
+      ],
+      "sceneKey": "counter-curtain-open",
+      "sceneLayers": [
+        {
+          "assetKey": "counter-lamp-lit",
+          "x": 232,
+          "y": 12
+        }
+      ],
+      "restorationKey": null,
+      "unlockKey": "dish-salmon-sashimi-locked"
+    },
+    "prompt.step.courier-salmon.press-rice": {
+      "phase": "OPEN",
+      "choices": [
+        {
+          "id": "press-rice",
+          "labelRef": "prompt.step.courier-salmon.press-rice",
+          "actionLabelRef": "prompt.step.courier-salmon.press-rice",
+          "commandName": "service.perform-step",
+          "payload": {
+            "orderId": "courier-salmon",
+            "stepId": "press-rice"
+          },
+          "assetKey": "station-nigiri-counter"
+        }
+      ],
+      "facts": [
+        "service.first-evening",
+        "phase.open",
+        "dish.salmon-nigiri",
+        "guest.courier",
+        "station.nigiri-counter",
+        "guest.ceramicist",
+        "dish.kappa-maki",
+        "outcome.delighted",
+        "feedback.plate.ceramicist-kappa",
+        "feedback.serve.ceramicist-kappa",
+        "story-flag.ceramicist-first-service-served",
+        "story.ceramicist.first-service",
+        "guest.fishmonger",
+        "dish.tamago-nigiri",
+        "outcome.content",
+        "feedback.plate.fishmonger-tamago",
+        "feedback.serve.fishmonger-tamago",
+        "story-flag.fishmonger-first-service-served",
+        "story.fishmonger.first-service",
+        "presentation.indigo-rim"
+      ],
+      "orders": [
+        {
+          "orderId": "ceramicist-kappa",
+          "statusRef": "order-state.served",
+          "stepIndex": 5,
+          "stepTotal": 5,
+          "active": false,
+          "portraitKey": "guest-ceramicist-delighted",
+          "dishAssetKey": "dish-kappa-maki-plated"
+        },
+        {
+          "orderId": "fishmonger-tamago",
+          "statusRef": "order-state.served",
+          "stepIndex": 4,
+          "stepTotal": 4,
+          "active": false,
+          "portraitKey": "guest-fishmonger-content",
+          "dishAssetKey": "dish-tamago-nigiri-plated"
+        },
+        {
+          "orderId": "courier-salmon",
+          "statusRef": "order-state.preparing",
+          "stepIndex": 2,
+          "stepTotal": 4,
+          "active": true,
+          "portraitKey": "guest-courier-neutral",
+          "dishAssetKey": "dish-salmon-nigiri-build"
+        }
+      ],
+      "ledgerOrderIds": [
+        "ceramicist-kappa",
+        "fishmonger-tamago"
+      ],
+      "sceneKey": "counter-curtain-open",
+      "sceneLayers": [
+        {
+          "assetKey": "counter-lamp-lit",
+          "x": 232,
+          "y": 12
+        }
+      ],
+      "restorationKey": null,
+      "unlockKey": "dish-salmon-sashimi-locked"
+    },
+    "prompt.step.courier-salmon.place-salmon": {
+      "phase": "OPEN",
+      "choices": [
+        {
+          "id": "place-salmon",
+          "labelRef": "prompt.step.courier-salmon.place-salmon",
+          "actionLabelRef": "prompt.step.courier-salmon.place-salmon",
+          "commandName": "service.perform-step",
+          "payload": {
+            "orderId": "courier-salmon",
+            "stepId": "place-salmon"
+          },
+          "assetKey": "ingredient-salmon"
+        }
+      ],
+      "facts": [
+        "service.first-evening",
+        "phase.open",
+        "dish.salmon-nigiri",
+        "guest.courier",
+        "station.nigiri-counter",
+        "guest.ceramicist",
+        "dish.kappa-maki",
+        "outcome.delighted",
+        "feedback.plate.ceramicist-kappa",
+        "feedback.serve.ceramicist-kappa",
+        "story-flag.ceramicist-first-service-served",
+        "story.ceramicist.first-service",
+        "guest.fishmonger",
+        "dish.tamago-nigiri",
+        "outcome.content",
+        "feedback.plate.fishmonger-tamago",
+        "feedback.serve.fishmonger-tamago",
+        "story-flag.fishmonger-first-service-served",
+        "story.fishmonger.first-service",
+        "presentation.indigo-rim"
+      ],
+      "orders": [
+        {
+          "orderId": "ceramicist-kappa",
+          "statusRef": "order-state.served",
+          "stepIndex": 5,
+          "stepTotal": 5,
+          "active": false,
+          "portraitKey": "guest-ceramicist-delighted",
+          "dishAssetKey": "dish-kappa-maki-plated"
+        },
+        {
+          "orderId": "fishmonger-tamago",
+          "statusRef": "order-state.served",
+          "stepIndex": 4,
+          "stepTotal": 4,
+          "active": false,
+          "portraitKey": "guest-fishmonger-content",
+          "dishAssetKey": "dish-tamago-nigiri-plated"
+        },
+        {
+          "orderId": "courier-salmon",
+          "statusRef": "order-state.preparing",
+          "stepIndex": 3,
+          "stepTotal": 4,
+          "active": true,
+          "portraitKey": "guest-courier-neutral",
+          "dishAssetKey": "dish-salmon-nigiri-build"
+        }
+      ],
+      "ledgerOrderIds": [
+        "ceramicist-kappa",
+        "fishmonger-tamago"
+      ],
+      "sceneKey": "counter-curtain-open",
+      "sceneLayers": [
+        {
+          "assetKey": "counter-lamp-lit",
+          "x": 232,
+          "y": 12
+        }
+      ],
+      "restorationKey": null,
+      "unlockKey": "dish-salmon-sashimi-locked"
+    },
+    "prompt.plate.courier-salmon": {
+      "phase": "OPEN",
+      "choices": [
+        {
+          "id": "courier-salmon",
+          "labelRef": "prompt.plate.courier-salmon",
+          "actionLabelRef": "prompt.plate.courier-salmon",
+          "commandName": "service.plate-order",
+          "payload": {
+            "orderId": "courier-salmon"
+          },
+          "assetKey": null
+        }
+      ],
+      "facts": [
+        "service.first-evening",
+        "phase.open",
+        "guest.ceramicist",
+        "dish.kappa-maki",
+        "outcome.delighted",
+        "feedback.plate.ceramicist-kappa",
+        "feedback.serve.ceramicist-kappa",
+        "story-flag.ceramicist-first-service-served",
+        "story.ceramicist.first-service",
+        "guest.fishmonger",
+        "dish.tamago-nigiri",
+        "outcome.content",
+        "feedback.plate.fishmonger-tamago",
+        "feedback.serve.fishmonger-tamago",
+        "story-flag.fishmonger-first-service-served",
+        "story.fishmonger.first-service",
+        "presentation.indigo-rim"
+      ],
+      "orders": [
+        {
+          "orderId": "ceramicist-kappa",
+          "statusRef": "order-state.served",
+          "stepIndex": 5,
+          "stepTotal": 5,
+          "active": false,
+          "portraitKey": "guest-ceramicist-delighted",
+          "dishAssetKey": "dish-kappa-maki-plated"
+        },
+        {
+          "orderId": "fishmonger-tamago",
+          "statusRef": "order-state.served",
+          "stepIndex": 4,
+          "stepTotal": 4,
+          "active": false,
+          "portraitKey": "guest-fishmonger-content",
+          "dishAssetKey": "dish-tamago-nigiri-plated"
+        },
+        {
+          "orderId": "courier-salmon",
+          "statusRef": "order-state.ready-to-plate",
+          "stepIndex": 4,
+          "stepTotal": 4,
+          "active": true,
+          "portraitKey": "guest-courier-neutral",
+          "dishAssetKey": "dish-salmon-nigiri-build"
+        }
+      ],
+      "ledgerOrderIds": [
+        "ceramicist-kappa",
+        "fishmonger-tamago"
+      ],
+      "sceneKey": "counter-curtain-open",
+      "sceneLayers": [
+        {
+          "assetKey": "counter-lamp-lit",
+          "x": 232,
+          "y": 12
+        }
+      ],
+      "restorationKey": null,
+      "unlockKey": "dish-salmon-sashimi-locked"
+    },
+    "prompt.serve.courier-salmon": {
+      "phase": "OPEN",
+      "choices": [
+        {
+          "id": "courier-salmon",
+          "labelRef": "prompt.serve.courier-salmon",
+          "actionLabelRef": "prompt.serve.courier-salmon",
+          "commandName": "service.serve-order",
+          "payload": {
+            "orderId": "courier-salmon"
+          },
+          "assetKey": null
+        }
+      ],
+      "facts": [
+        "service.first-evening",
+        "phase.open",
+        "feedback.plate.courier-salmon",
+        "guest.ceramicist",
+        "dish.kappa-maki",
+        "outcome.delighted",
+        "feedback.plate.ceramicist-kappa",
+        "feedback.serve.ceramicist-kappa",
+        "story-flag.ceramicist-first-service-served",
+        "story.ceramicist.first-service",
+        "guest.fishmonger",
+        "dish.tamago-nigiri",
+        "outcome.content",
+        "feedback.plate.fishmonger-tamago",
+        "feedback.serve.fishmonger-tamago",
+        "story-flag.fishmonger-first-service-served",
+        "story.fishmonger.first-service",
+        "presentation.indigo-rim"
+      ],
+      "orders": [
+        {
+          "orderId": "ceramicist-kappa",
+          "statusRef": "order-state.served",
+          "stepIndex": 5,
+          "stepTotal": 5,
+          "active": false,
+          "portraitKey": "guest-ceramicist-delighted",
+          "dishAssetKey": "dish-kappa-maki-plated"
+        },
+        {
+          "orderId": "fishmonger-tamago",
+          "statusRef": "order-state.served",
+          "stepIndex": 4,
+          "stepTotal": 4,
+          "active": false,
+          "portraitKey": "guest-fishmonger-content",
+          "dishAssetKey": "dish-tamago-nigiri-plated"
+        },
+        {
+          "orderId": "courier-salmon",
+          "statusRef": "order-state.plated",
+          "stepIndex": 4,
+          "stepTotal": 4,
+          "active": true,
+          "portraitKey": "guest-courier-neutral",
+          "dishAssetKey": "dish-salmon-nigiri-plated"
+        }
+      ],
+      "ledgerOrderIds": [
+        "ceramicist-kappa",
+        "fishmonger-tamago"
+      ],
+      "sceneKey": "counter-curtain-open",
+      "sceneLayers": [
+        {
+          "assetKey": "counter-lamp-lit",
+          "x": 232,
+          "y": 12
+        }
+      ],
+      "restorationKey": null,
+      "unlockKey": "dish-salmon-sashimi-locked"
+    },
+    "prompt.ledger.close": {
+      "phase": "OPEN",
+      "choices": [
+        {
+          "id": "primary",
+          "labelRef": "prompt.ledger.close",
+          "actionLabelRef": "prompt.ledger.close",
+          "commandName": "service.close-ledger",
+          "payload": {},
+          "assetKey": null
+        }
+      ],
+      "facts": [
+        "service.first-evening",
+        "phase.open",
+        "ledger.first-evening",
+        "guest.ceramicist",
+        "dish.kappa-maki",
+        "outcome.delighted",
+        "feedback.plate.ceramicist-kappa",
+        "feedback.serve.ceramicist-kappa",
+        "story-flag.ceramicist-first-service-served",
+        "story.ceramicist.first-service",
+        "guest.fishmonger",
+        "dish.tamago-nigiri",
+        "outcome.content",
+        "feedback.plate.fishmonger-tamago",
+        "feedback.serve.fishmonger-tamago",
+        "story-flag.fishmonger-first-service-served",
+        "story.fishmonger.first-service",
+        "guest.courier",
+        "dish.salmon-nigiri",
+        "feedback.plate.courier-salmon",
+        "feedback.serve.courier-salmon",
+        "story-flag.courier-first-service-served",
+        "story.courier.first-service",
+        "presentation.indigo-rim"
+      ],
+      "orders": [
+        {
+          "orderId": "ceramicist-kappa",
+          "statusRef": "order-state.served",
+          "stepIndex": 5,
+          "stepTotal": 5,
+          "active": false,
+          "portraitKey": "guest-ceramicist-delighted",
+          "dishAssetKey": "dish-kappa-maki-plated"
+        },
+        {
+          "orderId": "fishmonger-tamago",
+          "statusRef": "order-state.served",
+          "stepIndex": 4,
+          "stepTotal": 4,
+          "active": false,
+          "portraitKey": "guest-fishmonger-content",
+          "dishAssetKey": "dish-tamago-nigiri-plated"
+        },
+        {
+          "orderId": "courier-salmon",
+          "statusRef": "order-state.served",
+          "stepIndex": 4,
+          "stepTotal": 4,
+          "active": false,
+          "portraitKey": "guest-courier-content",
+          "dishAssetKey": "dish-salmon-nigiri-plated"
+        }
+      ],
+      "ledgerOrderIds": [
+        "ceramicist-kappa",
+        "fishmonger-tamago",
+        "courier-salmon"
+      ],
+      "sceneKey": "counter-curtain-open",
+      "sceneLayers": [
+        {
+          "assetKey": "counter-lamp-lit",
+          "x": 232,
+          "y": 12
+        }
+      ],
+      "restorationKey": null,
+      "unlockKey": "dish-salmon-sashimi-locked"
+    },
+    "prompt.restoration.choose": {
+      "phase": "CLOSING",
+      "choices": [
+        {
+          "id": "mend-counter-stool",
+          "labelRef": "restoration.mend-counter-stool",
+          "actionLabelRef": "action.restoration.mend-counter-stool",
+          "commandName": "service.choose-restoration",
+          "payload": {
+            "choice": "mend-counter-stool"
+          },
+          "assetKey": "restoration-counter-stool"
+        },
+        {
+          "id": "polish-display-shelf",
+          "labelRef": "restoration.polish-display-shelf",
+          "actionLabelRef": "action.restoration.polish-display-shelf",
+          "commandName": "service.choose-restoration",
+          "payload": {
+            "choice": "polish-display-shelf"
+          },
+          "assetKey": "restoration-display-shelf"
+        },
+        {
+          "id": "refresh-menu-board",
+          "labelRef": "restoration.refresh-menu-board",
+          "actionLabelRef": "action.restoration.refresh-menu-board",
+          "commandName": "service.choose-restoration",
+          "payload": {
+            "choice": "refresh-menu-board"
+          },
+          "assetKey": "restoration-menu-board"
+        }
+      ],
+      "facts": [
+        "service.first-evening",
+        "phase.closing",
+        "ledger.first-evening",
+        "guest.ceramicist",
+        "dish.kappa-maki",
+        "outcome.delighted",
+        "feedback.plate.ceramicist-kappa",
+        "feedback.serve.ceramicist-kappa",
+        "story-flag.ceramicist-first-service-served",
+        "story.ceramicist.first-service",
+        "guest.fishmonger",
+        "dish.tamago-nigiri",
+        "outcome.content",
+        "feedback.plate.fishmonger-tamago",
+        "feedback.serve.fishmonger-tamago",
+        "story-flag.fishmonger-first-service-served",
+        "story.fishmonger.first-service",
+        "guest.courier",
+        "dish.salmon-nigiri",
+        "feedback.plate.courier-salmon",
+        "feedback.serve.courier-salmon",
+        "story-flag.courier-first-service-served",
+        "story.courier.first-service",
+        "presentation.indigo-rim"
+      ],
+      "orders": [
+        {
+          "orderId": "ceramicist-kappa",
+          "statusRef": "order-state.served",
+          "stepIndex": 5,
+          "stepTotal": 5,
+          "active": false,
+          "portraitKey": "guest-ceramicist-delighted",
+          "dishAssetKey": "dish-kappa-maki-plated"
+        },
+        {
+          "orderId": "fishmonger-tamago",
+          "statusRef": "order-state.served",
+          "stepIndex": 4,
+          "stepTotal": 4,
+          "active": false,
+          "portraitKey": "guest-fishmonger-content",
+          "dishAssetKey": "dish-tamago-nigiri-plated"
+        },
+        {
+          "orderId": "courier-salmon",
+          "statusRef": "order-state.served",
+          "stepIndex": 4,
+          "stepTotal": 4,
+          "active": false,
+          "portraitKey": "guest-courier-content",
+          "dishAssetKey": "dish-salmon-nigiri-plated"
+        }
+      ],
+      "ledgerOrderIds": [
+        "ceramicist-kappa",
+        "fishmonger-tamago",
+        "courier-salmon"
+      ],
+      "sceneKey": "counter-curtain-open",
+      "sceneLayers": [
+        {
+          "assetKey": "counter-lamp-lit",
+          "x": 232,
+          "y": 12
+        }
+      ],
+      "restorationKey": null,
+      "unlockKey": "dish-salmon-sashimi-locked"
+    },
+    "prompt.service.settled": {
+      "phase": "SETTLED",
+      "choices": [],
+      "facts": [
+        "service.first-evening",
+        "phase.settled",
+        "ledger.first-evening",
+        "unlock.atlantic-salmon-sashimi@1",
+        "guest.ceramicist",
+        "dish.kappa-maki",
+        "outcome.delighted",
+        "feedback.plate.ceramicist-kappa",
+        "feedback.serve.ceramicist-kappa",
+        "story-flag.ceramicist-first-service-served",
+        "story.ceramicist.first-service",
+        "guest.fishmonger",
+        "dish.tamago-nigiri",
+        "outcome.content",
+        "feedback.plate.fishmonger-tamago",
+        "feedback.serve.fishmonger-tamago",
+        "story-flag.fishmonger-first-service-served",
+        "story.fishmonger.first-service",
+        "guest.courier",
+        "dish.salmon-nigiri",
+        "feedback.plate.courier-salmon",
+        "feedback.serve.courier-salmon",
+        "story-flag.courier-first-service-served",
+        "story.courier.first-service",
+        "presentation.indigo-rim",
+        "restoration.mend-counter-stool"
+      ],
+      "orders": [
+        {
+          "orderId": "ceramicist-kappa",
+          "statusRef": "order-state.served",
+          "stepIndex": 5,
+          "stepTotal": 5,
+          "active": false,
+          "portraitKey": "guest-ceramicist-delighted",
+          "dishAssetKey": "dish-kappa-maki-plated"
+        },
+        {
+          "orderId": "fishmonger-tamago",
+          "statusRef": "order-state.served",
+          "stepIndex": 4,
+          "stepTotal": 4,
+          "active": false,
+          "portraitKey": "guest-fishmonger-content",
+          "dishAssetKey": "dish-tamago-nigiri-plated"
+        },
+        {
+          "orderId": "courier-salmon",
+          "statusRef": "order-state.served",
+          "stepIndex": 4,
+          "stepTotal": 4,
+          "active": false,
+          "portraitKey": "guest-courier-content",
+          "dishAssetKey": "dish-salmon-nigiri-plated"
+        }
+      ],
+      "ledgerOrderIds": [
+        "ceramicist-kappa",
+        "fishmonger-tamago",
+        "courier-salmon"
+      ],
+      "sceneKey": "counter-curtain-closed",
+      "sceneLayers": [
+        {
+          "assetKey": "counter-lamp-lit",
+          "x": 232,
+          "y": 12
+        },
+        {
+          "assetKey": "restoration-counter-stool",
+          "x": 24,
+          "y": 100
+        }
+      ],
+      "restorationKey": "restoration-counter-stool",
+      "unlockKey": "dish-salmon-sashimi"
+    },
+    "prompt.service.abandoned": {
+      "phase": "ABANDONED",
+      "choices": [
+        {
+          "id": "primary",
+          "labelRef": "action.service.start-new",
+          "actionLabelRef": "action.service.start-new",
+          "commandName": "service.start-new",
+          "payload": {},
+          "assetKey": null
+        }
+      ],
+      "facts": [
+        "service.first-evening",
+        "phase.abandoned"
+      ],
+      "orders": [
+        {
+          "orderId": "ceramicist-kappa",
+          "statusRef": "order-state.discarded",
+          "stepIndex": 2,
+          "stepTotal": 5,
+          "active": false,
+          "portraitKey": "guest-ceramicist-recoverable",
+          "dishAssetKey": "dish-kappa-maki"
+        },
+        {
+          "orderId": "fishmonger-tamago",
+          "statusRef": "order-state.discarded",
+          "stepIndex": 0,
+          "stepTotal": 4,
+          "active": false,
+          "portraitKey": "guest-fishmonger-recoverable",
+          "dishAssetKey": "dish-tamago-nigiri"
+        },
+        {
+          "orderId": "courier-salmon",
+          "statusRef": "order-state.discarded",
+          "stepIndex": 0,
+          "stepTotal": 4,
+          "active": false,
+          "portraitKey": "guest-courier-recoverable",
+          "dishAssetKey": "dish-salmon-nigiri"
+        }
+      ],
+      "ledgerOrderIds": [],
+      "sceneKey": "counter-curtain-closed",
+      "sceneLayers": [
+        {
+          "assetKey": "counter-lamp-lit",
+          "x": 232,
+          "y": 12
+        }
+      ],
+      "restorationKey": null,
+      "unlockKey": "dish-salmon-sashimi-locked"
+    }
   }
 } as const);

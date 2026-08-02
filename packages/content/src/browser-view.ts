@@ -69,6 +69,7 @@ export interface BrowserEveningServiceView {
   readonly schemaVersion: 1;
   readonly contentVersion: typeof FIRST_EVENING_CONTENT_VERSION;
   readonly revision: number;
+  readonly generation: number;
   readonly identity: "guest" | "player";
   readonly identityLabel: "Guest play · no wallet" | "Saved play · no wallet";
   readonly phase: "IDLE" | "OPEN" | "CLOSING" | "SETTLED" | "ABANDONED";
@@ -167,12 +168,14 @@ function restorationAsset(choiceId: string): BrowserServiceAsset | null {
 }
 
 function choiceLabelRef(projection: EveningServiceProjection, choiceId: string): string {
+  if (projection.primaryCommand === "service.start-new") return "action.service.start-new";
   if (projection.primaryCommand === "service.choose-presentation") return `presentation.${choiceId}`;
   if (projection.primaryCommand === "service.choose-restoration") return `restoration.${choiceId}`;
   return projection.currentPromptId;
 }
 
 function choiceActionRef(projection: EveningServiceProjection, choiceId: string): string {
+  if (projection.primaryCommand === "service.start-new") return "action.service.start-new";
   if (projection.primaryCommand === "service.choose-presentation") return `action.presentation.${choiceId}`;
   if (projection.primaryCommand === "service.choose-restoration") return `action.restoration.${choiceId}`;
   return projection.currentPromptId;
@@ -234,7 +237,7 @@ export function buildBrowserEveningServiceView(
   if (checkpoint.contentVersion !== FIRST_EVENING_CONTENT_VERSION) throw new Error("Browser view received an unsupported content version.");
   const activeOrder = checkpoint.orders[checkpoint.activeOrderIndex] ?? null;
   const automaticChoice = projection.primaryCommand && projection.allowedChoiceIds.length === 0
-    ? [{ id: "primary", label: resolveCopy(projection.currentPromptId), actionLabel: resolveCopy(projection.currentPromptId), commandName: projection.primaryCommand, payload: {} as JsonObject, asset: null }]
+    ? [{ id: "primary", label: resolveCopy(choiceLabelRef(projection, "primary")), actionLabel: resolveCopy(choiceActionRef(projection, "primary")), commandName: projection.primaryCommand, payload: {} as JsonObject, asset: null }]
     : [];
   const choices = projection.primaryCommand ? [
     ...projection.allowedChoiceIds.map((id) => ({
@@ -285,6 +288,7 @@ export function buildBrowserEveningServiceView(
     schemaVersion: 1,
     contentVersion: FIRST_EVENING_CONTENT_VERSION,
     revision: checkpoint.revision,
+    generation: checkpoint.generation,
     identity,
     identityLabel: identity === "guest" ? "Guest play · no wallet" : "Saved play · no wallet",
     phase: checkpoint.phase,
