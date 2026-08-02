@@ -35,6 +35,7 @@ CREATE TABLE samurai_persistence.wallet_runtime_links (
   player_session_delivery_generation bigint NOT NULL CHECK (player_session_delivery_generation > 0),
   credential_id uuid,
   linked_challenge_id uuid,
+  linked_challenge_state text CHECK (linked_challenge_state IS NULL OR linked_challenge_state IN ('ISSUED','CONSUMED','EXPIRED','REVOKED')),
   chain_id text NOT NULL CHECK (chain_id ~ '^Net[1-9A-HJ-NP-Za-km-z]{12}$'),
   account text NOT NULL CHECK (account ~ '^tz[1-4][1-9A-HJ-NP-Za-km-z]{33}$'),
   provider_id text NOT NULL CHECK (provider_id IN ('localnet-wallet','deterministic-wallet')),
@@ -63,31 +64,40 @@ CREATE TABLE samurai_persistence.wallet_runtime_links (
   CHECK (public_link_ref ~ '^wl_[A-Za-z0-9_-]{22}$'),
   CHECK (permission_scopes = ARRAY['account']::text[]),
   CHECK (changed_at >= created_at),
+  CHECK (state IN ('DISCONNECTED','REVOKED','EXPIRED','REJECTED','CANCELLED')
+    OR (runtime_generation < 9007199254740991 AND session_revision < 9007199254740991)),
   CHECK (
-    (state IN ('UNLINKED','CONNECTING') AND credential_id IS NULL AND linked_challenge_id IS NULL AND terminal_reason IS NULL
+    (state IN ('UNLINKED','CONNECTING') AND credential_id IS NULL AND linked_challenge_id IS NULL AND linked_challenge_state IS NULL AND terminal_reason IS NULL
       AND disconnected_at IS NULL AND revoked_at IS NULL)
-    OR (state = 'PERMISSIONED' AND credential_id IS NULL AND linked_challenge_id IS NULL
+    OR (state = 'PERMISSIONED' AND credential_id IS NULL AND linked_challenge_id IS NULL AND linked_challenge_state IS NULL
       AND terminal_reason = 'ACCOUNT_PROOF_UNAVAILABLE' AND disconnected_at IS NULL AND revoked_at IS NULL)
-    OR (state = 'LINKED_EXISTING' AND credential_id IS NOT NULL AND linked_challenge_id IS NULL
+    OR (state = 'LINKED_EXISTING' AND credential_id IS NOT NULL AND linked_challenge_id IS NULL AND linked_challenge_state IS NULL
       AND terminal_reason IS NULL AND disconnected_at IS NULL AND revoked_at IS NULL)
-    OR (state IN ('CHALLENGE_ISSUED','PROOF_PENDING') AND credential_id IS NULL AND linked_challenge_id IS NOT NULL
+    OR (state IN ('CHALLENGE_ISSUED','PROOF_PENDING') AND credential_id IS NULL AND linked_challenge_id IS NOT NULL AND linked_challenge_state = 'ISSUED'
       AND terminal_reason IS NULL AND disconnected_at IS NULL AND revoked_at IS NULL)
-    OR (state = 'LINKED' AND credential_id IS NOT NULL AND linked_challenge_id IS NOT NULL
+    OR (state = 'LINKED' AND credential_id IS NOT NULL AND linked_challenge_id IS NOT NULL AND linked_challenge_state = 'CONSUMED'
       AND terminal_reason IS NULL AND disconnected_at IS NULL AND revoked_at IS NULL)
-    OR (state = 'REJECTED' AND credential_id IS NULL AND linked_challenge_id IS NULL AND terminal_reason = 'PROVIDER_REJECTED'
+    OR (state = 'REJECTED' AND credential_id IS NULL AND linked_challenge_id IS NULL AND linked_challenge_state IS NULL AND terminal_reason = 'PROVIDER_REJECTED'
       AND disconnected_at IS NULL AND revoked_at IS NULL)
-    OR (state = 'CANCELLED' AND credential_id IS NULL AND linked_challenge_id IS NULL AND terminal_reason = 'PROVIDER_CANCELLED'
+    OR (state = 'CANCELLED' AND credential_id IS NULL AND linked_challenge_id IS NULL AND linked_challenge_state IS NULL AND terminal_reason = 'PROVIDER_CANCELLED'
       AND disconnected_at IS NULL AND revoked_at IS NULL)
-    OR (state = 'EXPIRED' AND credential_id IS NULL AND linked_challenge_id IS NOT NULL AND terminal_reason = 'CHALLENGE_EXPIRED'
+    OR (state = 'EXPIRED' AND credential_id IS NULL AND linked_challenge_id IS NOT NULL AND linked_challenge_state = 'EXPIRED' AND terminal_reason = 'CHALLENGE_EXPIRED'
       AND disconnected_at IS NULL AND revoked_at IS NULL)
     OR (state = 'STALE' AND terminal_reason IN ('WRONG_NETWORK','ACCOUNT_CHANGED','PERMISSION_CHANGED','PROVIDER_CHANGED','RUNTIME_CONTRADICTION')
-      AND ((credential_id IS NULL AND linked_challenge_id IS NULL) OR credential_id IS NOT NULL)
+      AND ((credential_id IS NULL AND linked_challenge_id IS NULL AND linked_challenge_state IS NULL)
+        OR (credential_id IS NOT NULL AND ((linked_challenge_id IS NULL AND linked_challenge_state IS NULL)
+          OR (linked_challenge_id IS NOT NULL AND linked_challenge_state = 'CONSUMED'))))
       AND disconnected_at IS NULL AND revoked_at IS NULL)
     OR (state = 'DISCONNECTED' AND terminal_reason = 'PROVIDER_DISCONNECTED'
-      AND ((credential_id IS NULL AND linked_challenge_id IS NULL) OR credential_id IS NOT NULL)
+      AND ((credential_id IS NULL AND linked_challenge_id IS NULL AND linked_challenge_state IS NULL)
+        OR (credential_id IS NOT NULL AND ((linked_challenge_id IS NULL AND linked_challenge_state IS NULL)
+          OR (linked_challenge_id IS NOT NULL AND linked_challenge_state = 'CONSUMED'))))
       AND disconnected_at IS NOT NULL AND revoked_at IS NULL)
     OR (state = 'REVOKED' AND terminal_reason IN ('SESSION_REVOKED','CREDENTIAL_REVOKED')
-      AND ((credential_id IS NULL AND linked_challenge_id IS NULL) OR credential_id IS NOT NULL)
+      AND ((credential_id IS NULL AND linked_challenge_id IS NULL AND linked_challenge_state IS NULL)
+        OR (credential_id IS NULL AND linked_challenge_id IS NOT NULL AND linked_challenge_state = 'REVOKED')
+        OR (credential_id IS NOT NULL AND ((linked_challenge_id IS NULL AND linked_challenge_state IS NULL)
+          OR (linked_challenge_id IS NOT NULL AND linked_challenge_state = 'CONSUMED'))))
       AND disconnected_at IS NULL AND revoked_at IS NOT NULL)
   ),
   CHECK (disconnected_at IS NULL OR disconnected_at = changed_at),
@@ -169,11 +179,20 @@ CREATE TABLE samurai_persistence.wallet_link_challenges (
     ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED
 );
 
-ALTER TABLE samurai_persistence.wallet_link_challenges ADD UNIQUE (challenge_id, wallet_link_id);
+ALTER TABLE samurai_persistence.wallet_link_challenges
+  ADD UNIQUE (challenge_id, wallet_link_id),
+  ADD UNIQUE (challenge_id, wallet_link_id, state),
+  ADD UNIQUE (challenge_id, wallet_link_id, credential_id, state);
 
 ALTER TABLE samurai_persistence.wallet_runtime_links
   ADD FOREIGN KEY (linked_challenge_id, id)
     REFERENCES samurai_persistence.wallet_link_challenges (challenge_id, wallet_link_id)
+    ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED,
+  ADD FOREIGN KEY (linked_challenge_id, id, linked_challenge_state)
+    REFERENCES samurai_persistence.wallet_link_challenges (challenge_id, wallet_link_id, state)
+    ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED,
+  ADD FOREIGN KEY (linked_challenge_id, id, credential_id, linked_challenge_state)
+    REFERENCES samurai_persistence.wallet_link_challenges (challenge_id, wallet_link_id, credential_id, state)
     ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED;
 
 CREATE INDEX wallet_link_challenges_expiry
@@ -192,11 +211,13 @@ BEGIN
        SET runtime_generation=CASE WHEN c.runtime_generation < 9007199254740991 THEN c.runtime_generation+1 ELSE c.runtime_generation END,
            session_revision=CASE WHEN c.session_revision < 9007199254740991 THEN c.session_revision+1 ELSE c.session_revision END
       FROM samurai_persistence.wallet_runtime_links l
-     WHERE c.wallet_link_id=l.id AND l.player_session_id=OLD.id;
+     WHERE c.wallet_link_id=l.id AND l.player_session_id=OLD.id AND l.state <> 'REVOKED';
     UPDATE samurai_persistence.wallet_runtime_links
        SET state='REVOKED', terminal_reason='SESSION_REVOKED',
            runtime_generation=CASE WHEN runtime_generation < 9007199254740991 THEN runtime_generation+1 ELSE runtime_generation END,
            session_revision=CASE WHEN session_revision < 9007199254740991 THEN session_revision+1 ELSE session_revision END,
+           linked_challenge_state=CASE WHEN linked_challenge_id IS NULL THEN NULL ELSE
+             (SELECT state FROM samurai_persistence.wallet_link_challenges c WHERE c.challenge_id=linked_challenge_id) END,
            changed_at=authority_now, disconnected_at=NULL, revoked_at=authority_now
      WHERE player_session_id=OLD.id AND state <> 'REVOKED';
   END IF;
@@ -206,6 +227,41 @@ END $$;
 CREATE TRIGGER player_session_wallet_runtime_revoke
 BEFORE UPDATE OF delivery_generation, state ON samurai_persistence.player_sessions
 FOR EACH ROW EXECUTE FUNCTION samurai_persistence.revoke_wallet_runtime_for_session_change();
+
+CREATE FUNCTION samurai_persistence.revoke_wallet_runtime_for_credential_change()
+RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE
+  authority_now timestamptz := NEW.revoked_at;
+BEGIN
+  IF OLD.state = 'active' AND NEW.state = 'revoked' THEN
+    UPDATE samurai_persistence.wallet_link_challenges c
+       SET state='REVOKED', revoked_at=authority_now
+     WHERE c.state='ISSUED' AND EXISTS (
+       SELECT 1 FROM samurai_persistence.wallet_runtime_links l
+        WHERE l.id=c.wallet_link_id AND l.credential_id=NEW.credential_id
+     );
+    UPDATE samurai_persistence.wallet_link_challenges c
+       SET runtime_generation=CASE WHEN c.runtime_generation < 9007199254740991 THEN c.runtime_generation+1 ELSE c.runtime_generation END,
+           session_revision=CASE WHEN c.session_revision < 9007199254740991 THEN c.session_revision+1 ELSE c.session_revision END
+     WHERE EXISTS (
+       SELECT 1 FROM samurai_persistence.wallet_runtime_links l
+        WHERE l.id=c.wallet_link_id AND l.credential_id=NEW.credential_id AND l.state <> 'REVOKED'
+     );
+    UPDATE samurai_persistence.wallet_runtime_links
+       SET state='REVOKED', terminal_reason='CREDENTIAL_REVOKED',
+           runtime_generation=CASE WHEN runtime_generation < 9007199254740991 THEN runtime_generation+1 ELSE runtime_generation END,
+           session_revision=CASE WHEN session_revision < 9007199254740991 THEN session_revision+1 ELSE session_revision END,
+           linked_challenge_state=CASE WHEN linked_challenge_id IS NULL THEN NULL ELSE
+             (SELECT state FROM samurai_persistence.wallet_link_challenges c WHERE c.challenge_id=linked_challenge_id) END,
+           changed_at=authority_now, disconnected_at=NULL, revoked_at=authority_now
+     WHERE credential_id=NEW.credential_id AND state <> 'REVOKED';
+  END IF;
+  RETURN NEW;
+END $$;
+
+CREATE TRIGGER wallet_credential_runtime_revoke
+AFTER UPDATE OF state ON samurai_persistence.wallet_credentials
+FOR EACH ROW EXECUTE FUNCTION samurai_persistence.revoke_wallet_runtime_for_credential_change();
 
 CREATE TABLE samurai_persistence.wallet_link_events (
   wallet_link_id uuid NOT NULL REFERENCES samurai_persistence.wallet_runtime_links(id) ON DELETE CASCADE,

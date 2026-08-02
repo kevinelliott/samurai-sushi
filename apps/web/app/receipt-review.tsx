@@ -30,6 +30,12 @@ async function sha256(value: unknown): Promise<string> {
   const bytes = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(canonical(value)));
   return [...new Uint8Array(bytes)].map((item) => item.toString(16).padStart(2, "0")).join("");
 }
+async function developmentBarrier(boundary: 1): Promise<void> {
+  if (process.env.NODE_ENV !== "development") return;
+  const barrier = (window as unknown as { __samuraiReceiptReviewTestBarrier?: (name: number) => Promise<void> })
+    .__samuraiReceiptReviewTestBarrier;
+  if (barrier) await barrier(boundary);
+}
 function shortened(value: string): string { return value.length > 22 ? `${value.slice(0, 10)}…${value.slice(-8)}` : value; }
 function plain(value: unknown, keys: readonly string[], message: string): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value) || Object.getPrototypeOf(value) !== Object.prototype
@@ -118,15 +124,15 @@ export function ReceiptReviewDoorway() {
   const close = useCallback(() => { openRef.current = false; retireAsync(); setOpen(false); setPhase("closed"); setRuntimeStale(false);
     dialogRef.current?.close(); window.requestAnimationFrame(() => invokerRef.current?.focus()); }, [retireAsync]);
 
-  const restore = useCallback(async (token: number) => {
+  const restore = useCallback(async (token: number, focusResult = false) => {
     setPhase("loading"); commitCopy(token, WALLET_REVIEW_COPY["receipt.review.loading"]);
     try {
       if (!active(token)) return; const response = await postJson(RECEIPT_REVIEW_RESTORE_PATH, "{}", controller().signal);
       if (!active(token) || !response.ok) throw new TypeError("restore"); const raw = await response.json();
       if (!active(token)) return; const body = restoreBody(raw); setDoorway(body.doorway); setRetiredWallet(body.walletAccess);
-      if (body.projection === null) { setPhase("access"); commitCopy(token, WALLET_REVIEW_COPY["wallet.access.required"]); return; }
+      if (body.projection === null) { setPhase("access"); commitCopy(token, WALLET_REVIEW_COPY["wallet.access.required"], focusResult); return; }
       const restored = parseBrowserSafeReceiptReviewProjection(body.projection); if (!active(token)) return;
-      projectionRef.current = restored; setProjection(restored); setPhase("review"); commitCopy(token, WALLET_REVIEW_COPY["receipt.review.restored"]);
+      projectionRef.current = restored; setProjection(restored); setPhase("review"); commitCopy(token, WALLET_REVIEW_COPY["receipt.review.restored"], focusResult);
     } catch { if (active(token)) { setPhase("unavailable"); commitCopy(token, WALLET_REVIEW_COPY["wallet.access.unavailable"], true); } }
   }, [active, commitCopy, controller]);
 
@@ -138,7 +144,7 @@ export function ReceiptReviewDoorway() {
   useEffect(() => () => { openRef.current = false; retireAsync(); }, [retireAsync]);
 
   const connect = useCallback(async () => {
-    retireAsync(); const token = generation.current; const runtimeGeneration = token; setPhase("requesting");
+    retireAsync(); const token = generation.current; const runtimeGeneration = token; setPhase("requesting"); setPreflight(null); setRuntimeStale(false);
     commitCopy(token, WALLET_REVIEW_COPY["wallet.access.requesting"]);
     try {
       const priorWallet = wallet ?? retiredWallet;
@@ -147,7 +153,8 @@ export function ReceiptReviewDoorway() {
           walletLinkRef: priorWallet.walletLinkRef, runtimeGeneration: priorWallet.runtimeGeneration, sessionRevision: priorWallet.sessionRevision }), controller().signal);
         if (!active(token) || !disconnected.ok) throw new TypeError("disconnect"); setRetiredWallet(null);
       }
-      if (!active(token)) return; const module = await import("./wallet-runtime-browser"); if (!active(token)) return;
+      if (!active(token)) return; const module = await import("./wallet-runtime-browser");
+      await developmentBarrier(1); if (!active(token)) return;
       const port = module.createBrowserWalletRuntimePort(); if (!active(token)) return;
       const permission = await port.requestPermission(); if (!active(token)) return;
       if (permission.status !== "PERMISSIONED") { setPhase(permission.status === "UNAVAILABLE" ? "unavailable" : "access"); commitCopy(token, permission.presentation, true); return; }
@@ -193,7 +200,15 @@ export function ReceiptReviewDoorway() {
     } catch { if (active(token, projection, wallet)) { setPhase("review"); commitCopy(token, WALLET_REVIEW_COPY["receipt.preflight.mismatch"], true); } }
   }, [active, commitCopy, controller, projection, runtimeStale, wallet]);
 
-  const recover = copy.recoveryAction?.ref.startsWith("wallet.access") ? connect : copy.recoveryAction?.ref === "receipt.preflight.retry" ? check : null;
+  const restoreAcknowledged = useCallback(() => {
+    retireAsync(); const token = generation.current; projectionRef.current = null; walletRef.current = null;
+    setProjection(null); setWallet(null); setRetiredWallet(null); setRuntimeStale(false); setPreflight(null); void restore(token, true);
+  }, [restore, retireAsync]);
+  const recoveryRef = copy.recoveryAction?.ref;
+  const recover = recoveryRef?.startsWith("wallet.access") ? connect
+    : recoveryRef === "receipt.preflight.retry" ? check
+      : recoveryRef === "receipt.review.restore" ? restoreAcknowledged
+        : recoveryRef === "review.close" ? close : null;
   return <section className="keepsake-doorway" aria-label="Optional service keepsake">
     <strong>Optional service keepsake</strong><span>Non-transferable · no financial value</span>
     <button ref={invokerRef} type="button" className="text-action review-invoker" onClick={openReview}>Review optional keepsake</button>
@@ -211,8 +226,8 @@ export function ReceiptReviewDoorway() {
         </section> : <>
           {doorway ? <ReceiptFacts projection={projection} doorway={doorway} generationToken={generation.current} commit={commitClipboard} /> : null}
           <section aria-labelledby="current-wallet"><h3 id="current-wallet">Current wallet</h3>{wallet ? <dl><div className="review-fact"><dt>Provider</dt><dd>{wallet.providerId}</dd></div><CopyFact label="Wallet account" value={wallet.account} compact generationToken={generation.current} commit={commitClipboard} /><CopyFact label="Wallet chain ID" value={wallet.chainId} generationToken={generation.current} commit={commitClipboard} /><div className="review-fact"><dt>Permission</dt><dd>Account access</dd></div><div className="review-fact"><dt>Credential match</dt><dd>{wallet.credentialMatch ? "Exact active credential match" : "Not verified"}</dd></div></dl> : <p>Wallet disconnected. The receipt details remain read-only.</p>}</section>
-          <section aria-labelledby="review-readiness"><h3 id="review-readiness">Review readiness</h3><p>{preflight?.status === "REVIEW_READY" ? "Exact current facts match." : preflight?.presentation.message ?? "Not checked."}</p></section>
-          <div className="review-actions">{wallet?.credentialMatch && !runtimeStale ? <button type="button" className="primary-action" disabled={phase === "preflight"} onClick={() => void check()}>{phase === "preflight" ? "Checking…" : preflight?.status === "REVIEW_READY" ? "Check again" : "Check review readiness"}</button> : <button type="button" className="text-action" onClick={() => void (recover ?? connect)()}>{copy.recoveryAction?.label ?? "Reconnect matching wallet"}</button>}<button type="button" className="text-action" onClick={close}>Close review</button></div>
+          <section aria-labelledby="review-readiness"><h3 id="review-readiness">Review readiness</h3><p>{preflight?.status === "REVIEW_READY" ? "Exact current facts match." : preflight?.presentation.message ?? "Not checked."}</p>{preflight?.status === "NOT_READY" && preflight.presentation.reasonRef ? <p><strong>Safe reason:</strong> <span className="selectable-fact">{preflight.presentation.reasonRef}</span></p> : null}</section>
+          <div className="review-actions">{preflight?.status === "NOT_READY" ? <button type="button" className="text-action" onClick={() => void (recover ?? close)()}>{preflight.presentation.recoveryAction?.label ?? "Close review"}</button> : wallet?.credentialMatch && !runtimeStale ? <button type="button" className="primary-action" disabled={phase === "preflight"} onClick={() => void check()}>{phase === "preflight" ? "Checking…" : preflight?.status === "REVIEW_READY" ? "Check again" : "Check review readiness"}</button> : <button type="button" className="text-action" onClick={() => void (recover ?? connect)()}>{copy.recoveryAction?.label ?? "Reconnect matching wallet"}</button>}<button type="button" className="text-action" onClick={close}>Close review</button></div>
           {wallet?.credentialMatch && !runtimeStale ? <p className="check-helper">Checks only. No signature or operation will be requested.</p> : null}
         </>}
       </div>

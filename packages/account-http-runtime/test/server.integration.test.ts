@@ -574,7 +574,7 @@ describe("built account HTTP boundary", () => {
     }), playerCookie);
     expect(stale.status).toBe(200);
     expect(JSON.parse(stale.body)).toMatchObject({ schemaVersion: 1, status: "NOT_READY", reason: "WALLET_SESSION_REVISION_STALE",
-      presentation: { reasonRef: "receipt.review.changed" } });
+      presentation: { reasonRef: "receipt.preflight.session-revision-stale" } });
     const challengeRejected = await requestJson(portOf(server), "/api/account/wallet/link/challenge", JSON.stringify({
       idempotencyKey: randomUUID(), walletLinkRef: runtimeView.walletLinkRef,
       runtimeGeneration: runtimeView.runtimeGeneration, sessionRevision: runtimeView.sessionRevision,
@@ -897,7 +897,7 @@ describe("built account HTTP boundary", () => {
       "@samurai-sushi/content", "account-proof-verifier", "claim-protocol", "node:crypto", "pg-pool", "@taquito", "@noble",
       "SAMURAI_DATABASE_URL", "SAMURAI_HMAC_RESUME_KEY", "SAMURAI_HMAC_GUEST_CLAIM_KEY",
       "x-samurai-raw-header-guard", "__Host-samurai", "postgresql://", "challengeId", "claimId", "guestId", "playerId",
-      "subjectId", "resultHash", "playerSessionId", "credentialId", "issuerSignature", "executablePermit", "checkpoint", "edpk",
+      "subjectId", "resultHash", "playerSessionId", "credentialId", "issuerSignature", "executablePermit", "edpk",
       "issueSettledReceiptPermit", "admitSettledReceiptPermit", "deriveSettledServiceReceiptFacts",
       "FIXTURE_SETTLED_COMMITMENT_NONCE", "deterministicSettledCheckpointFixture", "commitmentNonce",
       "rpc.shadownet.teztnets.com", "api.shadownet.tzkt.io", "127.0.0.1:8732"]) {

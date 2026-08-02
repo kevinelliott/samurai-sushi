@@ -22,21 +22,21 @@ export type ReceiptReviewPreflightResult = Readonly<{
 }> | Readonly<{ schemaVersion: 1; status: "NOT_READY"; reason: ReceiptPreflightReason; presentation: WalletReviewCopy }>;
 
 const PREFLIGHT_PRESENTATION: Readonly<Record<ReceiptPreflightReason, WalletReviewCopy>> = Object.freeze({
-  AUTHENTICATION_REQUIRED: WALLET_REVIEW_COPY["receipt.preflight.mismatch"],
-  SERVICE_NOT_SETTLED: WALLET_REVIEW_COPY["receipt.review.changed"],
-  NOT_FOUND: WALLET_REVIEW_COPY["receipt.review.changed"],
-  PROJECTION_STALE: WALLET_REVIEW_COPY["receipt.review.changed"],
-  INTENT_EXPIRED: WALLET_REVIEW_COPY["receipt.review.expired"],
-  WALLET_LINK_REQUIRED: WALLET_REVIEW_COPY["wallet.access.disconnected"],
-  WALLET_LINK_REVOKED: WALLET_REVIEW_COPY["wallet.access.unavailable"],
-  RUNTIME_GENERATION_STALE: WALLET_REVIEW_COPY["receipt.review.changed"],
-  WALLET_SESSION_REVISION_STALE: WALLET_REVIEW_COPY["receipt.review.changed"],
-  WALLET_ACCOUNT_CHANGED: WALLET_REVIEW_COPY["wallet.access.account-changed"],
-  WRONG_NETWORK: WALLET_REVIEW_COPY["wallet.access.wrong-network"],
-  WALLET_SCOPE_MISSING: WALLET_REVIEW_COPY["wallet.access.permission-changed"],
-  PROVIDER_CHANGED: WALLET_REVIEW_COPY["wallet.access.provider-changed"],
-  REVIEW_FACTS_MISMATCH: WALLET_REVIEW_COPY["receipt.preflight.mismatch"],
-  POLICY_MISMATCH: WALLET_REVIEW_COPY["receipt.review.changed"],
+  AUTHENTICATION_REQUIRED: WALLET_REVIEW_COPY["receipt.preflight.authentication-required"],
+  SERVICE_NOT_SETTLED: WALLET_REVIEW_COPY["receipt.preflight.service-not-settled"],
+  NOT_FOUND: WALLET_REVIEW_COPY["receipt.preflight.not-found"],
+  PROJECTION_STALE: WALLET_REVIEW_COPY["receipt.preflight.projection-stale"],
+  INTENT_EXPIRED: WALLET_REVIEW_COPY["receipt.preflight.intent-expired"],
+  WALLET_LINK_REQUIRED: WALLET_REVIEW_COPY["receipt.preflight.wallet-link-required"],
+  WALLET_LINK_REVOKED: WALLET_REVIEW_COPY["receipt.preflight.wallet-link-revoked"],
+  RUNTIME_GENERATION_STALE: WALLET_REVIEW_COPY["receipt.preflight.runtime-generation-stale"],
+  WALLET_SESSION_REVISION_STALE: WALLET_REVIEW_COPY["receipt.preflight.session-revision-stale"],
+  WALLET_ACCOUNT_CHANGED: WALLET_REVIEW_COPY["receipt.preflight.account-changed"],
+  WRONG_NETWORK: WALLET_REVIEW_COPY["receipt.preflight.wrong-network"],
+  WALLET_SCOPE_MISSING: WALLET_REVIEW_COPY["receipt.preflight.scope-missing"],
+  PROVIDER_CHANGED: WALLET_REVIEW_COPY["receipt.preflight.provider-changed"],
+  REVIEW_FACTS_MISMATCH: WALLET_REVIEW_COPY["receipt.preflight.review-facts-mismatch"],
+  POLICY_MISMATCH: WALLET_REVIEW_COPY["receipt.preflight.policy-mismatch"],
 });
 
 export function notReady(reason: ReceiptPreflightReason): ReceiptReviewPreflightResult {

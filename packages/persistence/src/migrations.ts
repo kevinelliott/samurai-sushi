@@ -62,8 +62,8 @@ const MIGRATION_MANIFEST = [
   },
   {
     name: "0007_receipt_review_wallet_link.sql",
-    checksumHex: "331f7d5a017f243718bfe7c7593d238538fb0b0ee7308ffb5b11830c74355dcc",
-    catalogChecksumHex: "b497834213348a645dcade0fac5392bf75954a3681720bd347d20317164afe7d",
+    checksumHex: "d75acf54dfc5ac9f51417b1ee03ef717a61beddb686bd64b5a852cedf7c96f82",
+    catalogChecksumHex: "81bc21f0df3a261c2c6d4c19920d95b36ab053355787f7c3c3e6787335ba7514",
   },
 ] as const;
 

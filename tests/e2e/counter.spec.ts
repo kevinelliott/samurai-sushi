@@ -15,6 +15,7 @@ import {
   type EveningServiceCheckpoint,
 } from "../../packages/domain/src/evening-service";
 import { FIRST_SERVICE_BROWSER_INVENTORY } from "../../apps/web/app/service-browser-inventory.generated";
+import { notReady } from "../../packages/wallet-link/src/preflight";
 import { WALLET_REVIEW_COPY } from "../../packages/wallet-link/src/presentation";
 import { GENERATED_REGISTERED_RECEIPT_NETWORK_INVENTORY, RECEIPT_STATUS_PRESENTATION } from "../../packages/receipt-lifecycle/src/review-projection";
 
@@ -126,14 +127,7 @@ function serviceFixture(initial = createInitialEveningServiceCheckpoint(), activ
     if (activeReview && path === "/api/account/receipt/review/preflight") {
       const request = JSON.parse(route.request().postData() ?? "{}") as Record<string, unknown>;
       if (preflightReason) {
-        const presentation = preflightReason === "INTENT_EXPIRED" ? WALLET_REVIEW_COPY["receipt.review.expired"]
-          : preflightReason === "WALLET_ACCOUNT_CHANGED" ? WALLET_REVIEW_COPY["wallet.access.account-changed"]
-            : preflightReason === "WRONG_NETWORK" ? WALLET_REVIEW_COPY["wallet.access.wrong-network"]
-              : preflightReason === "WALLET_SCOPE_MISSING" ? WALLET_REVIEW_COPY["wallet.access.permission-changed"]
-                : preflightReason === "PROVIDER_CHANGED" ? WALLET_REVIEW_COPY["wallet.access.provider-changed"]
-                  : preflightReason === "PROJECTION_STALE" ? WALLET_REVIEW_COPY["receipt.review.changed"]
-                    : WALLET_REVIEW_COPY["receipt.preflight.mismatch"];
-        return json(route, 200, { schemaVersion: 1, status: "NOT_READY", reason: preflightReason, presentation });
+        return json(route, 200, notReady(preflightReason as Parameters<typeof notReady>[0]));
       }
       return json(route, 200, { schemaVersion: 1, status: "REVIEW_READY", intentRef: request.publicIntentRef,
         projectionRevision: request.expectedProjectionRevision, walletLinkRef: request.walletLinkRef,
@@ -264,6 +258,80 @@ async function forceAnimationFrameBeforeReactCommit(page: Page): Promise<void> {
       value: (callback: FrameRequestCallback) => { callback(performance.now()); return 1; },
     });
   });
+}
+
+const EXPECTED_REVIEW_RUNTIME = Object.freeze({ providerId: "deterministic-wallet", chainId: "NetXtJqPyJGB6Pc",
+  account: "tz1aSkwEot3L2kmUvcoxzjMomb9mvBNuzFK6", permissionScopes: ["account"] as const });
+type ReviewFetchBoundary = "headers" | "body";
+
+async function installControlledReviewBrowser(page: Page): Promise<void> {
+  await page.addInitScript((expected) => {
+    type Gate = { armed: number; started: number; resolvers: (() => void)[] };
+    const fetchGates = new Map<string, Gate>();
+    const gate = (path: string, boundary: string) => {
+      const key = `${path}:${boundary}`; const found = fetchGates.get(key) ?? { armed: 0, started: 0, resolvers: [] };
+      fetchGates.set(key, found); return found;
+    };
+    const wait = async (path: string, boundary: string) => {
+      const current = gate(path, boundary); if (current.armed < 1) return;
+      current.armed -= 1; current.started += 1; await new Promise<void>((resolve) => { current.resolvers.push(resolve); });
+    };
+    const importGate = { armed: 0, started: 0, resolvers: [] as (() => void)[] };
+    const state = { mode: "PERMISSIONED", runtime: expected, permissionResolvers: [] as ((value: unknown) => void)[],
+      activeListeners: [] as ((value: unknown) => void)[], listenerHistory: [] as ((value: unknown) => void)[], fetchGates };
+    const counters = { permission: 0, read: 0, disconnect: 0, subscribe: 0, unsubscribe: 0,
+      sign: 0, send: 0, inject: 0, broadcast: 0, contract: 0, fee: 0, observe: 0 };
+    Object.defineProperty(window, "__reviewBarrierState", { value: state });
+    Object.defineProperty(window, "__walletTripwires", { value: counters });
+    Object.defineProperty(window, "__samuraiReceiptReviewTestBarrier", { value: async (name: number) => {
+      if (name !== 1 || importGate.armed < 1) return;
+      importGate.armed -= 1; importGate.started += 1; await new Promise<void>((resolve) => { importGate.resolvers.push(resolve); });
+    } });
+    Object.defineProperty(window, "samuraiLocalnetWallet", { value: {
+      requestPermission: async () => { counters.permission += 1;
+        if (state.mode === "DEFER") return new Promise((resolve) => { state.permissionResolvers.push(resolve); });
+        return state.mode === "PERMISSIONED" ? state.runtime : { status: state.mode }; },
+      readRuntime: async () => { counters.read += 1; return state.runtime; },
+      subscribe: (listener: (value: unknown) => void) => { counters.subscribe += 1; state.activeListeners.push(listener); state.listenerHistory.push(listener);
+        return () => { counters.unsubscribe += 1; state.activeListeners = state.activeListeners.filter((item) => item !== listener); }; },
+      disconnect: async () => { counters.disconnect += 1; },
+    } });
+    const originalFetch = window.fetch.bind(window);
+    Object.defineProperty(window, "fetch", { configurable: true, value: async (input: RequestInfo | URL, init?: RequestInit) => {
+      const path = new URL(input instanceof Request ? input.url : String(input), window.location.href).pathname;
+      const response = await originalFetch(input, init); await wait(path, "headers");
+      return new Proxy(response, { get(target, property) {
+        if (property === "json") return async () => { await wait(path, "body"); return target.json(); };
+        const value = Reflect.get(target, property, target); return typeof value === "function" ? value.bind(target) : value;
+      } });
+    } });
+    Object.defineProperty(window, "__reviewBarrierControl", { value: {
+      arm: (path: string, boundary: string) => { gate(path, boundary).armed += 1; },
+      started: (path: string, boundary: string) => gate(path, boundary).started,
+      release: (path: string, boundary: string) => { gate(path, boundary).resolvers.shift()?.(); },
+      armImport: () => { importGate.armed += 1; }, startedImport: () => importGate.started,
+      releaseImport: () => { importGate.resolvers.shift()?.(); },
+    } });
+  }, EXPECTED_REVIEW_RUNTIME);
+}
+
+async function armReviewFetchBarrier(page: Page, path: string, boundary: ReviewFetchBoundary): Promise<Readonly<{
+  started: () => Promise<void>; release: () => Promise<void> }>> {
+  await page.evaluate(({ path: target, boundary: point }) => {
+    (window as unknown as { __reviewBarrierControl: { arm(path: string, boundary: string): void } }).__reviewBarrierControl.arm(target, point);
+  }, { path, boundary });
+  return {
+    started: () => expect.poll(() => page.evaluate(({ path: target, boundary: point }) =>
+      (window as unknown as { __reviewBarrierControl: { started(path: string, boundary: string): number } }).__reviewBarrierControl.started(target, point),
+    { path, boundary })).toBeGreaterThan(0),
+    release: () => page.evaluate(({ path: target, boundary: point }) =>
+      (window as unknown as { __reviewBarrierControl: { release(path: string, boundary: string): void } }).__reviewBarrierControl.release(target, point),
+    { path, boundary }),
+  };
+}
+
+async function reviewTripwires(page: Page): Promise<Record<string, number>> {
+  return page.evaluate(() => ({ ...(window as unknown as { __walletTripwires: Record<string, number> }).__walletTripwires }));
 }
 
 async function performProjectedChoice(page: Page, command: PublicCommand): Promise<void> {
@@ -496,11 +564,36 @@ test("@receipt-review distinct access, drift, preflight, keyboard, announcement,
   await emit({ status: "DISCONNECTED" }); await expect(page.getByRole("heading", { name: "Wallet disconnected" })).toBeFocused();
   await page.getByRole("button", { name: "Reconnect matching wallet" }).click();
   await expect(page.getByRole("heading", { name: "Wallet connected for review" })).toBeFocused();
-  for (const [reason, heading] of [["PROJECTION_STALE", "Receipt details changed"], ["INTENT_EXPIRED", "Receipt review expired"],
-    ["WALLET_ACCOUNT_CHANGED", "Wallet account changed"], ["WRONG_NETWORK", "Wallet network does not match"],
-    ["WALLET_SCOPE_MISSING", "Wallet permission changed"], ["PROVIDER_CHANGED", "Wallet provider changed"]] as const) {
+  for (const [reason, heading, reasonRef, recovery] of [
+    ["AUTHENTICATION_REQUIRED", "Review sign-in changed", "receipt.preflight.authentication-required", "Close review"],
+    ["SERVICE_NOT_SETTLED", "Service is not settled", "receipt.preflight.service-not-settled", "Close review"],
+    ["NOT_FOUND", "Receipt review unavailable", "receipt.preflight.not-found", "Close review"],
+    ["PROJECTION_STALE", "Receipt details changed", "receipt.preflight.projection-stale", "Review updated details"],
+    ["INTENT_EXPIRED", "Receipt review expired", "receipt.preflight.intent-expired", "Prepare a fresh review"],
+    ["WALLET_LINK_REQUIRED", "Matching wallet required", "receipt.preflight.wallet-link-required", "Reconnect matching wallet"],
+    ["WALLET_LINK_REVOKED", "Wallet credential revoked", "receipt.preflight.wallet-link-revoked", "Reconnect matching wallet"],
+    ["RUNTIME_GENERATION_STALE", "Wallet connection changed", "receipt.preflight.runtime-generation-stale", "Reconnect matching wallet"],
+    ["WALLET_SESSION_REVISION_STALE", "Wallet session changed", "receipt.preflight.session-revision-stale", "Reconnect matching wallet"],
+    ["WALLET_ACCOUNT_CHANGED", "Wallet account changed", "receipt.preflight.account-changed", "Reconnect matching wallet"],
+    ["WRONG_NETWORK", "Wallet network does not match", "receipt.preflight.wrong-network", "Try again on Localnet rehearsal"],
+    ["WALLET_SCOPE_MISSING", "Wallet permission changed", "receipt.preflight.scope-missing", "Reconnect wallet"],
+    ["PROVIDER_CHANGED", "Wallet provider changed", "receipt.preflight.provider-changed", "Reconnect matching wallet"],
+    ["REVIEW_FACTS_MISMATCH", "Reviewed facts changed", "receipt.preflight.review-facts-mismatch", "Review updated details"],
+    ["POLICY_MISMATCH", "Receipt policy changed", "receipt.preflight.policy-mismatch", "Review updated details"],
+  ] as const) {
     fixture.setPreflightReason(reason); await page.getByRole("button", { name: /check review readiness|check again/i }).click();
     await expect(page.getByRole("heading", { name: heading })).toBeFocused();
+    await expect(page.getByText(reasonRef, { exact: true })).toBeVisible();
+    await page.locator(".review-actions").last().getByRole("button", { name: recovery }).first().click();
+    if (recovery === "Close review") {
+      await expect(page.getByRole("dialog")).toHaveCount(0); await openReview();
+    }
+    if (recovery === "Close review" || recovery === "Review updated details" || recovery === "Prepare a fresh review") {
+      if (recovery !== "Close review") await expect(page.getByRole("heading", { name: "Receipt review restored" })).toBeFocused();
+      await expect(page.getByText("Wallet disconnected. The receipt details remain read-only.", { exact: true })).toBeVisible();
+      await page.getByRole("button", { name: "Reconnect matching wallet" }).click();
+    }
+    await expect(page.getByRole("heading", { name: "Wallet connected for review" })).toBeFocused();
   }
   fixture.setPreflightReason(null); await page.getByRole("button", { name: /check again|check review readiness/i }).click();
   await expect(page.getByRole("heading", { name: "Review ready" })).toBeFocused();
@@ -521,6 +614,138 @@ test("@receipt-review distinct access, drift, preflight, keyboard, announcement,
   await page.getByRole("button", { name: "Close review" }).first().click(); heldRestore.release(); await expect(page.getByRole("dialog")).toHaveCount(0);
   expect(await page.evaluate(() => (window as unknown as { __walletTripwires: Record<string, number> }).__walletTripwires))
     .toMatchObject({ sign: 0, send: 0, inject: 0, broadcast: 0, contract: 0, fee: 0, observe: 0 });
+});
+
+for (const boundary of ["headers", "body"] as const) {
+  for (const path of ["/api/account/receipt/review/restore", "/api/account/wallet/runtime/sync",
+    "/api/account/receipt/review/prepare", "/api/account/receipt/review/preflight"] as const) {
+    test(`@receipt-review closing at the ${path} ${boundary} barrier retires every continuation`, async ({ page }, testInfo) => {
+      test.skip(testInfo.project.name !== "desktop", "controlled response-boundary schedules are exercised once");
+      const settled = (compiledFirstEveningService.goldenReplay.at(-1) as {
+        readonly response: { readonly checkpoint: EveningServiceCheckpoint } }).response.checkpoint;
+      const fixture = serviceFixture(settled, true); await fixture.install(page); await installControlledReviewBrowser(page); await page.goto("/");
+      const barrier = await armReviewFetchBarrier(page, path, boundary);
+      const invoker = page.getByRole("button", { name: "Review optional keepsake" }); await invoker.click();
+      if (path !== "/api/account/receipt/review/restore") {
+        await expect(page.getByRole("heading", { name: "Wallet account required" }).first()).toBeVisible();
+        await page.getByRole("button", { name: /connect wallet/i }).click();
+      }
+      if (path === "/api/account/receipt/review/preflight") {
+        await expect(page.getByRole("heading", { name: "Wallet connected for review" })).toBeFocused();
+        await page.getByRole("button", { name: "Check review readiness" }).click();
+      }
+      await barrier.started();
+      const requestCounts = Object.fromEntries(fixture.requests.map((request) => [request,
+        fixture.requests.filter((candidate) => candidate === request).length]));
+      await page.getByRole("button", { name: "Close review" }).first().click(); await barrier.release();
+      await expect(page.getByRole("dialog")).toHaveCount(0); await expect(invoker).toBeFocused();
+      await page.evaluate(() => Promise.resolve());
+      if (path === "/api/account/receipt/review/restore") expect((await reviewTripwires(page)).permission).toBe(0);
+      if (path === "/api/account/wallet/runtime/sync") {
+        expect(fixture.requests.filter((request) => request === "/api/account/receipt/review/prepare")).toHaveLength(0);
+      }
+      if (path === "/api/account/receipt/review/prepare") expect((await reviewTripwires(page)).subscribe).toBe(0);
+      expect(Object.fromEntries(fixture.requests.map((request) => [request,
+        fixture.requests.filter((candidate) => candidate === request).length]))).toMatchObject(requestCounts);
+      expect(await reviewTripwires(page)).toMatchObject({ sign: 0, send: 0, inject: 0, broadcast: 0, contract: 0, fee: 0, observe: 0 });
+    });
+  }
+}
+
+test("@receipt-review a retired dynamic import cannot create a port or request permission", async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== "desktop", "the dynamic module boundary is exercised once");
+  const settled = (compiledFirstEveningService.goldenReplay.at(-1) as {
+    readonly response: { readonly checkpoint: EveningServiceCheckpoint } }).response.checkpoint;
+  const fixture = serviceFixture(settled, true); await fixture.install(page); await installControlledReviewBrowser(page);
+  await page.goto("/"); await page.evaluate(() => {
+    (window as unknown as { __reviewBarrierControl: { armImport(): void } }).__reviewBarrierControl.armImport();
+  });
+  const invoker = page.getByRole("button", { name: "Review optional keepsake" }); await invoker.click();
+  await expect(page.getByRole("heading", { name: "Wallet account required" }).first()).toBeVisible();
+  await page.getByRole("button", { name: /connect wallet/i }).click();
+  await expect.poll(() => page.evaluate(() =>
+    (window as unknown as { __reviewBarrierControl: { startedImport(): number } }).__reviewBarrierControl.startedImport())).toBe(1);
+  expect((await reviewTripwires(page)).permission).toBe(0);
+  await page.getByRole("button", { name: "Close review" }).first().click();
+  await page.evaluate(() => {
+    (window as unknown as { __reviewBarrierControl: { releaseImport(): void } }).__reviewBarrierControl.releaseImport();
+  });
+  await expect(page.getByRole("dialog")).toHaveCount(0); await expect(invoker).toBeFocused();
+  expect((await reviewTripwires(page)).permission).toBe(0);
+  expect(fixture.requests.filter((path) => path === "/api/account/wallet/runtime/sync")).toHaveLength(0);
+});
+
+test("@receipt-review an old permission result resolving after a new connection cannot win", async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== "desktop", "the permission winner order is exercised once");
+  const settled = (compiledFirstEveningService.goldenReplay.at(-1) as {
+    readonly response: { readonly checkpoint: EveningServiceCheckpoint } }).response.checkpoint;
+  const fixture = serviceFixture(settled, true); await fixture.install(page); await installControlledReviewBrowser(page); await page.goto("/");
+  const setMode = (mode: string) => page.evaluate((next) => {
+    (window as unknown as { __reviewBarrierState: { mode: string } }).__reviewBarrierState.mode = next;
+  }, mode);
+  const open = async () => { await page.getByRole("button", { name: "Review optional keepsake" }).click();
+    await expect(page.getByRole("heading", { name: "Wallet account required" }).first()).toBeVisible(); };
+  await setMode("DEFER"); await open(); await page.getByRole("button", { name: /connect wallet/i }).click();
+  await expect.poll(() => reviewTripwires(page).then((value) => value.permission)).toBe(1);
+  await page.getByRole("button", { name: "Close review" }).first().click(); await setMode("PERMISSIONED"); await open();
+  await page.getByRole("button", { name: /connect wallet/i }).click();
+  await expect(page.getByRole("heading", { name: "Wallet connected for review" })).toBeFocused();
+  await page.evaluate((runtime) => { const state = (window as unknown as { __reviewBarrierState: {
+    permissionResolvers: ((value: unknown) => void)[] } }).__reviewBarrierState; state.permissionResolvers.shift()?.(runtime); }, EXPECTED_REVIEW_RUNTIME);
+  await expect(page.getByRole("heading", { name: "Wallet connected for review" })).toBeFocused();
+  expect(fixture.requests.filter((path) => path === "/api/account/wallet/runtime/sync")).toHaveLength(1);
+  expect(fixture.requests.filter((path) => path === "/api/account/receipt/review/prepare")).toHaveLength(1);
+});
+
+for (const path of ["/api/account/wallet/runtime/sync", "/api/account/receipt/review/prepare"] as const) {
+  for (const order of ["old-first", "old-last"] as const) {
+    test(`@receipt-review ${path} ${order} cannot beat the reconnect generation`, async ({ page }, testInfo) => {
+      test.skip(testInfo.project.name !== "desktop", "both reconnect winner orders are exercised once");
+      const settled = (compiledFirstEveningService.goldenReplay.at(-1) as {
+        readonly response: { readonly checkpoint: EveningServiceCheckpoint } }).response.checkpoint;
+      const fixture = serviceFixture(settled, true); await fixture.install(page); await installControlledReviewBrowser(page); await page.goto("/");
+      const barrier = await armReviewFetchBarrier(page, path, "headers");
+      const invoker = page.getByRole("button", { name: "Review optional keepsake" }); await invoker.click();
+      await expect(page.getByRole("heading", { name: "Wallet account required" }).first()).toBeVisible();
+      await page.getByRole("button", { name: /connect wallet/i }).click(); await barrier.started();
+      await page.getByRole("button", { name: "Close review" }).first().click();
+      if (order === "old-first") await barrier.release();
+      await invoker.click(); await expect(page.getByRole("dialog")).toBeVisible();
+      await page.getByRole("button", { name: /connect wallet|reconnect matching wallet/i }).click();
+      await expect(page.getByRole("heading", { name: "Wallet connected for review" })).toBeFocused();
+      if (order === "old-last") await barrier.release();
+      await expect(page.getByRole("heading", { name: "Wallet connected for review" })).toBeFocused();
+      expect(await reviewTripwires(page)).toMatchObject({ subscribe: 1, sign: 0, send: 0, inject: 0, broadcast: 0, contract: 0, fee: 0, observe: 0 });
+    });
+  }
+}
+
+test("@receipt-review duplicate and contradictory runtime deliveries cannot revive retired coordinates", async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== "desktop", "the runtime delivery schedule is exercised once");
+  const settled = (compiledFirstEveningService.goldenReplay.at(-1) as {
+    readonly response: { readonly checkpoint: EveningServiceCheckpoint } }).response.checkpoint;
+  const fixture = serviceFixture(settled, true); await fixture.install(page); await installControlledReviewBrowser(page); await page.goto("/");
+  await page.getByRole("button", { name: "Review optional keepsake" }).click();
+  await expect(page.getByRole("heading", { name: "Wallet account required" }).first()).toBeVisible();
+  await page.getByRole("button", { name: /connect wallet/i }).click();
+  await expect(page.getByRole("heading", { name: "Wallet connected for review" })).toBeFocused();
+  const before = fixture.requests.length;
+  await page.evaluate((runtime) => { const state = (window as unknown as { __reviewBarrierState: {
+    activeListeners: ((value: unknown) => void)[] } }).__reviewBarrierState;
+    for (const listener of state.activeListeners) { listener(runtime); listener(runtime); }
+  }, EXPECTED_REVIEW_RUNTIME);
+  await expect(page.getByRole("heading", { name: "Wallet connected for review" })).toBeFocused(); expect(fixture.requests).toHaveLength(before);
+  await page.evaluate((runtime) => { const state = (window as unknown as { __reviewBarrierState: {
+    activeListeners: ((value: unknown) => void)[] } }).__reviewBarrierState;
+    for (const listener of [...state.activeListeners]) listener({ ...runtime, account: "tz1VSUr8wwNhLAzempoch5d6hLRiTh8Cjcjb" });
+  }, EXPECTED_REVIEW_RUNTIME);
+  await expect(page.getByRole("heading", { name: "Wallet account changed" })).toBeFocused();
+  await page.evaluate((runtime) => { const state = (window as unknown as { __reviewBarrierState: {
+    listenerHistory: ((value: unknown) => void)[] } }).__reviewBarrierState;
+    for (const listener of state.listenerHistory) listener(runtime);
+  }, EXPECTED_REVIEW_RUNTIME);
+  await expect(page.getByRole("heading", { name: "Wallet account changed" })).toBeFocused(); expect(fixture.requests).toHaveLength(before);
+  expect(await reviewTripwires(page)).toMatchObject({ unsubscribe: 1, sign: 0, send: 0, inject: 0, broadcast: 0, contract: 0, fee: 0, observe: 0 });
 });
 
 test("lost response requeries then retries the byte-identical envelope without ceremony duplication", async ({ page }, testInfo) => {

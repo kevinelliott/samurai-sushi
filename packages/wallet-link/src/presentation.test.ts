@@ -25,7 +25,15 @@ describe("wallet review browser boundary", () => {
 
   it("strictly accepts only the data-only preflight union", () => {
     expect(parseReceiptReviewPreflightResult(notReady("INTENT_EXPIRED"))).toEqual(notReady("INTENT_EXPIRED"));
-    for (const reason of RECEIPT_PREFLIGHT_REASONS) expect(parseReceiptReviewPreflightResult(notReady(reason))).toEqual(notReady(reason));
+    const presentations = RECEIPT_PREFLIGHT_REASONS.map((reason) => notReady(reason).presentation);
+    expect(new Set(presentations.map((item) => item.ref)).size).toBe(RECEIPT_PREFLIGHT_REASONS.length);
+    expect(new Set(presentations.map((item) => item.reasonRef)).size).toBe(RECEIPT_PREFLIGHT_REASONS.length);
+    for (const [index, reason] of RECEIPT_PREFLIGHT_REASONS.entries()) {
+      const result = notReady(reason); expect(parseReceiptReviewPreflightResult(result)).toEqual(result);
+      expect(result.presentation.recoveryAction).not.toBeNull();
+      const wrong = presentations[(index + 1) % presentations.length]!;
+      expect(() => parseReceiptReviewPreflightResult({ ...result, presentation: wrong })).toThrow();
+    }
     expect(parseReceiptReviewPreflightResult({ schemaVersion: 1, status: "REVIEW_READY",
       intentRef: "ri_AAAAAAAAAAAAAAAAAAAAAA", projectionRevision: "1", walletLinkRef: "wl_AAAAAAAAAAAAAAAAAAAAAA",
       runtimeGeneration: 1, sessionRevision: 2, reviewDigest: "a".repeat(64), expiresAt: "2026-08-02T12:15:00.000Z",
