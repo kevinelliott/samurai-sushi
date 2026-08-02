@@ -31,6 +31,7 @@ export interface NormalizedOperationObservation extends OperationIdentity {
   readonly includedLevel: number | null;
   readonly operationIndex: number | null;
   readonly failureCode: string | null;
+  readonly canonicalChainProof: readonly CanonicalChainProofBlock[] | null;
   readonly receiptEvent: null | {
     readonly owner: string;
     readonly contractAddress: string;
@@ -40,6 +41,12 @@ export interface NormalizedOperationObservation extends OperationIdentity {
     readonly payloadHash: string;
     readonly deploymentManifestHash: string;
   };
+}
+
+export interface CanonicalChainProofBlock {
+  readonly level: number;
+  readonly blockHash: string;
+  readonly predecessorHash: string | null;
 }
 
 export interface ChainObserver {
@@ -67,16 +74,27 @@ export interface FinalityPolicyDecision {
 
 export function evaluateReceiptFinalityPolicy(
   policyId: string,
-  evidence: { readonly includedLevel: number; readonly includedBlockHash: string; readonly headLevel: number; readonly headBlockHash: string },
+  evidence: { readonly includedLevel: number; readonly includedBlockHash: string; readonly headLevel: number; readonly headBlockHash: string; readonly canonicalChainProof: readonly CanonicalChainProofBlock[] },
 ): FinalityPolicyDecision {
   if (policyId !== RECEIPT_FINALITY_POLICY) throw new Error("Unsupported receipt finality policy.");
   if (!Number.isSafeInteger(evidence.includedLevel) || evidence.includedLevel < 0
     || !Number.isSafeInteger(evidence.headLevel) || evidence.headLevel < evidence.includedLevel
     || !/^[1-9A-HJ-NP-Za-km-z]{16,96}$/.test(evidence.includedBlockHash)
-    || !/^[1-9A-HJ-NP-Za-km-z]{16,96}$/.test(evidence.headBlockHash)) {
+    || !/^[1-9A-HJ-NP-Za-km-z]{16,96}$/.test(evidence.headBlockHash)
+    || evidence.canonicalChainProof.length < 1 || evidence.canonicalChainProof.length > 64) {
     throw new Error("Receipt finality evidence is invalid.");
   }
   const confirmations = evidence.headLevel - evidence.includedLevel + 1;
+  if (confirmations !== evidence.canonicalChainProof.length) throw new Error("Receipt finality proof is not contiguous.");
+  for (let index = 0; index < evidence.canonicalChainProof.length; index += 1) {
+    const block = evidence.canonicalChainProof[index]!;
+    if (block.level !== evidence.includedLevel + index
+      || (index === 0 && (block.blockHash !== evidence.includedBlockHash || block.predecessorHash !== null))
+      || (index > 0 && block.predecessorHash !== evidence.canonicalChainProof[index - 1]!.blockHash)) {
+      throw new Error("Receipt finality proof does not establish canonical ancestry.");
+    }
+  }
+  if (evidence.canonicalChainProof.at(-1)!.blockHash !== evidence.headBlockHash) throw new Error("Receipt finality proof does not end at the observed head.");
   const boundaryReached = confirmations >= 2;
   return Object.freeze({
     confirmations,
@@ -88,7 +106,8 @@ export function evaluateReceiptFinalityPolicy(
 
 export interface AttemptObservationState extends OperationIdentity {
   readonly state: OperationAttemptState;
-  readonly lastSourceSequence: number | null;
+  readonly lastRpcSourceSequence: number | null;
+  readonly lastIndexerSourceSequence: number | null;
   readonly lastHeadLevel: number | null;
   readonly lastHeadBlockHash: string | null;
   readonly canonicalBlockHash: string | null;
@@ -98,15 +117,18 @@ export interface AttemptObservationState extends OperationIdentity {
 
 export type ObservationDecision =
   | { readonly disposition: "DUPLICATE" | "STALE"; readonly next: AttemptObservationState; readonly transitions: readonly OperationAttemptState[] }
+  | { readonly disposition: "HINT"; readonly next: AttemptObservationState; readonly observation: NormalizedOperationObservation; readonly transitions: readonly OperationAttemptState[] }
+  | { readonly disposition: "ATTEMPT_CONTRADICTION"; readonly next: AttemptObservationState; readonly observation: NormalizedOperationObservation; readonly transitions: readonly OperationAttemptState[] }
   | { readonly disposition: "APPLY"; readonly next: AttemptObservationState; readonly observation: NormalizedOperationObservation; readonly transitions: readonly OperationAttemptState[]; readonly policyEvidence: string | null }
   | { readonly disposition: "FINALIZED_CONTRADICTION"; readonly next: AttemptObservationState; readonly observation: NormalizedOperationObservation; readonly transitions: readonly OperationAttemptState[] };
 
 const OBSERVATION_KEYS = Object.freeze([
-  "chainId", "contractAddress", "deploymentManifestHash", "disposition", "failureCode",
+  "canonicalChainProof", "chainId", "contractAddress", "deploymentManifestHash", "disposition", "failureCode",
   "headBlockHash", "headLevel", "includedBlockHash", "includedLevel", "observer",
   "operationHash", "operationIndex", "receiptEvent", "sourceAccount", "sourceObservationId", "sourceSequence",
 ] as const);
 const RECEIPT_EVENT_KEYS = ["contentVersion", "contractAddress", "deploymentManifestHash", "nonce", "owner", "payloadHash", "serviceCommitment"] as const;
+const PROOF_BLOCK_KEYS = ["blockHash", "level", "predecessorHash"] as const;
 
 function exactRecord(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new TypeError("Operation observation must be an object.");
@@ -162,6 +184,35 @@ export function normalizeOperationObservation(value: unknown): NormalizedOperati
     });
   })();
   if ((disposition === "INCLUDED") !== (eventRow !== null)) throw new TypeError("Operation observation receipt event is inconsistent with its disposition.");
+  const canonicalChainProof = row.canonicalChainProof === null ? null : (() => {
+    if (!Array.isArray(row.canonicalChainProof) || row.canonicalChainProof.length < 1 || row.canonicalChainProof.length > 64) throw new TypeError("Operation observation canonical chain proof is invalid.");
+    return Object.freeze(row.canonicalChainProof.map((value, index) => {
+      if (!value || typeof value !== "object" || Array.isArray(value) || Object.getPrototypeOf(value) !== Object.prototype) throw new TypeError("Operation observation canonical chain proof block is invalid.");
+      const block = value as Record<string, unknown>;
+      const keys = Object.keys(block).sort();
+      if (keys.length !== PROOF_BLOCK_KEYS.length || keys.some((key, keyIndex) => key !== PROOF_BLOCK_KEYS[keyIndex])) throw new TypeError("Operation observation canonical chain proof block has an unexpected field set.");
+      return Object.freeze({
+        level: natural(block.level, `canonicalChainProof[${index}].level`)! ,
+        blockHash: text(block.blockHash, `canonicalChainProof[${index}].blockHash`, /^[1-9A-HJ-NP-Za-km-z]{16,96}$/),
+        predecessorHash: block.predecessorHash === null ? null : text(block.predecessorHash, `canonicalChainProof[${index}].predecessorHash`, /^[1-9A-HJ-NP-Za-km-z]{16,96}$/),
+      });
+    }));
+  })();
+  const authoritativeProofRequired = row.observer === "fake-rpc" && inclusionBearing;
+  if (authoritativeProofRequired !== (canonicalChainProof !== null)) throw new TypeError("Operation observation canonical proof authority is inconsistent with its source and disposition.");
+  if (canonicalChainProof !== null) {
+    const expectedLength = headLevel - includedLevel! + 1;
+    const first = canonicalChainProof[0]!;
+    const last = canonicalChainProof.at(-1)!;
+    const firstHashMatchesDisposition = disposition === "INCLUDED"
+      ? first.blockHash === includedBlockHash : first.blockHash !== includedBlockHash;
+    if (canonicalChainProof.length !== expectedLength || first.level !== includedLevel || first.predecessorHash !== null
+      || !firstHashMatchesDisposition || last.level !== headLevel || last.blockHash !== row.headBlockHash
+      || canonicalChainProof.some((block, index) => index > 0
+        && (block.level !== canonicalChainProof[index - 1]!.level + 1 || block.predecessorHash !== canonicalChainProof[index - 1]!.blockHash))) {
+      throw new TypeError("Operation observation canonical chain proof does not establish the claimed chain position.");
+    }
+  }
   return Object.freeze({
     observer: row.observer as "fake-rpc" | "fake-indexer",
     sourceObservationId: text(row.sourceObservationId, "sourceObservationId", /^[A-Za-z0-9._:-]{1,128}$/),
@@ -178,6 +229,7 @@ export function normalizeOperationObservation(value: unknown): NormalizedOperati
     includedLevel,
     operationIndex,
     failureCode,
+    canonicalChainProof,
     receiptEvent: eventRow,
   });
 }
@@ -191,23 +243,28 @@ function sameIdentity(current: AttemptObservationState, observation: NormalizedO
 export function reduceOperationObservation(current: AttemptObservationState, input: unknown, policyId: string): ObservationDecision {
   const observation = normalizeOperationObservation(input);
   if (!sameIdentity(current, observation)) throw new Error("Operation observation identity does not match the durable attempt.");
+  const lastSourceSequence = observation.observer === "fake-rpc" ? current.lastRpcSourceSequence : current.lastIndexerSourceSequence;
+  if (lastSourceSequence !== null && observation.sourceSequence < lastSourceSequence) return Object.freeze({ disposition: "STALE", next: current, transitions: [] });
+  if (lastSourceSequence === observation.sourceSequence) throw new Error("Operation observation source sequence contradicts durable history.");
+  if (observation.observer === "fake-indexer") {
+    return Object.freeze({ disposition: "HINT", observation, transitions: [], next: Object.freeze({ ...current, lastIndexerSourceSequence: observation.sourceSequence }) });
+  }
   if (current.lastHeadLevel !== null && observation.headLevel < current.lastHeadLevel) return Object.freeze({ disposition: "STALE", next: current, transitions: [] });
-  if (current.lastSourceSequence !== null && observation.sourceSequence < current.lastSourceSequence) return Object.freeze({ disposition: "STALE", next: current, transitions: [] });
-  if (current.lastSourceSequence === observation.sourceSequence && current.lastHeadLevel === observation.headLevel && current.lastHeadBlockHash === observation.headBlockHash) return Object.freeze({ disposition: "DUPLICATE", next: current, transitions: [] });
   if (current.lastHeadLevel === observation.headLevel && current.lastHeadBlockHash !== null && current.lastHeadBlockHash !== observation.headBlockHash) throw new Error("Operation observation history contradicts the durable head.");
   if (current.state === "FINALIZED" && observation.disposition !== "INCLUDED") return Object.freeze({ disposition: "FINALIZED_CONTRADICTION", next: current, observation, transitions: [] });
-  const base = { ...current, lastSourceSequence: observation.sourceSequence, lastHeadLevel: observation.headLevel, lastHeadBlockHash: observation.headBlockHash };
+  const base = { ...current, lastRpcSourceSequence: observation.sourceSequence, lastHeadLevel: observation.headLevel, lastHeadBlockHash: observation.headBlockHash };
   if (observation.disposition === "PENDING") {
     return Object.freeze({ disposition: "APPLY", observation, transitions: [], policyEvidence: null, next: Object.freeze(base) });
   }
   if (observation.disposition === "INCLUDED") {
     const policy = evaluateReceiptFinalityPolicy(policyId, {
       includedLevel: observation.includedLevel!, includedBlockHash: observation.includedBlockHash!,
-      headLevel: observation.headLevel, headBlockHash: observation.headBlockHash,
+      headLevel: observation.headLevel, headBlockHash: observation.headBlockHash, canonicalChainProof: observation.canonicalChainProof!,
     });
     const transitions: OperationAttemptState[] = [];
     let from = current.state;
     if (from === "SUBMITTED" || from === "REORGED") { assertAttemptTransition(from, "INCLUDED"); transitions.push("INCLUDED"); from = "INCLUDED"; }
+    else if (from === "REPLACED" || from === "FAILED" || from === "DROPPED") return Object.freeze({ disposition: "ATTEMPT_CONTRADICTION", next: current, observation, transitions: [] });
     if (policy.confirmed && from === "INCLUDED") { assertAttemptTransition(from, "CONFIRMED"); transitions.push("CONFIRMED"); from = "CONFIRMED"; }
     if (policy.finalized && from === "CONFIRMED") { assertAttemptTransition(from, "FINALIZED"); transitions.push("FINALIZED"); from = "FINALIZED"; }
     return Object.freeze({ disposition: "APPLY", observation, transitions: Object.freeze(transitions), policyEvidence: policy.evidence, next: Object.freeze({
@@ -215,6 +272,19 @@ export function reduceOperationObservation(current: AttemptObservationState, inp
     }) });
   }
   const target = observation.disposition as "FAILED" | "DROPPED" | "REORGED";
+  if (target === "REORGED") {
+    if (current.canonicalBlockLevel === null || current.canonicalBlockHash === null
+      || observation.includedLevel !== current.canonicalBlockLevel || observation.includedBlockHash !== current.canonicalBlockHash) {
+      return Object.freeze({ disposition: "ATTEMPT_CONTRADICTION", next: current, observation, transitions: [] });
+    }
+    const proof = observation.canonicalChainProof!;
+    const first = proof[0]!;
+    if (first.level !== current.canonicalBlockLevel || first.blockHash === current.canonicalBlockHash || first.predecessorHash !== null
+      || proof.at(-1)!.level !== observation.headLevel || proof.at(-1)!.blockHash !== observation.headBlockHash
+      || proof.some((block, index) => index > 0 && (block.level !== proof[index - 1]!.level + 1 || block.predecessorHash !== proof[index - 1]!.blockHash))) {
+      return Object.freeze({ disposition: "ATTEMPT_CONTRADICTION", next: current, observation, transitions: [] });
+    }
+  }
   assertAttemptTransition(current.state, target);
   return Object.freeze({ disposition: "APPLY", observation, transitions: Object.freeze([target]), policyEvidence: null, next: Object.freeze({
     ...base, state: target, canonicalBlockHash: null, canonicalBlockLevel: null, confirmations: 0,

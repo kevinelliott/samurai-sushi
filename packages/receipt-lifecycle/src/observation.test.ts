@@ -5,9 +5,20 @@ import { assertAttemptTransition, assertExpiryTransition, assertIntentTransition
 const identity = Object.freeze({ chainId: "NetXtJqPyJGB6Pc", operationHash: `o${"1".repeat(50)}`, sourceAccount: `tz1${"1".repeat(33)}`, contractAddress: `KT1${"1".repeat(33)}`, deploymentManifestHash: "a".repeat(64) });
 function observation(disposition: string, overrides: Record<string, unknown> = {}): unknown {
   const inclusion = disposition === "INCLUDED" || disposition === "REORGED";
+  const headLevel = Number(overrides.headLevel ?? (inclusion ? 17 : 16));
+  const includedLevel = Number(overrides.includedLevel ?? 17);
+  const includedBlockHash = String(overrides.includedBlockHash ?? "Babcdefghijkmnpq");
+  const headBlockHash = String(overrides.headBlockHash ?? (headLevel === includedLevel
+    ? (disposition === "REORGED" ? "B222222222222222" : includedBlockHash)
+    : "Bbcdefghijkmnpqr"));
+  const proof = inclusion ? Array.from({ length: headLevel - includedLevel + 1 }, (_, index) => ({
+    level: includedLevel + index,
+    blockHash: index === 0 ? (disposition === "REORGED" ? "B222222222222222" : includedBlockHash) : (index === headLevel - includedLevel ? headBlockHash : `B33333333333${String(index).padStart(4, "1")}`),
+    predecessorHash: index === 0 ? null : (index === 1 ? (disposition === "REORGED" ? "B222222222222222" : includedBlockHash) : `B33333333333${String(index - 1).padStart(4, "1")}`),
+  })) : null;
   return { ...identity, observer: "fake-rpc", sourceObservationId: "fixture:1", sourceSequence: 1, disposition,
-    headLevel: inclusion ? 17 : 16, headBlockHash: "Bbcdefghijkmnpqr", includedBlockHash: inclusion ? "Babcdefghijkmnpq" : null,
-    includedLevel: inclusion ? 17 : null, operationIndex: inclusion ? 0 : null,
+    headLevel: inclusion ? headLevel : 16, headBlockHash: inclusion ? headBlockHash : "Bbcdefghijkmnpqr", includedBlockHash: inclusion ? includedBlockHash : null,
+    includedLevel: inclusion ? includedLevel : null, operationIndex: inclusion ? 0 : null, canonicalChainProof: proof,
     failureCode: ["FAILED", "DROPPED"].includes(disposition) ? "CHAIN_REJECTED" : null,
     receiptEvent: disposition === "INCLUDED" ? {
       owner: identity.sourceAccount, contractAddress: identity.contractAddress, serviceCommitment: "b".repeat(64),
@@ -15,7 +26,7 @@ function observation(disposition: string, overrides: Record<string, unknown> = {
       deploymentManifestHash: identity.deploymentManifestHash,
     } : null, ...overrides };
 }
-const submitted: AttemptObservationState = Object.freeze({ ...identity, state: "SUBMITTED", lastSourceSequence: null, lastHeadLevel: null, lastHeadBlockHash: null, canonicalBlockHash: null, canonicalBlockLevel: null, confirmations: 0 });
+const submitted: AttemptObservationState = Object.freeze({ ...identity, state: "SUBMITTED", lastRpcSourceSequence: null, lastIndexerSourceSequence: null, lastHeadLevel: null, lastHeadBlockHash: null, canonicalBlockHash: null, canonicalBlockLevel: null, confirmations: 0 });
 
 describe("receipt lifecycle observation authority", () => {
   it("normalizes an exact untrusted observation and rejects extra or adapter-finality fields", () => {
@@ -23,24 +34,37 @@ describe("receipt lifecycle observation authority", () => {
     expect(() => normalizeOperationObservation({ ...(observation("INCLUDED") as object), finalized: true })).toThrow(/field set/);
   });
   it("derives the exact two-confirmation boundary and fails unsupported policies", () => {
-    expect(evaluateReceiptFinalityPolicy(RECEIPT_FINALITY_POLICY, { includedLevel: 17, includedBlockHash: "Babcdefghijkmnpq", headLevel: 17, headBlockHash: "Bbcdefghijkmnpqr" })).toMatchObject({ confirmations: 1, confirmed: false, finalized: false });
-    expect(evaluateReceiptFinalityPolicy(RECEIPT_FINALITY_POLICY, { includedLevel: 17, includedBlockHash: "Babcdefghijkmnpq", headLevel: 18, headBlockHash: "Bbcdefghijkmnprs" })).toMatchObject({ confirmations: 2, confirmed: true, finalized: true });
-    expect(() => evaluateReceiptFinalityPolicy("unknown", { includedLevel: 17, includedBlockHash: "Babcdefghijkmnpq", headLevel: 18, headBlockHash: "Bbcdefghijkmnprs" })).toThrow(/Unsupported/);
+    expect(evaluateReceiptFinalityPolicy(RECEIPT_FINALITY_POLICY, { includedLevel: 17, includedBlockHash: "Babcdefghijkmnpq", headLevel: 17, headBlockHash: "Babcdefghijkmnpq", canonicalChainProof: [{ level: 17, blockHash: "Babcdefghijkmnpq", predecessorHash: null }] })).toMatchObject({ confirmations: 1, confirmed: false, finalized: false });
+    const proof = [{ level: 17, blockHash: "Babcdefghijkmnpq", predecessorHash: null }, { level: 18, blockHash: "Bbcdefghijkmnprs", predecessorHash: "Babcdefghijkmnpq" }];
+    expect(evaluateReceiptFinalityPolicy(RECEIPT_FINALITY_POLICY, { includedLevel: 17, includedBlockHash: "Babcdefghijkmnpq", headLevel: 18, headBlockHash: "Bbcdefghijkmnprs", canonicalChainProof: proof })).toMatchObject({ confirmations: 2, confirmed: true, finalized: true });
+    expect(() => evaluateReceiptFinalityPolicy("unknown", { includedLevel: 17, includedBlockHash: "Babcdefghijkmnpq", headLevel: 18, headBlockHash: "Bbcdefghijkmnprs", canonicalChainProof: proof })).toThrow(/Unsupported/);
+    expect(() => evaluateReceiptFinalityPolicy(RECEIPT_FINALITY_POLICY, { includedLevel: 17, includedBlockHash: "Babcdefghijkmnpq", headLevel: 18, headBlockHash: "Bbcdefghijkmnprs", canonicalChainProof: [{ level: 17, blockHash: "Bunrelatedproofx", predecessorHash: null }, proof[1]!] })).toThrow(/ancestry/);
   });
   it("emits ordered INCLUDED, CONFIRMED, FINALIZED transitions atomically at equality", () => {
     const decision = reduceOperationObservation(submitted, observation("INCLUDED", { headLevel: 18, headBlockHash: "Bbcdefghijkmnprs" }), RECEIPT_FINALITY_POLICY);
     expect(decision.transitions).toEqual(["INCLUDED", "CONFIRMED", "FINALIZED"]);
     expect(decision.next.state).toBe("FINALIZED");
   });
-  it("treats duplicates and lower heads as idempotent or stale", () => {
+  it("rejects equal source sequence changes and treats lower heads as stale", () => {
     const included = reduceOperationObservation(submitted, observation("INCLUDED"), RECEIPT_FINALITY_POLICY);
-    expect(reduceOperationObservation(included.next, observation("INCLUDED"), RECEIPT_FINALITY_POLICY).disposition).toBe("DUPLICATE");
-    expect(reduceOperationObservation({ ...included.next, lastHeadLevel: 20 }, observation("INCLUDED"), RECEIPT_FINALITY_POLICY).disposition).toBe("STALE");
+    expect(() => reduceOperationObservation(included.next, observation("INCLUDED"), RECEIPT_FINALITY_POLICY)).toThrow(/sequence/);
+    expect(reduceOperationObservation({ ...included.next, lastHeadLevel: 20 }, observation("INCLUDED", { sourceSequence: 2 }), RECEIPT_FINALITY_POLICY).disposition).toBe("STALE");
   });
   it("routes finalized contradiction and rejects identity drift", () => {
-    const finalized: AttemptObservationState = { ...submitted, state: "FINALIZED", lastSourceSequence: 3, lastHeadLevel: 18, lastHeadBlockHash: "Bbcdefghijkmnprs" };
+    const finalized: AttemptObservationState = { ...submitted, state: "FINALIZED", lastRpcSourceSequence: 3, lastHeadLevel: 18, lastHeadBlockHash: "Bbcdefghijkmnprs", canonicalBlockLevel: 17, canonicalBlockHash: "Babcdefghijkmnpq" };
     expect(reduceOperationObservation(finalized, observation("REORGED", { sourceSequence: 4, headLevel: 19, headBlockHash: "Bbcdefghijkmnprt" }), RECEIPT_FINALITY_POLICY).disposition).toBe("FINALIZED_CONTRADICTION");
     expect(() => reduceOperationObservation(submitted, observation("INCLUDED", { chainId: "NetXdQprcVkpaWU" }), RECEIPT_FINALITY_POLICY)).toThrow(/identity/);
+  });
+  it("records indexer evidence only as a hint and keeps source ordering independent", () => {
+    const hint = reduceOperationObservation(submitted, observation("INCLUDED", { observer: "fake-indexer", canonicalChainProof: null, sourceSequence: 999 }), RECEIPT_FINALITY_POLICY);
+    expect(hint).toMatchObject({ disposition: "HINT", transitions: [], next: { state: "SUBMITTED", lastIndexerSourceSequence: 999, lastRpcSourceSequence: null } });
+    const canonical = reduceOperationObservation(hint.next, observation("INCLUDED", { sourceSequence: 1 }), RECEIPT_FINALITY_POLICY);
+    expect(canonical.transitions).toEqual(["INCLUDED"]);
+  });
+  it("requires exact current-block reorg proof and flags replaced predecessor inclusion", () => {
+    const included = reduceOperationObservation(submitted, observation("INCLUDED"), RECEIPT_FINALITY_POLICY).next;
+    expect(reduceOperationObservation(included, observation("REORGED", { sourceSequence: 2, includedLevel: 16, includedBlockHash: "B444444444444444", headLevel: 18, headBlockHash: "B555555555555555" }), RECEIPT_FINALITY_POLICY).disposition).toBe("ATTEMPT_CONTRADICTION");
+    expect(reduceOperationObservation({ ...submitted, state: "REPLACED" }, observation("INCLUDED"), RECEIPT_FINALITY_POLICY).disposition).toBe("ATTEMPT_CONTRADICTION");
   });
   it("allows expiry only at the exact database-clock boundary", () => {
     expect(() => assertExpiryTransition("DRAFT", "2026-08-02T12:00:00Z", "2026-08-02T12:00:01Z")).toThrow(/before/);

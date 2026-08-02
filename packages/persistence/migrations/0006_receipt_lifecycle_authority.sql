@@ -101,6 +101,7 @@ CREATE TABLE samurai_persistence.operation_attempts (
   counter bigint NOT NULL CHECK (counter BETWEEN 0 AND 9007199254740991),
   state text NOT NULL CHECK (state IN ('SUBMITTED','INCLUDED','CONFIRMED','FINALIZED','FAILED','DROPPED','REPLACED','REORGED')),
   replaces_attempt_id uuid,
+  retry_of_attempt_id uuid,
   canonical_block_level bigint CHECK (canonical_block_level BETWEEN 0 AND 9007199254740991),
   canonical_block_hash text,
   included_operation_index integer CHECK (included_operation_index >= 0),
@@ -111,7 +112,8 @@ CREATE TABLE samurai_persistence.operation_attempts (
   orphaned_block_level bigint CHECK (orphaned_block_level BETWEEN 0 AND 9007199254740991),
   orphaned_block_hash text,
   failure_code text,
-  last_source_sequence bigint CHECK (last_source_sequence BETWEEN 0 AND 9007199254740991),
+  last_rpc_source_sequence bigint CHECK (last_rpc_source_sequence BETWEEN 0 AND 9007199254740991),
+  last_indexer_source_sequence bigint CHECK (last_indexer_source_sequence BETWEEN 0 AND 9007199254740991),
   submitted_at timestamptz NOT NULL,
   included_at timestamptz,
   confirmed_at timestamptz,
@@ -123,14 +125,20 @@ CREATE TABLE samurai_persistence.operation_attempts (
   UNIQUE (id, chain_id, operation_hash),
   UNIQUE (id, intent_id, chain_id, operation_hash),
   UNIQUE (replaces_attempt_id),
+  UNIQUE (retry_of_attempt_id),
   FOREIGN KEY (intent_id, chain_id, source_account)
     REFERENCES samurai_persistence.receipt_intents(id, chain_id, account) ON DELETE CASCADE,
   FOREIGN KEY (intent_id, replaces_attempt_id)
     REFERENCES samurai_persistence.operation_attempts(intent_id, id)
     ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED,
+  FOREIGN KEY (intent_id, retry_of_attempt_id)
+    REFERENCES samurai_persistence.operation_attempts(intent_id, id)
+    ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED,
   CHECK (id::text ~ '^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'),
   CHECK (public_attempt_ref ~ '^ra_[A-Za-z0-9_-]{22}$'),
   CHECK (replaces_attempt_id IS NULL OR replaces_attempt_id <> id),
+  CHECK (retry_of_attempt_id IS NULL OR retry_of_attempt_id <> id),
+  CHECK (num_nonnulls(replaces_attempt_id, retry_of_attempt_id) <= 1),
   CHECK (chain_id ~ '^Net[1-9A-HJ-NP-Za-km-z]{12}$'),
   CHECK (operation_hash ~ '^o[1-9A-HJ-NP-Za-km-z]{50}$'),
   CHECK (source_account ~ '^tz[1-4][1-9A-HJ-NP-Za-km-z]{33}$'),
@@ -149,14 +157,25 @@ CREATE TABLE samurai_persistence.operation_attempts (
   CHECK ((last_head_level IS NULL) = (last_head_block_hash IS NULL)),
   CHECK ((orphaned_block_level IS NULL) = (orphaned_block_hash IS NULL)),
   CHECK ((orphaned_block_level IS NULL) = (orphaned_at IS NULL)),
-  CHECK ((state IN ('SUBMITTED','FAILED','DROPPED','REPLACED','REORGED')) OR canonical_block_hash IS NOT NULL),
-  CHECK (state NOT IN ('INCLUDED','CONFIRMED','FINALIZED') OR canonical_block_hash IS NOT NULL),
-  CHECK (state <> 'INCLUDED' OR confirmations < 2),
-  CHECK (state NOT IN ('CONFIRMED','FINALIZED') OR confirmations >= 2),
-  CHECK ((state = 'FINALIZED') = (finalized_at IS NOT NULL AND policy_evidence IS NOT NULL)),
-  CHECK (state <> 'CONFIRMED' OR confirmed_at IS NOT NULL),
-  CHECK (state <> 'REORGED' OR (canonical_block_hash IS NULL AND orphaned_block_hash IS NOT NULL)),
-  CHECK ((state IN ('FAILED','DROPPED')) = (failure_code IS NOT NULL))
+  CHECK (
+    (state = 'SUBMITTED' AND canonical_block_hash IS NULL AND confirmations = 0 AND policy_evidence IS NULL
+      AND orphaned_block_hash IS NULL AND failure_code IS NULL AND included_at IS NULL AND confirmed_at IS NULL AND finalized_at IS NULL)
+    OR (state = 'INCLUDED' AND canonical_block_hash IS NOT NULL AND confirmations BETWEEN 1 AND 1
+      AND policy_evidence IS NULL AND orphaned_block_hash IS NULL AND failure_code IS NULL
+      AND included_at IS NOT NULL AND confirmed_at IS NULL AND finalized_at IS NULL)
+    OR (state = 'CONFIRMED' AND canonical_block_hash IS NOT NULL AND confirmations >= 2
+      AND policy_evidence IS NOT NULL AND orphaned_block_hash IS NULL AND failure_code IS NULL
+      AND included_at IS NOT NULL AND confirmed_at IS NOT NULL AND finalized_at IS NULL)
+    OR (state = 'FINALIZED' AND canonical_block_hash IS NOT NULL AND confirmations >= 2
+      AND policy_evidence IS NOT NULL AND orphaned_block_hash IS NULL AND failure_code IS NULL
+      AND included_at IS NOT NULL AND confirmed_at IS NOT NULL AND finalized_at IS NOT NULL)
+    OR (state = 'REORGED' AND canonical_block_hash IS NULL AND confirmations = 0 AND policy_evidence IS NULL
+      AND orphaned_block_hash IS NOT NULL AND failure_code IS NULL AND included_at IS NOT NULL AND finalized_at IS NULL)
+    OR (state IN ('FAILED','DROPPED') AND canonical_block_hash IS NULL AND confirmations = 0 AND policy_evidence IS NULL
+      AND orphaned_block_hash IS NULL AND failure_code IS NOT NULL AND included_at IS NULL AND confirmed_at IS NULL AND finalized_at IS NULL)
+    OR (state = 'REPLACED' AND canonical_block_hash IS NULL AND confirmations = 0 AND policy_evidence IS NULL
+      AND orphaned_block_hash IS NULL AND failure_code IS NULL AND included_at IS NULL AND confirmed_at IS NULL AND finalized_at IS NULL)
+  )
 );
 
 CREATE FUNCTION samurai_persistence.assert_receipt_attempt_lineage() RETURNS trigger
@@ -172,6 +191,16 @@ BEGIN
       OR predecessor.source_account <> NEW.source_account OR predecessor.counter <> NEW.counter
       OR predecessor.state <> 'REPLACED' THEN
       RAISE EXCEPTION 'receipt replacement lineage mismatch' USING ERRCODE = '23514';
+    END IF;
+  END IF;
+  IF NEW.retry_of_attempt_id IS NOT NULL THEN
+    SELECT * INTO predecessor FROM samurai_persistence.operation_attempts WHERE id = NEW.retry_of_attempt_id;
+    IF NOT FOUND OR predecessor.intent_id <> NEW.intent_id OR predecessor.chain_id <> NEW.chain_id
+      OR predecessor.source_account <> NEW.source_account OR predecessor.contract_address <> NEW.contract_address
+      OR predecessor.deployment_manifest_hash <> NEW.deployment_manifest_hash
+      OR predecessor.state NOT IN ('FAILED','DROPPED') OR NEW.state <> 'SUBMITTED'
+      OR NEW.counter < predecessor.counter THEN
+      RAISE EXCEPTION 'receipt retry lineage mismatch' USING ERRCODE = '23514';
     END IF;
   END IF;
   IF NEW.state = 'REPLACED' THEN
@@ -202,7 +231,8 @@ BEGIN
     OR NEW.chain_id <> OLD.chain_id OR NEW.operation_hash <> OLD.operation_hash
     OR NEW.source_account <> OLD.source_account OR NEW.contract_address <> OLD.contract_address
     OR NEW.deployment_manifest_hash <> OLD.deployment_manifest_hash OR NEW.counter <> OLD.counter
-    OR NEW.submitted_at <> OLD.submitted_at OR NEW.replaces_attempt_id IS DISTINCT FROM OLD.replaces_attempt_id THEN
+    OR NEW.submitted_at <> OLD.submitted_at OR NEW.replaces_attempt_id IS DISTINCT FROM OLD.replaces_attempt_id
+    OR NEW.retry_of_attempt_id IS DISTINCT FROM OLD.retry_of_attempt_id THEN
     RAISE EXCEPTION 'operation attempt immutable identity changed' USING ERRCODE = '23514';
   END IF;
   RETURN NEW;
@@ -213,8 +243,8 @@ CREATE TRIGGER operation_attempt_identity_immutable
 BEFORE UPDATE ON samurai_persistence.operation_attempts FOR EACH ROW
 EXECUTE FUNCTION samurai_persistence.prevent_receipt_attempt_identity_update();
 
-CREATE UNIQUE INDEX operation_attempts_one_root
-  ON samurai_persistence.operation_attempts (intent_id) WHERE replaces_attempt_id IS NULL;
+CREATE UNIQUE INDEX operation_attempts_one_initial_root
+  ON samurai_persistence.operation_attempts (intent_id) WHERE replaces_attempt_id IS NULL AND retry_of_attempt_id IS NULL;
 
 CREATE TABLE samurai_persistence.receipt_chain_observations (
   id uuid PRIMARY KEY,
@@ -226,13 +256,14 @@ CREATE TABLE samurai_persistence.receipt_chain_observations (
   source_sequence bigint NOT NULL CHECK (source_sequence BETWEEN 0 AND 9007199254740991),
   normalized_digest bytea NOT NULL CHECK (octet_length(normalized_digest) = 32),
   disposition text NOT NULL CHECK (disposition IN ('PENDING','INCLUDED','FAILED','DROPPED','REORGED')),
-  apply_result text NOT NULL CHECK (apply_result IN ('APPLIED','DUPLICATE','IGNORED_STALE','INCIDENT')),
+  apply_result text NOT NULL CHECK (apply_result IN ('APPLIED','RECORDED_HINT','DUPLICATE','IGNORED_STALE','INCIDENT')),
   head_level bigint NOT NULL CHECK (head_level BETWEEN 0 AND 9007199254740991),
   head_block_hash text NOT NULL,
   included_level bigint CHECK (included_level BETWEEN 0 AND 9007199254740991),
   included_block_hash text,
   operation_index integer CHECK (operation_index >= 0),
   failure_code text,
+  canonical_chain_proof jsonb,
   receipt_owner text,
   receipt_contract text,
   receipt_service_commitment bytea CHECK (receipt_service_commitment IS NULL OR octet_length(receipt_service_commitment) = 32),
@@ -242,12 +273,14 @@ CREATE TABLE samurai_persistence.receipt_chain_observations (
   receipt_manifest_hash bytea CHECK (receipt_manifest_hash IS NULL OR octet_length(receipt_manifest_hash) = 32),
   observed_at timestamptz NOT NULL,
   UNIQUE (source_kind, source_observation_id),
+  UNIQUE (attempt_id, source_kind, source_sequence),
   UNIQUE (attempt_id, normalized_digest),
   FOREIGN KEY (attempt_id, chain_id, operation_hash)
     REFERENCES samurai_persistence.operation_attempts(id, chain_id, operation_hash) ON DELETE CASCADE,
   CHECK (id::text ~ '^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'),
   CHECK (length(source_observation_id) BETWEEN 1 AND 128),
   CHECK (head_block_hash ~ '^[1-9A-HJ-NP-Za-km-z]{16,96}$'),
+  CHECK (canonical_chain_proof IS NULL OR (jsonb_typeof(canonical_chain_proof) = 'array' AND jsonb_array_length(canonical_chain_proof) BETWEEN 1 AND 64 AND pg_column_size(canonical_chain_proof) <= 16384)),
   CHECK (included_block_hash IS NULL OR included_block_hash ~ '^[1-9A-HJ-NP-Za-km-z]{16,96}$'),
   CHECK ((included_level IS NULL) = (included_block_hash IS NULL)),
   CHECK ((included_level IS NULL) = (operation_index IS NULL)),
@@ -313,21 +346,32 @@ CREATE TABLE samurai_persistence.receipt_incidents (
   )),
   scope_digest bytea NOT NULL CHECK (octet_length(scope_digest) = 32),
   state text NOT NULL CHECK (state IN ('OPEN','RESOLVED')),
-  intent_id uuid REFERENCES samurai_persistence.receipt_intents(id) ON DELETE CASCADE,
-  attempt_id uuid REFERENCES samurai_persistence.operation_attempts(id) ON DELETE CASCADE,
+  intent_id uuid NOT NULL REFERENCES samurai_persistence.receipt_intents(id) ON DELETE CASCADE,
+  attempt_id uuid NOT NULL,
   first_observation_id uuid REFERENCES samurai_persistence.receipt_chain_observations(id) ON DELETE SET NULL,
   occurrence_count bigint NOT NULL DEFAULT 1 CHECK (occurrence_count BETWEEN 1 AND 9007199254740991),
   opened_at timestamptz NOT NULL,
   last_seen_at timestamptz NOT NULL,
   resolved_at timestamptz,
   CHECK (id::text ~ '^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'),
+  FOREIGN KEY (intent_id, attempt_id) REFERENCES samurai_persistence.operation_attempts(intent_id, id) ON DELETE CASCADE,
   CHECK (isfinite(opened_at) AND isfinite(last_seen_at) AND last_seen_at >= opened_at),
   CHECK ((state = 'RESOLVED') = (resolved_at IS NOT NULL)),
   CHECK (resolved_at IS NULL OR (isfinite(resolved_at) AND resolved_at >= opened_at))
 );
 
 CREATE UNIQUE INDEX receipt_incidents_one_open_scope
-  ON samurai_persistence.receipt_incidents (kind, scope_digest) WHERE state = 'OPEN';
+  ON samurai_persistence.receipt_incidents (intent_id, attempt_id, kind, scope_digest) WHERE state = 'OPEN';
+
+CREATE TABLE samurai_persistence.receipt_incident_occurrences (
+  id uuid PRIMARY KEY,
+  incident_id uuid NOT NULL REFERENCES samurai_persistence.receipt_incidents(id) ON DELETE CASCADE,
+  evidence_digest bytea NOT NULL CHECK (octet_length(evidence_digest) = 32),
+  observation_id uuid REFERENCES samurai_persistence.receipt_chain_observations(id) ON DELETE SET NULL,
+  observed_at timestamptz NOT NULL CHECK (isfinite(observed_at)),
+  UNIQUE (incident_id, evidence_digest, observation_id),
+  CHECK (id::text ~ '^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$')
+);
 
 CREATE TABLE samurai_persistence.receipt_lifecycle_events (
   event_id text PRIMARY KEY,

@@ -103,7 +103,8 @@ interface AttemptRow {
   readonly deployment_manifest_hash: Uint8Array;
   readonly counter: string;
   readonly state: OperationAttemptState;
-  readonly last_source_sequence: string | null;
+  readonly last_rpc_source_sequence: string | null;
+  readonly last_indexer_source_sequence: string | null;
   readonly last_head_level: string | null;
   readonly last_head_block_hash: string | null;
   readonly canonical_block_level: string | null;
@@ -412,6 +413,44 @@ export class ReceiptLifecycleAuthority {
     });
   }
 
+  async retryAttempt(
+    predecessorId: string,
+    input: { readonly operationHash: string; readonly counter: number },
+  ): Promise<{ readonly attemptId: string; readonly publicAttemptRef: string }> {
+    uuidV4(predecessorId, "predecessor attempt ID");
+    if (!/^o[1-9A-HJ-NP-Za-km-z]{50}$/.test(input.operationHash) || !Number.isSafeInteger(input.counter) || input.counter < 0) {
+      throw new ReceiptLifecycleError("RECEIPT_INPUT_INVALID", "Retry operation identity is invalid.");
+    }
+    return this.#runner.run(async (client) => {
+      const identity = await client.query<{ readonly intent_id: string }>(`SELECT intent_id FROM samurai_persistence.operation_attempts WHERE id=$1`, [predecessorId]);
+      if (!identity.rows[0]) throw new ReceiptLifecycleError("RETRY_LINEAGE_MISMATCH", "Retry predecessor is invalid.");
+      const intentResult = await client.query<IntentRow>(`SELECT * FROM samurai_persistence.receipt_intents WHERE id=$1 FOR UPDATE`, [identity.rows[0].intent_id]);
+      const intent = intentResult.rows[0];
+      if (!intent) throw new ReceiptLifecycleError("RECEIPT_INTENT_NOT_FOUND", "Receipt intent is unavailable.");
+      await client.query(`SELECT id FROM samurai_persistence.operation_attempts WHERE intent_id=$1 ORDER BY id FOR UPDATE`, [intent.id]);
+      const predecessorResult = await client.query<AttemptRow>(`SELECT * FROM samurai_persistence.operation_attempts WHERE id=$1`, [predecessorId]);
+      const predecessor = predecessorResult.rows[0];
+      if (!predecessor || !["FAILED", "DROPPED"].includes(predecessor.state) || input.counter < Number(predecessor.counter)) {
+        throw new ReceiptLifecycleError("RETRY_LINEAGE_MISMATCH", "Retry predecessor is invalid.");
+      }
+      const now = await this.#databaseNow(client);
+      const id = randomUUID();
+      const ref = publicRef("ra");
+      await client.query(`INSERT INTO samurai_persistence.operation_attempts
+        (id,public_attempt_ref,intent_id,chain_id,operation_hash,source_account,contract_address,deployment_manifest_hash,counter,state,retry_of_attempt_id,submitted_at,last_observed_at)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'SUBMITTED',$10,$11,$11)`,
+        [id, ref, predecessor.intent_id, predecessor.chain_id, input.operationHash, predecessor.source_account,
+          predecessor.contract_address, predecessor.deployment_manifest_hash, input.counter, predecessor.id, now]);
+      await client.query(`INSERT INTO samurai_persistence.receipt_reconciliation_jobs (attempt_id,state,available_at) VALUES ($1,'pending',$2)`, [id, now]);
+      const revision = Number(intent.projection_revision) + 1;
+      await client.query(`UPDATE samurai_persistence.receipt_intents SET state='SUBMITTED',projection_revision=$2,state_changed_at=$3 WHERE id=$1`, [intent.id, revision, now]);
+      await this.options.afterWriteBoundary?.("attempt");
+      await this.#writeEvent(client, intent.id, revision, "ATTEMPT_RETRIED", predecessor.state, "SUBMITTED", id, null,
+        { predecessorAttemptRef: predecessor.public_attempt_ref, retryAttemptRef: ref, predecessorHash: predecessor.operation_hash, retryHash: input.operationHash }, now);
+      return { attemptId: id, publicAttemptRef: ref };
+    });
+  }
+
   async claimReconciliation(limit = 25, leaseMs = 30_000): Promise<readonly ReconciliationClaim[]> {
     positiveInteger(limit, "Reconciliation claim limit", 1000);
     positiveInteger(leaseMs, "Reconciliation lease", 15 * 60 * 1000);
@@ -445,7 +484,7 @@ export class ReceiptLifecycleAuthority {
     });
   }
 
-  async reconcileAttempt(claim: ReconciliationClaim, observer: ChainObserver): Promise<"applied" | "duplicate" | "stale" | "incident"> {
+  async reconcileAttempt(claim: ReconciliationClaim, observer: ChainObserver): Promise<"applied" | "hint" | "duplicate" | "stale" | "incident"> {
     const raw = await observer.observe(claim.identity);
     if (raw === null) throw new ReceiptLifecycleError("OBSERVER_NO_EVIDENCE", "The deterministic observer returned no evidence.");
     return this.observeOperation(claim, raw);
@@ -463,7 +502,7 @@ export class ReceiptLifecycleAuthority {
     });
   }
 
-  async observeOperation(claim: ReconciliationClaim, raw: unknown): Promise<"applied" | "duplicate" | "stale" | "incident"> {
+  async observeOperation(claim: ReconciliationClaim, raw: unknown): Promise<"applied" | "hint" | "duplicate" | "stale" | "incident"> {
     const observation = normalizeOperationObservation(raw);
     const normalizedDigest = digestCanonical(observation);
     return this.#runner.run(async (client) => this.#applyObservation(client, claim, observation, normalizedDigest));
@@ -482,7 +521,7 @@ export class ReceiptLifecycleAuthority {
     claim: ReconciliationClaim,
     observation: NormalizedOperationObservation,
     normalizedDigest: Uint8Array,
-  ): Promise<"applied" | "duplicate" | "stale" | "incident"> {
+  ): Promise<"applied" | "hint" | "duplicate" | "stale" | "incident"> {
     const job = await client.query<{ readonly claim_expires_at: Date }>(
       `SELECT claim_expires_at FROM samurai_persistence.receipt_reconciliation_jobs
         WHERE attempt_id=$1 AND state='processing' AND claim_token=$2 AND claim_generation=$3 FOR UPDATE`,
@@ -508,13 +547,30 @@ export class ReceiptLifecycleAuthority {
       contractAddress: attempt.contract_address,
       deploymentManifestHash: hex(attempt.deployment_manifest_hash),
       state: attempt.state,
-      lastSourceSequence: attempt.last_source_sequence === null ? null : Number(attempt.last_source_sequence),
+      lastRpcSourceSequence: attempt.last_rpc_source_sequence === null ? null : Number(attempt.last_rpc_source_sequence),
+      lastIndexerSourceSequence: attempt.last_indexer_source_sequence === null ? null : Number(attempt.last_indexer_source_sequence),
       lastHeadLevel: attempt.last_head_level === null ? null : Number(attempt.last_head_level),
       lastHeadBlockHash: attempt.last_head_block_hash,
       canonicalBlockHash: attempt.canonical_block_hash,
       canonicalBlockLevel: attempt.canonical_block_level === null ? null : Number(attempt.canonical_block_level),
       confirmations: attempt.confirmations,
     };
+    const existing = await client.query<{ readonly id: string; readonly normalized_digest: Uint8Array }>(
+      `SELECT id, normalized_digest FROM samurai_persistence.receipt_chain_observations
+        WHERE (source_kind=$1 AND source_observation_id=$2)
+           OR (attempt_id=$3 AND source_kind=$1 AND source_sequence=$4)
+           OR (attempt_id=$3 AND normalized_digest=$5) FOR UPDATE`,
+      [observation.observer, observation.sourceObservationId, attempt.id, observation.sourceSequence, normalizedDigest],
+    );
+    if (existing.rows.length > 0) {
+      if (!existing.rows.every((row) => sameDigest(row.normalized_digest, normalizedDigest))) {
+        await this.#recordIncident(client, intent, attempt, "OBSERVATION_HISTORY_CONTRADICTION", normalizedDigest, now);
+        await this.#finishSuccessfulClaim(client, claim, now, attempt.state === "FINALIZED");
+        return "incident";
+      }
+      await this.#finishSuccessfulClaim(client, claim, now, attempt.state === "FINALIZED");
+      return "duplicate";
+    }
     let decision = null;
     let reducerIncidentKind: "CHAIN_OR_MANIFEST_DRIFT" | "RPC_INDEXER_DIVERGENCE" | "OBSERVATION_HISTORY_CONTRADICTION" | null = null;
     try {
@@ -533,20 +589,6 @@ export class ReceiptLifecycleAuthority {
         reducerIncidentKind = "CHAIN_OR_MANIFEST_DRIFT";
       }
     }
-    const existing = await client.query<{ readonly id: string; readonly normalized_digest: Uint8Array }>(
-      `SELECT id, normalized_digest FROM samurai_persistence.receipt_chain_observations
-        WHERE (source_kind=$1 AND source_observation_id=$2) OR (attempt_id=$3 AND normalized_digest=$4) FOR UPDATE`,
-      [observation.observer, observation.sourceObservationId, attempt.id, normalizedDigest],
-    );
-    if (existing.rows.length > 0) {
-      if (!existing.rows.some((row) => sameDigest(row.normalized_digest, normalizedDigest))) {
-        await this.#recordIncident(client, intent, attempt, "OBSERVATION_HISTORY_CONTRADICTION", normalizedDigest, now);
-        await this.#finishSuccessfulClaim(client, claim, now, attempt.state === "FINALIZED");
-        return "incident";
-      }
-      await this.#finishSuccessfulClaim(client, claim, now, attempt.state === "FINALIZED");
-      return "duplicate";
-    }
     if (reducerIncidentKind) {
       await this.#recordIncident(client, intent, attempt, reducerIncidentKind, normalizedDigest, now);
       await this.#finishSuccessfulClaim(client, claim, now, attempt.state === "FINALIZED");
@@ -555,23 +597,47 @@ export class ReceiptLifecycleAuthority {
     if (!decision) throw new ReceiptLifecycleError("OBSERVATION_REDUCER_FAILED", "The operation observation reducer produced no decision.");
     const observationId = randomUUID();
     const event = observation.receiptEvent;
-    const applyResult = decision.disposition === "FINALIZED_CONTRADICTION" ? "INCIDENT"
+    const crossSourceDivergence = await client.query<{ readonly id: string }>(
+      `SELECT id FROM samurai_persistence.receipt_chain_observations
+        WHERE attempt_id=$1 AND source_kind=$2 AND head_level=$3 AND head_block_hash<>$4 LIMIT 1`,
+      [attempt.id, observation.observer === "fake-rpc" ? "fake-indexer" : "fake-rpc", observation.headLevel, observation.headBlockHash],
+    );
+    const hasCrossSourceDivergence = crossSourceDivergence.rows.length > 0;
+    const applyResult = hasCrossSourceDivergence || ["FINALIZED_CONTRADICTION", "ATTEMPT_CONTRADICTION"].includes(decision.disposition) ? "INCIDENT"
+      : decision.disposition === "HINT" ? "RECORDED_HINT"
       : decision.disposition === "STALE" ? "IGNORED_STALE" : decision.disposition === "DUPLICATE" ? "DUPLICATE" : "APPLIED";
     await client.query(
       `INSERT INTO samurai_persistence.receipt_chain_observations
         (id,attempt_id,chain_id,operation_hash,source_kind,source_observation_id,source_sequence,normalized_digest,
-         disposition,apply_result,head_level,head_block_hash,included_level,included_block_hash,operation_index,failure_code,
+         disposition,apply_result,head_level,head_block_hash,included_level,included_block_hash,operation_index,failure_code,canonical_chain_proof,
          receipt_owner,receipt_contract,receipt_service_commitment,receipt_content_version,receipt_nonce,receipt_payload_hash,
          receipt_manifest_hash,observed_at)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24)`,
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17::jsonb,$18,$19,$20,$21,$22,$23,$24,$25)`,
       [observationId, attempt.id, observation.chainId, observation.operationHash, observation.observer, observation.sourceObservationId,
         observation.sourceSequence, normalizedDigest, observation.disposition, applyResult, observation.headLevel, observation.headBlockHash,
         observation.includedLevel, observation.includedBlockHash, observation.operationIndex, observation.failureCode,
+        observation.canonicalChainProof === null ? null : canonicalJson(observation.canonicalChainProof),
         event?.owner ?? null, event?.contractAddress ?? null, event ? bytes(event.serviceCommitment, "event commitment") : null,
         event?.contentVersion ?? null, event ? bytes(event.nonce, "event nonce") : null, event ? bytes(event.payloadHash, "event payload") : null,
         event ? bytes(event.deploymentManifestHash, "event manifest") : null, now],
     );
     await this.options.afterWriteBoundary?.("observation");
+    if (decision.disposition === "HINT") {
+      await client.query(`UPDATE samurai_persistence.operation_attempts SET last_indexer_source_sequence=$2,last_observed_at=$3 WHERE id=$1`,
+        [attempt.id, observation.sourceSequence, now]);
+      if (hasCrossSourceDivergence) {
+        await this.#recordIncident(client, intent, attempt, "RPC_INDEXER_DIVERGENCE", normalizedDigest, now, observationId);
+        await this.#finishSuccessfulClaim(client, claim, now, false);
+        return "incident";
+      }
+      await this.#finishSuccessfulClaim(client, claim, now, false);
+      return "hint";
+    }
+    if (hasCrossSourceDivergence) {
+      await this.#recordIncident(client, intent, attempt, "RPC_INDEXER_DIVERGENCE", normalizedDigest, now, observationId);
+      await this.#finishSuccessfulClaim(client, claim, now, attempt.state === "FINALIZED");
+      return "incident";
+    }
     if (decision.disposition === "STALE") {
       await this.#finishSuccessfulClaim(client, claim, now, false);
       return "stale";
@@ -587,6 +653,13 @@ export class ReceiptLifecycleAuthority {
       await this.#writeEvent(client, intent.id, revision, "FINALIZED_CHAIN_CONTRADICTION", "FINALIZED", "FINALIZED",
         attempt.id, observationId, { attemptRef: attempt.public_attempt_ref, incidentRef: incidentId }, now);
       await this.#finishSuccessfulClaim(client, claim, now, true);
+      return "incident";
+    }
+    if (decision.disposition === "ATTEMPT_CONTRADICTION") {
+      const kind = attempt.state === "REPLACED" && observation.disposition === "INCLUDED"
+        ? "CANONICAL_ATTEMPT_CONFLICT" : "CHAIN_OR_MANIFEST_DRIFT";
+      await this.#recordIncident(client, intent, attempt, kind, normalizedDigest, now, observationId);
+      await this.#finishSuccessfulClaim(client, claim, now, attempt.state === "FINALIZED");
       return "incident";
     }
     if (event && (event.owner !== intent.account || event.contractAddress !== intent.contract_address
@@ -616,7 +689,7 @@ export class ReceiptLifecycleAuthority {
       fromState = transition;
     }
     if (decision.transitions.length === 0) {
-      await client.query(`UPDATE samurai_persistence.operation_attempts SET last_source_sequence=$2,last_head_level=$3,
+      await client.query(`UPDATE samurai_persistence.operation_attempts SET last_rpc_source_sequence=$2,last_head_level=$3,
         last_head_block_hash=$4,last_observed_at=$5 WHERE id=$1`, [attempt.id, observation.sourceSequence, observation.headLevel, observation.headBlockHash, now]);
     }
     await client.query(`UPDATE samurai_persistence.receipt_intents SET projection_revision=$2,state_changed_at=$3 WHERE id=$1`, [intent.id, revision, now]);
@@ -630,7 +703,7 @@ export class ReceiptLifecycleAuthority {
     if (transition === "INCLUDED") {
       await client.query(`UPDATE samurai_persistence.operation_attempts SET state='INCLUDED',canonical_block_level=$2,
         canonical_block_hash=$3,included_operation_index=$4,last_head_level=$5,last_head_block_hash=$6,confirmations=$7,
-        included_at=COALESCE(included_at,$8),last_observed_at=$8,last_source_sequence=$9,failure_code=NULL,
+        included_at=COALESCE(included_at,$8),last_observed_at=$8,last_rpc_source_sequence=$9,failure_code=NULL,
         orphaned_block_level=NULL,orphaned_block_hash=NULL,orphaned_at=NULL WHERE id=$1`,
         [attempt.id, observation.includedLevel, observation.includedBlockHash, observation.operationIndex, observation.headLevel,
           observation.headBlockHash, Math.min(observation.headLevel - observation.includedLevel! + 1, 1), now, observation.sourceSequence]);
@@ -648,7 +721,7 @@ export class ReceiptLifecycleAuthority {
       await client.query(`UPDATE samurai_persistence.receipt_intents SET state='INCLUDED',included_at=COALESCE(included_at,$2) WHERE id=$1`, [intent.id, now]);
     } else if (transition === "CONFIRMED") {
       await client.query(`UPDATE samurai_persistence.operation_attempts SET state='CONFIRMED',confirmations=$2,confirmed_at=COALESCE(confirmed_at,$3),
-        last_observed_at=$3 WHERE id=$1`, [attempt.id, observation.headLevel - observation.includedLevel! + 1, now]);
+        policy_evidence=$4,last_observed_at=$3 WHERE id=$1`, [attempt.id, observation.headLevel - observation.includedLevel! + 1, now, policyEvidence]);
       await client.query(`UPDATE samurai_persistence.service_receipts SET state='CONFIRMED',updated_at=$2 WHERE attempt_id=$1`, [attempt.id, now]);
       await client.query(`UPDATE samurai_persistence.receipt_intents SET state='CONFIRMED',confirmed_at=COALESCE(confirmed_at,$2) WHERE id=$1`, [intent.id, now]);
     } else if (transition === "FINALIZED") {
@@ -658,15 +731,19 @@ export class ReceiptLifecycleAuthority {
     } else if (transition === "REORGED") {
       await client.query(`UPDATE samurai_persistence.operation_attempts SET state='REORGED',orphaned_block_level=canonical_block_level,
         orphaned_block_hash=canonical_block_hash,orphaned_at=$2,canonical_block_level=NULL,canonical_block_hash=NULL,
-        included_operation_index=NULL,confirmations=0,last_head_level=$3,last_head_block_hash=$4,last_source_sequence=$5,last_observed_at=$2 WHERE id=$1`,
+        included_operation_index=NULL,confirmations=0,policy_evidence=NULL,last_head_level=$3,last_head_block_hash=$4,last_rpc_source_sequence=$5,last_observed_at=$2 WHERE id=$1`,
         [attempt.id, now, observation.headLevel, observation.headBlockHash, observation.sourceSequence]);
       await client.query(`UPDATE samurai_persistence.service_receipts SET state='REORGED',orphaned_block_level=canonical_block_level,
         orphaned_block_hash=canonical_block_hash,canonical_block_level=NULL,canonical_block_hash=NULL,updated_at=$2 WHERE attempt_id=$1`, [attempt.id, now]);
       await client.query(`UPDATE samurai_persistence.receipt_intents SET state='REORGED' WHERE id=$1`, [intent.id]);
     } else if (transition === "FAILED" || transition === "DROPPED") {
-      await client.query(`UPDATE samurai_persistence.operation_attempts SET state=$2,failure_code=$3,last_head_level=$4,
-        last_head_block_hash=$5,last_source_sequence=$6,last_observed_at=$7 WHERE id=$1`,
+      await client.query(`UPDATE samurai_persistence.operation_attempts SET state=$2,failure_code=$3,canonical_block_level=NULL,
+        canonical_block_hash=NULL,included_operation_index=NULL,confirmations=0,policy_evidence=NULL,orphaned_block_level=NULL,
+        orphaned_block_hash=NULL,orphaned_at=NULL,included_at=NULL,confirmed_at=NULL,finalized_at=NULL,
+        last_head_level=$4,last_head_block_hash=$5,last_rpc_source_sequence=$6,last_observed_at=$7 WHERE id=$1`,
         [attempt.id, transition, observation.failureCode, observation.headLevel, observation.headBlockHash, observation.sourceSequence, now]);
+      await client.query(`DELETE FROM samurai_persistence.service_receipts WHERE attempt_id=$1`, [attempt.id]);
+      await client.query(`UPDATE samurai_persistence.receipt_intents SET state='SUBMITTED',included_at=NULL,confirmed_at=NULL WHERE id=$1`, [intent.id]);
     }
     await this.options.afterWriteBoundary?.("projection");
     if (terminal) await this.options.afterWriteBoundary?.("projection");
@@ -720,15 +797,21 @@ export class ReceiptLifecycleAuthority {
   }
 
   async #openIncident(client: SqlClient, intentId: string, attemptId: string, kind: string, scopeDigest: Uint8Array, now: Date, observationId?: string): Promise<string> {
-    const existing = await client.query<{ readonly id: string }>(`SELECT id FROM samurai_persistence.receipt_incidents WHERE kind=$1 AND scope_digest=$2 AND state='OPEN' FOR UPDATE`, [kind, scopeDigest]);
+    const exactScopeDigest = digestCanonical({ intentId, attemptId, kind, evidenceDigest: hex(scopeDigest) });
+    const existing = await client.query<{ readonly id: string }>(`SELECT id FROM samurai_persistence.receipt_incidents
+      WHERE intent_id=$1 AND attempt_id=$2 AND kind=$3 AND scope_digest=$4 AND state='OPEN' FOR UPDATE`,
+      [intentId, attemptId, kind, exactScopeDigest]);
     const id = existing.rows[0]?.id ?? randomUUID();
     if (existing.rows[0]) {
       await client.query(`UPDATE samurai_persistence.receipt_incidents SET occurrence_count=occurrence_count+1,last_seen_at=$2 WHERE id=$1`, [id, now]);
     } else {
       await client.query(`INSERT INTO samurai_persistence.receipt_incidents
         (id,kind,scope_digest,state,intent_id,attempt_id,first_observation_id,opened_at,last_seen_at)
-        VALUES ($1,$2,$3,'OPEN',$4,$5,$6,$7,$7)`, [id, kind, scopeDigest, intentId, attemptId, observationId ?? null, now]);
+        VALUES ($1,$2,$3,'OPEN',$4,$5,$6,$7,$7)`, [id, kind, exactScopeDigest, intentId, attemptId, observationId ?? null, now]);
     }
+    await client.query(`INSERT INTO samurai_persistence.receipt_incident_occurrences
+      (id,incident_id,evidence_digest,observation_id,observed_at) VALUES ($1,$2,$3,$4,$5)`,
+      [randomUUID(), id, scopeDigest, observationId ?? null, now]);
     await this.options.afterWriteBoundary?.("incident");
     return id;
   }

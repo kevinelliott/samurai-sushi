@@ -40,7 +40,11 @@ state gains an expiry transition. The named
 `localnet-two-confirmation-rehearsal-v1` evaluator derives confirmations as
 `canonicalHeadLevel - includedLevel + 1`, treats inclusion as confirmation one,
 and satisfies both confirmation and rehearsal finality at confirmation two only
-when exact canonical head/block evidence is valid. Adapter-supplied confirmation
+when an explicit bounded, gap-free block proof begins at the exact included
+block and ends at the exact canonical head. Only the configured canonical RPC
+authority may supply state-changing proof. Indexer observations are durable,
+bounded hints or contradiction evidence and never create, confirm, finalize,
+reorg, fail, or drop lifecycle state. Adapter-supplied confirmation
 counts or finalized booleans have no authority. When one observation reaches
 both boundaries, the ordered `CONFIRMED` and `FINALIZED` lifecycle facts commit
 atomically.
@@ -49,11 +53,18 @@ An old attempt marked `REPLACED` records the replacement hash; a new attempt
 starts at `SUBMITTED` under the same intent. Contract uniqueness ensures at most
 one can issue. If two attempts reach chain inclusion, the later mutation fails
 with duplicate nonce/commitment and projects as `FAILED`, never a second receipt.
+After `FAILED` or `DROPPED`, a later independent attempt is linked as a retry,
+not a replacement; it retains both immutable hashes without falsifying
+replacement lineage.
 
 `REORGED` is a compensating state allowed from `INCLUDED` or `CONFIRMED`. The
 projection removes the provisional/settled onchain receipt, preserves the
 offchain `SETTLED` service, records the orphaned block, and observes the same
 attempt until it is re-included or dropped. Re-inclusion reapplies idempotently.
+A reorg proof must identify the attempt's exact current canonical block and show
+the different canonical block at that same level through a bounded path to the
+new head. A mismatched level or block opens incident review and performs no
+downgrade.
 A finalized receipt does not transition; an event contradicting the finality
 assumption enters incident handling rather than being hidden as a normal state.
 

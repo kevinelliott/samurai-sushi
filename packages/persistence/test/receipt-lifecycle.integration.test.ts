@@ -86,14 +86,14 @@ describe("Phase 2B durable receipt lifecycle authority", () => {
 
   afterAll(async () => { await rawPool.end(); });
 
-  async function prepare(nonceByte = "22", idempotencyKey = "phase2b-intent-0001") {
+  async function prepare(nonceByte = "22", idempotencyKey = "phase2b-intent-0001", target = authority, account = OWNER) {
     const clock = await rawPool.query<{ readonly now: Date }>("SELECT date_trunc('second', clock_timestamp()) AS now");
     const issuedAt = Math.floor(clock.rows[0]!.now.getTime() / 1000);
-    return authority.prepareSettledReceiptIntent({ kind: "player", sessionSecret: "server-fixture" }, {
+    return target.prepareSettledReceiptIntent({ kind: "player", sessionSecret: "server-fixture" }, {
       idempotencyKey,
       commitmentNonce: FIXTURE_SETTLED_COMMITMENT_NONCE,
       chainId: "NetXtJqPyJGB6Pc",
-      account: OWNER,
+      account,
       destination: CONTRACT,
       nonce: nonceByte.repeat(32),
       issuedAt: String(issuedAt),
@@ -121,11 +121,14 @@ describe("Phase 2B durable receipt lifecycle authority", () => {
       contractAddress: CONTRACT,
       deploymentManifestHash: RECEIPT_AUTHORITY_MANIFEST_HASH,
       headLevel,
-      headBlockHash: headLevel === 100 ? "Bbcdefghijkmnpqr" : "Bbcdefghijkmnprs",
+      headBlockHash: headLevel === 100 ? "Babcdefghijkmnpq" : "Bbcdefghijkmnprs",
       includedBlockHash: "Babcdefghijkmnpq",
       includedLevel: 100,
       operationIndex: 0,
       failureCode: null,
+      canonicalChainProof: headLevel === 100
+        ? [{ level: 100, blockHash: "Babcdefghijkmnpq", predecessorHash: null }]
+        : [{ level: 100, blockHash: "Babcdefghijkmnpq", predecessorHash: null }, { level: 101, blockHash: "Bbcdefghijkmnprs", predecessorHash: "Babcdefghijkmnpq" }],
       receiptEvent: {
         owner: OWNER,
         contractAddress: CONTRACT,
@@ -206,6 +209,9 @@ describe("Phase 2B durable receipt lifecycle authority", () => {
       ...includedObservation(2, 102, "rpc:reorg:1", projection.reviewFacts.payloadHash),
       disposition: "REORGED",
       headBlockHash: "Bbcdefghijkmnprt",
+      canonicalChainProof: [{ level: 100, blockHash: "B222222222222222", predecessorHash: null },
+        { level: 101, blockHash: "B333333333333333", predecessorHash: "B222222222222222" },
+        { level: 102, blockHash: "Bbcdefghijkmnprt", predecessorHash: "B333333333333333" }],
       receiptEvent: null,
     };
     await expect(authority.observeOperation(claim, contradiction)).resolves.toBe("incident");
@@ -228,6 +234,12 @@ describe("Phase 2B durable receipt lifecycle authority", () => {
     await expect(rawPool.query("UPDATE samurai_persistence.operation_attempts SET operation_hash=$2 WHERE public_attempt_ref=$1", [attempt.publicAttemptRef, `o${"2".repeat(50)}`])).rejects.toMatchObject({ code: "23514" });
     await expect(rawPool.query("UPDATE samurai_persistence.operation_attempts SET public_attempt_ref=$2 WHERE public_attempt_ref=$1", [attempt.publicAttemptRef, "00000000-0000-4000-8000-000000000000"])).rejects.toMatchObject({ code: "23514" });
     const predecessor = await rawPool.query<{ readonly id: string }>("SELECT id::text FROM samurai_persistence.operation_attempts WHERE public_attempt_ref=$1", [attempt.publicAttemptRef]);
+    await expect(authority.replaceAttempt(predecessor.rows[0]!.id, { operationHash: OPERATION, counter: 7 }))
+      .rejects.toMatchObject({ code: "23505" });
+    const hashIndex = await rawPool.query<{ readonly indexdef: string }>(`SELECT indexdef FROM pg_indexes
+      WHERE schemaname='samurai_persistence' AND tablename='operation_attempts' AND indexdef LIKE '%(chain_id, operation_hash)%'`);
+    expect(hashIndex.rows).toHaveLength(1);
+    expect(hashIndex.rows[0]!.indexdef).toContain("UNIQUE INDEX");
     await expect(rawPool.query(`INSERT INTO samurai_persistence.operation_attempts
       (id,public_attempt_ref,intent_id,chain_id,operation_hash,source_account,contract_address,deployment_manifest_hash,counter,state,submitted_at,last_observed_at)
       SELECT '11111111-1111-4111-8111-111111111111', $2, intent_id, chain_id, $3, source_account, contract_address,
@@ -267,6 +279,7 @@ describe("Phase 2B durable receipt lifecycle authority", () => {
       ...includedObservation(2, 101, "rpc:reinclude:2", projection.reviewFacts.payloadHash),
       disposition: "REORGED",
       headBlockHash: "Bbcdefghijkmnprt",
+      canonicalChainProof: [{ level: 100, blockHash: "B222222222222222", predecessorHash: null }, { level: 101, blockHash: "Bbcdefghijkmnprt", predecessorHash: "B222222222222222" }],
       receiptEvent: null,
     });
     await rawPool.query("UPDATE samurai_persistence.receipt_reconciliation_jobs SET available_at=clock_timestamp() WHERE state='pending'");
@@ -275,6 +288,8 @@ describe("Phase 2B durable receipt lifecycle authority", () => {
       ...includedObservation(3, 102, "rpc:reinclude:3", projection.reviewFacts.payloadHash),
       includedLevel: 102,
       includedBlockHash: "Babcdefghijkmnpr",
+      headBlockHash: "Babcdefghijkmnpr",
+      canonicalChainProof: [{ level: 102, blockHash: "Babcdefghijkmnpr", predecessorHash: null }],
     });
     const rows = await rawPool.query<{ readonly attempt_state: string; readonly receipt_state: string; readonly receipts: string; readonly observations: string }>(
       `SELECT attempt.state AS attempt_state,receipt.state AS receipt_state,
@@ -284,6 +299,33 @@ describe("Phase 2B durable receipt lifecycle authority", () => {
        WHERE attempt.public_attempt_ref=$1`, [attempt.publicAttemptRef],
     );
     expect(rows.rows[0]).toEqual({ attempt_state: "INCLUDED", receipt_state: "INCLUDED", receipts: "1", observations: "3" });
+  });
+
+  it("rejects a reorg proof that does not identify the exact current canonical block", async () => {
+    const { attempt, projection } = await submittedAttempt();
+    let claim = (await authority.claimReconciliation(1, 30_000))[0]!;
+    await authority.observeOperation(claim, includedObservation(1, 100, "rpc:reorg-proof:included", projection.reviewFacts.payloadHash));
+    await rawPool.query("UPDATE samurai_persistence.receipt_reconciliation_jobs SET available_at=clock_timestamp() WHERE state='pending'");
+    claim = (await authority.claimReconciliation(1, 30_000))[0]!;
+    await expect(authority.observeOperation(claim, {
+      ...includedObservation(2, 101, "rpc:reorg-proof:mismatch", projection.reviewFacts.payloadHash),
+      disposition: "REORGED",
+      includedLevel: 99,
+      includedBlockHash: "B444444444444444",
+      headBlockHash: "B555555555555555",
+      canonicalChainProof: [
+        { level: 99, blockHash: "B666666666666666", predecessorHash: null },
+        { level: 100, blockHash: "B777777777777777", predecessorHash: "B666666666666666" },
+        { level: 101, blockHash: "B555555555555555", predecessorHash: "B777777777777777" },
+      ],
+      receiptEvent: null,
+    })).resolves.toBe("incident");
+    const row = await rawPool.query<{ readonly state: string; readonly block: string; readonly incidents: string }>(
+      `SELECT attempt.state,attempt.canonical_block_hash AS block,
+        (SELECT count(*)::text FROM samurai_persistence.receipt_incidents WHERE attempt_id=attempt.id AND kind='CHAIN_OR_MANIFEST_DRIFT') AS incidents
+       FROM samurai_persistence.operation_attempts attempt WHERE public_attempt_ref=$1`, [attempt.publicAttemptRef],
+    );
+    expect(row.rows[0]).toEqual({ state: "INCLUDED", block: "Babcdefghijkmnpq", incidents: "1" });
   });
 
   it("separates claim generations from consecutive failures and dead-letters only failed polls", async () => {
@@ -319,6 +361,263 @@ describe("Phase 2B durable receipt lifecycle authority", () => {
        FROM samurai_persistence.operation_attempts attempt WHERE attempt.public_attempt_ref=$1`, [attempt.publicAttemptRef],
     );
     expect(row.rows[0]).toEqual({ state: "SUBMITTED", incidents: "1", observations: "0", outbox: "2" });
+  });
+
+  it("persists indexer hints without mutation and keeps high indexer ordering independent from canonical RPC", async () => {
+    const { attempt, projection } = await submittedAttempt();
+    let claim = (await authority.claimReconciliation(1, 30_000))[0]!;
+    const hint = { ...includedObservation(999, 100, "indexer:hint:999", projection.reviewFacts.payloadHash), observer: "fake-indexer" as const, canonicalChainProof: null };
+    await expect(authority.observeOperation(claim, hint)).resolves.toBe("hint");
+    await rawPool.query("UPDATE samurai_persistence.receipt_reconciliation_jobs SET available_at=clock_timestamp() WHERE state='pending'");
+    claim = (await authority.claimReconciliation(1, 30_000))[0]!;
+    await expect(authority.observeOperation(claim, includedObservation(1, 100, "rpc:canonical:1", projection.reviewFacts.payloadHash))).resolves.toBe("applied");
+    const row = await rawPool.query<{ readonly state: string; readonly rpc: string; readonly indexer: string; readonly hints: string }>(
+      `SELECT attempt.state,attempt.last_rpc_source_sequence::text AS rpc,attempt.last_indexer_source_sequence::text AS indexer,
+        (SELECT count(*)::text FROM samurai_persistence.receipt_chain_observations WHERE attempt_id=attempt.id AND apply_result='RECORDED_HINT') AS hints
+       FROM samurai_persistence.operation_attempts attempt WHERE attempt.public_attempt_ref=$1`, [attempt.publicAttemptRef],
+    );
+    expect(row.rows[0]).toEqual({ state: "INCLUDED", rpc: "1", indexer: "999", hints: "1" });
+  });
+
+  it("opens RPC/indexer divergence without projection mutation in both source orders", async () => {
+    const first = await submittedAttempt();
+    let claim = (await authority.claimReconciliation(1, 30_000))[0]!;
+    await authority.observeOperation(claim, { ...includedObservation(900, 100, "indexer:diverge:first", first.projection.reviewFacts.payloadHash),
+      observer: "fake-indexer", headBlockHash: "B999999999999999", canonicalChainProof: null });
+    await rawPool.query("UPDATE samurai_persistence.receipt_reconciliation_jobs SET available_at=clock_timestamp() WHERE state='pending'");
+    claim = (await authority.claimReconciliation(1, 30_000))[0]!;
+    await expect(authority.observeOperation(claim, includedObservation(1, 100, "rpc:diverge:second", first.projection.reviewFacts.payloadHash))).resolves.toBe("incident");
+    let row = await rawPool.query<{ readonly state: string; readonly incidents: string }>(
+      `SELECT state,(SELECT count(*)::text FROM samurai_persistence.receipt_incidents WHERE attempt_id=attempt.id AND kind='RPC_INDEXER_DIVERGENCE') AS incidents
+       FROM samurai_persistence.operation_attempts attempt WHERE public_attempt_ref=$1`, [first.attempt.publicAttemptRef]);
+    expect(row.rows[0]).toEqual({ state: "SUBMITTED", incidents: "1" });
+
+    await rawPool.query("DROP SCHEMA IF EXISTS samurai_persistence CASCADE");
+    await applyMigrations(pool);
+    const now = (await rawPool.query<{ readonly now: Date }>("SELECT clock_timestamp() AS now")).rows[0]!.now;
+    await rawPool.query("INSERT INTO samurai_persistence.players (id,state,created_at,updated_at) VALUES ('player_phase2b_test_001','active',$1,$1)", [now]);
+    const second = await submittedAttempt();
+    claim = (await authority.claimReconciliation(1, 30_000))[0]!;
+    await authority.observeOperation(claim, includedObservation(1, 100, "rpc:diverge:first", second.projection.reviewFacts.payloadHash));
+    await rawPool.query("UPDATE samurai_persistence.receipt_reconciliation_jobs SET available_at=clock_timestamp() WHERE state='pending'");
+    claim = (await authority.claimReconciliation(1, 30_000))[0]!;
+    await expect(authority.observeOperation(claim, { ...includedObservation(900, 100, "indexer:diverge:second", second.projection.reviewFacts.payloadHash),
+      observer: "fake-indexer", headBlockHash: "B999999999999999", canonicalChainProof: null })).resolves.toBe("incident");
+    row = await rawPool.query<{ readonly state: string; readonly incidents: string }>(
+      `SELECT state,(SELECT count(*)::text FROM samurai_persistence.receipt_incidents WHERE attempt_id=attempt.id AND kind='RPC_INDEXER_DIVERGENCE') AS incidents
+       FROM samurai_persistence.operation_attempts attempt WHERE public_attempt_ref=$1`, [second.attempt.publicAttemptRef]);
+    expect(row.rows[0]).toEqual({ state: "INCLUDED", incidents: "1" });
+  });
+
+  it("opens byte-exact source-sequence contradictions before reducer mutation", async () => {
+    const { attempt, projection } = await submittedAttempt();
+    let claim = (await authority.claimReconciliation(1, 30_000))[0]!;
+    const original = includedObservation(1, 100, "rpc:exact:1", projection.reviewFacts.payloadHash);
+    await authority.observeOperation(claim, original);
+    await rawPool.query("UPDATE samurai_persistence.receipt_reconciliation_jobs SET available_at=clock_timestamp() WHERE state='pending'");
+    claim = (await authority.claimReconciliation(1, 30_000))[0]!;
+    await expect(authority.observeOperation(claim, {
+      ...original,
+      sourceObservationId: "rpc:exact:changed-id",
+      receiptEvent: { ...original.receiptEvent!, payloadHash: "f".repeat(64) },
+    })).resolves.toBe("incident");
+    const row = await rawPool.query<{ readonly state: string; readonly observations: string; readonly incidents: string; readonly occurrences: string }>(
+      `SELECT attempt.state,
+        (SELECT count(*)::text FROM samurai_persistence.receipt_chain_observations WHERE attempt_id=attempt.id) AS observations,
+        (SELECT count(*)::text FROM samurai_persistence.receipt_incidents WHERE attempt_id=attempt.id AND kind='OBSERVATION_HISTORY_CONTRADICTION') AS incidents,
+        (SELECT count(*)::text FROM samurai_persistence.receipt_incident_occurrences occurrence JOIN samurai_persistence.receipt_incidents incident ON incident.id=occurrence.incident_id WHERE incident.attempt_id=attempt.id) AS occurrences
+       FROM samurai_persistence.operation_attempts attempt WHERE attempt.public_attempt_ref=$1`, [attempt.publicAttemptRef],
+    );
+    expect(row.rows[0]).toEqual({ state: "INCLUDED", observations: "1", incidents: "1", occurrences: "1" });
+  });
+
+  it("rejects every illegal raw-SQL attempt evidence shape", async () => {
+    const { attempt } = await submittedAttempt();
+    const illegal = [
+      "confirmations=1",
+      "canonical_block_level=1,canonical_block_hash='B111111111111111',included_operation_index=0",
+      "included_at=clock_timestamp()",
+      "orphaned_block_level=1,orphaned_block_hash='B111111111111111',orphaned_at=clock_timestamp()",
+      "failure_code='PRETEND'",
+      "state='FAILED',failure_code='CHAIN_REJECTED',canonical_block_level=1,canonical_block_hash='B111111111111111',included_operation_index=0",
+      "state='DROPPED',failure_code='CHAIN_DROPPED',confirmations=2",
+      "state='REPLACED',included_at=clock_timestamp()",
+      "state='INCLUDED',included_at=clock_timestamp(),confirmations=1",
+      "state='CONFIRMED',included_at=clock_timestamp(),confirmed_at=clock_timestamp(),confirmations=2",
+      "state='FINALIZED',included_at=clock_timestamp(),confirmed_at=clock_timestamp(),finalized_at=clock_timestamp(),confirmations=2,policy_evidence='PRETEND'",
+      "state='REORGED',included_at=clock_timestamp(),orphaned_block_level=1,orphaned_block_hash='B111111111111111',orphaned_at=clock_timestamp(),canonical_block_level=1,canonical_block_hash='B222222222222222',included_operation_index=0",
+    ];
+    for (const assignment of illegal) {
+      await expect(rawPool.query(`UPDATE samurai_persistence.operation_attempts SET ${assignment} WHERE public_attempt_ref=$1`, [attempt.publicAttemptRef]))
+        .rejects.toMatchObject({ code: "23514" });
+    }
+  });
+
+  it("represents a later independent retry after failure without replacement lineage", async () => {
+    const { attempt } = await submittedAttempt();
+    const claim = (await authority.claimReconciliation(1, 30_000))[0]!;
+    await authority.observeOperation(claim, {
+      observer: "fake-rpc", sourceObservationId: "rpc:failed:1", sourceSequence: 1, disposition: "FAILED",
+      chainId: claim.identity.chainId, operationHash: claim.identity.operationHash, sourceAccount: claim.identity.sourceAccount,
+      contractAddress: claim.identity.contractAddress, deploymentManifestHash: claim.identity.deploymentManifestHash,
+      headLevel: 100, headBlockHash: "B111111111111111", includedBlockHash: null, includedLevel: null, operationIndex: null,
+      failureCode: "CHAIN_REJECTED", canonicalChainProof: null, receiptEvent: null,
+    });
+    const predecessor = await rawPool.query<{ readonly id: string }>("SELECT id::text FROM samurai_persistence.operation_attempts WHERE public_attempt_ref=$1", [attempt.publicAttemptRef]);
+    const retry = await authority.retryAttempt(predecessor.rows[0]!.id, { operationHash: `o${"4".repeat(50)}`, counter: 8 });
+    const row = await rawPool.query<{ readonly retries: string; readonly replacements: string; readonly prior: string; readonly next: string }>(
+      `SELECT count(*) FILTER (WHERE retry_of_attempt_id=$1)::text AS retries,
+        count(*) FILTER (WHERE replaces_attempt_id=$1)::text AS replacements,
+        max(state) FILTER (WHERE id=$1) AS prior,max(state) FILTER (WHERE id=$2) AS next
+       FROM samurai_persistence.operation_attempts WHERE intent_id=(SELECT intent_id FROM samurai_persistence.operation_attempts WHERE id=$1)`,
+      [predecessor.rows[0]!.id, retry.attemptId],
+    );
+    expect(row.rows[0]).toEqual({ retries: "1", replacements: "0", prior: "FAILED", next: "SUBMITTED" });
+  });
+
+  it("treats canonical inclusion of a replaced predecessor as a durable conflict", async () => {
+    const { attempt, projection } = await submittedAttempt();
+    const predecessor = await rawPool.query<{ readonly id: string }>("SELECT id::text FROM samurai_persistence.operation_attempts WHERE public_attempt_ref=$1", [attempt.publicAttemptRef]);
+    await authority.replaceAttempt(predecessor.rows[0]!.id, { operationHash: `o${"2".repeat(50)}`, counter: 7 });
+    const claims = await authority.claimReconciliation(10, 30_000);
+    const oldClaim = claims.find((value) => value.attemptId === predecessor.rows[0]!.id)!;
+    await expect(authority.observeOperation(oldClaim, includedObservation(1, 100, "rpc:replaced:1", projection.reviewFacts.payloadHash))).resolves.toBe("incident");
+    const row = await rawPool.query<{ readonly state: string; readonly incidents: string; readonly receipts: string }>(
+      `SELECT state,
+        (SELECT count(*)::text FROM samurai_persistence.receipt_incidents WHERE attempt_id=attempt.id AND kind='CANONICAL_ATTEMPT_CONFLICT') AS incidents,
+        (SELECT count(*)::text FROM samurai_persistence.service_receipts WHERE intent_id=attempt.intent_id) AS receipts
+       FROM samurai_persistence.operation_attempts attempt WHERE id=$1`, [predecessor.rows[0]!.id],
+    );
+    expect(row.rows[0]).toEqual({ state: "REPLACED", incidents: "1", receipts: "0" });
+  });
+
+  it("fences a reclaimed worker before apply while the new generation commits", async () => {
+    const { projection } = await submittedAttempt();
+    const staleClaim = (await authority.claimReconciliation(1, 30_000))[0]!;
+    let release!: () => void;
+    let reached!: () => void;
+    const blocked = new Promise<void>((resolve) => { release = resolve; });
+    const atFetch = new Promise<void>((resolve) => { reached = resolve; });
+    const staleApply = authority.reconcileAttempt(staleClaim, {
+      observe: async () => { reached(); await blocked; return includedObservation(1, 100, "rpc:stale-worker:1", projection.reviewFacts.payloadHash); },
+    });
+    await atFetch;
+    await rawPool.query("UPDATE samurai_persistence.receipt_reconciliation_jobs SET claim_expires_at=clock_timestamp() WHERE attempt_id=$1", [staleClaim.attemptId]);
+    const liveClaim = (await authority.claimReconciliation(1, 30_000))[0]!;
+    expect(liveClaim.claimGeneration).toBe(staleClaim.claimGeneration + 1);
+    release();
+    await expect(staleApply).rejects.toBeInstanceOf(ReceiptWorkerClaimLostError);
+    await expect(authority.observeOperation(liveClaim, includedObservation(1, 100, "rpc:live-worker:1", projection.reviewFacts.payloadHash))).resolves.toBe("applied");
+  });
+
+  it("retries byte-exactly after a simulated lost response without duplicate projection", async () => {
+    const { attempt, projection } = await submittedAttempt();
+    let claim = (await authority.claimReconciliation(1, 30_000))[0]!;
+    const exact = includedObservation(1, 100, "rpc:commit-uncertainty:1", projection.reviewFacts.payloadHash);
+    await authority.observeOperation(claim, exact); // committed response is deliberately ignored
+    await rawPool.query("UPDATE samurai_persistence.receipt_reconciliation_jobs SET available_at=clock_timestamp() WHERE state='pending'");
+    claim = (await authority.claimReconciliation(1, 30_000))[0]!;
+    await expect(authority.observeOperation(claim, exact)).resolves.toBe("duplicate");
+    const row = await rawPool.query<{ readonly observations: string; readonly receipts: string }>(
+      `SELECT (SELECT count(*)::text FROM samurai_persistence.receipt_chain_observations WHERE attempt_id=attempt.id) AS observations,
+        (SELECT count(*)::text FROM samurai_persistence.service_receipts WHERE attempt_id=attempt.id) AS receipts
+       FROM samurai_persistence.operation_attempts attempt WHERE public_attempt_ref=$1`, [attempt.publicAttemptRef],
+    );
+    expect(row.rows[0]).toEqual({ observations: "1", receipts: "1" });
+  });
+
+  it("serializes inclusion-before-replacement and replacement-before-inclusion at explicit barriers", async () => {
+    const first = await submittedAttempt();
+    const firstId = (await rawPool.query<{ readonly id: string }>("SELECT id::text FROM samurai_persistence.operation_attempts WHERE public_attempt_ref=$1", [first.attempt.publicAttemptRef])).rows[0]!.id;
+    const firstClaim = (await authority.claimReconciliation(1, 30_000))[0]!;
+    let releaseObservation!: () => void;
+    let reachedObservation!: () => void;
+    const observationBlocked = new Promise<void>((resolve) => { releaseObservation = resolve; });
+    const observationReached = new Promise<void>((resolve) => { reachedObservation = resolve; });
+    let holdObservation = true;
+    const observationFirst = new ReceiptLifecycleAuthority(pool, service, { afterWriteBoundary: async (boundary) => {
+      if (boundary === "observation" && holdObservation) { holdObservation = false; reachedObservation(); await observationBlocked; }
+    } });
+    const inclusion = observationFirst.observeOperation(firstClaim, includedObservation(1, 100, "rpc:race:inclusion-first", first.projection.reviewFacts.payloadHash));
+    await observationReached;
+    const losingReplacement = observationFirst.replaceAttempt(firstId, { operationHash: `o${"5".repeat(50)}`, counter: 7 });
+    releaseObservation();
+    await expect(inclusion).resolves.toBe("applied");
+    await expect(losingReplacement).rejects.toMatchObject({ code: "REPLACEMENT_LINEAGE_MISMATCH" });
+
+    await rawPool.query("DROP SCHEMA IF EXISTS samurai_persistence CASCADE");
+    await applyMigrations(pool);
+    const now = (await rawPool.query<{ readonly now: Date }>("SELECT clock_timestamp() AS now")).rows[0]!.now;
+    await rawPool.query("INSERT INTO samurai_persistence.players (id,state,created_at,updated_at) VALUES ('player_phase2b_test_001','active',$1,$1)", [now]);
+    const second = await submittedAttempt();
+    const secondId = (await rawPool.query<{ readonly id: string }>("SELECT id::text FROM samurai_persistence.operation_attempts WHERE public_attempt_ref=$1", [second.attempt.publicAttemptRef])).rows[0]!.id;
+    let releaseAttempt!: () => void;
+    let reachedAttempt!: () => void;
+    const attemptBlocked = new Promise<void>((resolve) => { releaseAttempt = resolve; });
+    const attemptReached = new Promise<void>((resolve) => { reachedAttempt = resolve; });
+    let holdAttempt = true;
+    const replacementFirst = new ReceiptLifecycleAuthority(pool, service, { afterWriteBoundary: async (boundary) => {
+      if (boundary === "attempt" && holdAttempt) { holdAttempt = false; reachedAttempt(); await attemptBlocked; }
+    } });
+    const replacement = replacementFirst.replaceAttempt(secondId, { operationHash: `o${"6".repeat(50)}`, counter: 7 });
+    await attemptReached;
+    const oldClaim = (await replacementFirst.claimReconciliation(10, 30_000)).find((value) => value.attemptId === secondId)!;
+    const conflictingInclusion = replacementFirst.observeOperation(oldClaim, includedObservation(1, 100, "rpc:race:replacement-first", second.projection.reviewFacts.payloadHash));
+    releaseAttempt();
+    await expect(replacement).resolves.toMatchObject({ publicAttemptRef: expect.stringMatching(/^ra_/) });
+    await expect(conflictingInclusion).resolves.toBe("incident");
+  });
+
+  it("binds reconciliation incidents to their exact intent and attempt", async () => {
+    await rawPool.query("INSERT INTO samurai_persistence.players (id,state,created_at,updated_at) VALUES ('player_phase2b_test_002','active',clock_timestamp(),clock_timestamp())");
+    const serviceFor = (subjectId: string): EveningServiceAuthority => ({
+      runSettledTransaction: async <T>(_credential: unknown, _scope: string, operation: (context: SettledServiceTransactionContext) => Promise<T>): Promise<T> => runner.run(async (client) => {
+        const clock = await client.query<{ readonly now: Date }>("SELECT clock_timestamp() AS now");
+        return operation({ client, subjectKind: "player", subjectId, checkpoint: deterministicSettledCheckpointFixture(), now: clock.rows[0]!.now });
+      }),
+    } as unknown as EveningServiceAuthority);
+    const firstAuthority = new ReceiptLifecycleAuthority(pool, serviceFor("player_phase2b_test_001"), { maximumConsecutiveFailures: 1 });
+    const secondAuthority = new ReceiptLifecycleAuthority(pool, serviceFor("player_phase2b_test_002"), { maximumConsecutiveFailures: 1 });
+    const firstProjection = await prepare("31", "incident-scope-first", firstAuthority, OWNER);
+    await firstAuthority.markAwaitingSignature({ kind: "player", sessionSecret: "server-fixture" }, firstProjection.intent.intentRef);
+    const firstAttempt = await firstAuthority.registerSubmittedAttempt({ kind: "player", sessionSecret: "server-fixture" }, { publicIntentRef: firstProjection.intent.intentRef, operationHash: `o${"7".repeat(50)}`, counter: 1 });
+    const secondOwner = "tz1aSkwEot3L2kmUvcoxzjMomb9mvBNuzFK6";
+    const secondProjection = await prepare("32", "incident-scope-second", secondAuthority, secondOwner);
+    await secondAuthority.markAwaitingSignature({ kind: "player", sessionSecret: "server-fixture" }, secondProjection.intent.intentRef);
+    const secondAttempt = await secondAuthority.registerSubmittedAttempt({ kind: "player", sessionSecret: "server-fixture" }, { publicIntentRef: secondProjection.intent.intentRef, operationHash: `o${"8".repeat(50)}`, counter: 1 });
+    const allClaims = await firstAuthority.claimReconciliation(10, 30_000);
+    for (const [target, ref] of [[firstAuthority, firstAttempt.publicAttemptRef], [secondAuthority, secondAttempt.publicAttemptRef]] as const) {
+      const attemptId = (await rawPool.query<{ readonly id: string }>("SELECT id::text FROM samurai_persistence.operation_attempts WHERE public_attempt_ref=$1", [ref])).rows[0]!.id;
+      const claim = allClaims.find((value) => value.attemptId === attemptId)!;
+      await expect(target.recordReconciliationFailure(claim, "FAKE_RPC_UNAVAILABLE")).resolves.toBe("dead-letter");
+    }
+    const incidents = await rawPool.query<{ readonly count: string; readonly owners: string }>(
+      `SELECT count(*)::text AS count,count(DISTINCT intent_id || ':' || attempt_id)::text AS owners
+       FROM samurai_persistence.receipt_incidents WHERE kind='RECONCILIATION_EXHAUSTED'`,
+    );
+    expect(incidents.rows[0]).toEqual({ count: "2", owners: "2" });
+    const firstAttemptId = (await rawPool.query<{ readonly id: string }>("SELECT id::text FROM samurai_persistence.operation_attempts WHERE public_attempt_ref=$1", [firstAttempt.publicAttemptRef])).rows[0]!.id;
+    await rawPool.query(`UPDATE samurai_persistence.receipt_reconciliation_jobs SET state='pending',available_at=clock_timestamp(),
+      claim_token=NULL,claim_expires_at=NULL,consecutive_failure_count=0,dead_lettered_at=NULL,last_error_code=NULL WHERE attempt_id=$1`, [firstAttemptId]);
+    const retryClaim = (await firstAuthority.claimReconciliation(10, 30_000)).find((value) => value.attemptId === firstAttemptId)!;
+    await expect(firstAuthority.recordReconciliationFailure(retryClaim, "FAKE_RPC_UNAVAILABLE")).resolves.toBe("dead-letter");
+    const reused = await rawPool.query<{ readonly incidents: string; readonly occurrences: string; readonly occurrence_count: string }>(
+      `SELECT count(*)::text AS incidents,
+        (SELECT count(*)::text FROM samurai_persistence.receipt_incident_occurrences occurrence
+          WHERE occurrence.incident_id=(SELECT scoped.id FROM samurai_persistence.receipt_incidents scoped
+            WHERE scoped.attempt_id=$1 AND scoped.kind='RECONCILIATION_EXHAUSTED' LIMIT 1)) AS occurrences,
+        max(incident.occurrence_count)::text AS occurrence_count
+       FROM samurai_persistence.receipt_incidents incident WHERE attempt_id=$1 AND kind='RECONCILIATION_EXHAUSTED'`, [firstAttemptId],
+    );
+    expect(reused.rows[0]).toEqual({ incidents: "1", occurrences: "2", occurrence_count: "2" });
+    const firstIds = await rawPool.query<{ readonly intent_id: string; readonly attempt_id: string }>(
+      `SELECT intent_id::text, id::text AS attempt_id FROM samurai_persistence.operation_attempts WHERE public_attempt_ref=$1`, [firstAttempt.publicAttemptRef],
+    );
+    await expect(rawPool.query(`INSERT INTO samurai_persistence.receipt_incidents
+      (id,kind,scope_digest,state,intent_id,attempt_id,opened_at,last_seen_at)
+      VALUES ('00000000-0000-4000-8000-000000000001','RECONCILIATION_EXHAUSTED',decode(repeat('aa',32),'hex'),'OPEN',$1,$2,clock_timestamp(),clock_timestamp())`,
+      [firstIds.rows[0]!.intent_id, (await rawPool.query<{ readonly id: string }>("SELECT id::text FROM samurai_persistence.operation_attempts WHERE public_attempt_ref=$1", [secondAttempt.publicAttemptRef])).rows[0]!.id]))
+      .rejects.toMatchObject({ code: "23503" });
   });
 
   it("serializes two replacement workers at an explicit post-lock barrier", async () => {
