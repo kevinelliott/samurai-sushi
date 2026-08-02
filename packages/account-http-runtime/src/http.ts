@@ -5,15 +5,16 @@ import {
   ACCOUNT_PLAYER_DELETE_PUBLIC_FAILURE,
   ACCOUNT_PLAYER_SESSION_PUBLIC_FAILURE,
   ACCOUNT_PLAYER_SESSION_ROTATION_DEFERRED,
+  CommandAuthenticationError,
   GuestRotationDeferredError,
   type AccountClaimService,
   type EveningServiceAuthority,
   type GuestSessionService,
   type ServiceSubjectCredential,
 } from "@samurai-sushi/persistence";
-import { compiledFirstEveningService } from "@samurai-sushi/content";
+import { buildBrowserEveningServiceView, compiledFirstEveningService } from "@samurai-sushi/content";
 import type { JsonObject } from "@samurai-sushi/domain";
-import { projectEveningService } from "@samurai-sushi/domain/evening-service";
+import { createInitialEveningServiceCheckpoint, projectEveningService, type EveningServiceCheckpoint } from "@samurai-sushi/domain/evening-service";
 import { ACCOUNT_COOKIE_NAMES, clearAccountCookie, CookieRejectedError, parseAccountCookies, setAccountCookie } from "./cookies";
 import {
   ACCOUNT_ROUTE_PATHS,
@@ -41,6 +42,8 @@ export type AccountHttpLogger = (event: AccountHttpLogEvent) => void;
 
 const noopLogger: AccountHttpLogger = () => undefined;
 
+class ServiceAuthorityCookieError extends Error {}
+
 function emit(logger: AccountHttpLogger, event: AccountHttpLogEvent): void {
   const safe = Object.freeze({ event: event.event, operation: event.operation, resultCode: event.resultCode });
   try { logger(safe); } catch { /* Logging cannot affect the public transport result. */ }
@@ -62,6 +65,33 @@ function failure(
 ): Response {
   emit(logger, { event: "account_http_rejected", operation, resultCode: String(item.body.code ?? "REJECTED") });
   return response(item.status, item.body);
+}
+
+function errorCode(error: unknown): string | null {
+  return error && typeof error === "object" && typeof (error as { readonly code?: unknown }).code === "string"
+    ? (error as { readonly code: string }).code : null;
+}
+
+async function refreshGuestServiceCredential(
+  operation: AccountRouteId,
+  request: Request,
+  services: AccountHttpServices,
+  logger: AccountHttpLogger,
+): Promise<Response> {
+  const guest = parseAccountCookies(request.headers.get("cookie")).get(ACCOUNT_COOKIE_NAMES.guest);
+  if (!guest) return failure(operation, logger, PUBLIC_HTTP_FAILURES.serviceAuthentication);
+  try {
+    const resumed = await services.guests.resume(guest);
+    const outgoing = resumed.rotatedResumeSecret ? [setAccountCookie("guest", resumed.rotatedResumeSecret)] : [];
+    emit(logger, { event: "account_http_rejected", operation, resultCode: PUBLIC_HTTP_FAILURES.serviceCredentialRefreshed.body.code });
+    return response(PUBLIC_HTTP_FAILURES.serviceCredentialRefreshed.status,
+      PUBLIC_HTTP_FAILURES.serviceCredentialRefreshed.body, outgoing);
+  } catch (error) {
+    if (["GUEST_RESUME_INVALID", "GUEST_RESUME_EXPIRED", "GUEST_SECRET_TOMBSTONED"].includes(errorCode(error) ?? "")) {
+      return failure(operation, logger, PUBLIC_HTTP_FAILURES.serviceAuthentication);
+    }
+    return failure(operation, logger, PUBLIC_HTTP_FAILURES.service);
+  }
 }
 
 async function readStrictBody(request: Request): Promise<Readonly<Record<string, unknown>>> {
@@ -179,7 +209,10 @@ function assertAuthorityCookieInventory(
     "service.query": ["guest", "claim,guest", "player"],
     "service.command": ["guest", "claim,guest", "player"],
   };
-  if (!allowed[operation].includes(key)) throw new StrictJsonError();
+  if (!allowed[operation].includes(key)) {
+    if (operation === "service.query" || operation === "service.command") throw new ServiceAuthorityCookieError();
+    throw new StrictJsonError();
+  }
 }
 
 function serviceCredential(cookies: ReadonlyMap<string, string>): ServiceSubjectCredential {
@@ -187,18 +220,20 @@ function serviceCredential(cookies: ReadonlyMap<string, string>): ServiceSubject
   const player = cookies.get(ACCOUNT_COOKIE_NAMES.player);
   if (guest && !player) return { kind: "guest", resumeSecret: guest };
   if (player && !guest && !cookies.has(ACCOUNT_COOKIE_NAMES.claim)) return { kind: "player", sessionSecret: player };
-  throw new StrictJsonError();
+  throw new ServiceAuthorityCookieError();
 }
 
-function serviceProjection(
-  checkpoint: unknown,
+function serviceView(
+  checkpoint: EveningServiceCheckpoint,
+  credential: ServiceSubjectCredential,
   disposition: "query" | "committed" | "replayed",
   correctiveCueId: string | null,
 ): Readonly<Record<string, unknown>> {
-  return projectEveningService(checkpoint, compiledFirstEveningService.projectionManifest, {
+  const projection = projectEveningService(checkpoint, compiledFirstEveningService.projectionManifest, {
     disposition,
     correctiveCueId,
-  }) as unknown as Readonly<Record<string, unknown>>;
+  });
+  return buildBrowserEveningServiceView(checkpoint, projection, credential.kind) as unknown as Readonly<Record<string, unknown>>;
 }
 
 function assertRequestAuthority(request: Request, operation: AccountRouteId, config: AccountRuntimeConfig): void {
@@ -240,16 +275,22 @@ export async function handleAccountHttpRequest(
         break;
       }
       case "guest.issue": {
-        const input = strictObject(body, ["consentVersion", "contentVersion", "checkpointSchemaVersion", "checkpoint"]);
+        const browserIssue = Object.keys(body).length === 1 && Object.hasOwn(body, "consentVersion");
+        const input = browserIssue
+          ? strictObject(body, ["consentVersion"])
+          : strictObject(body, ["consentVersion", "contentVersion", "checkpointSchemaVersion", "checkpoint"]);
+        if (browserIssue && input.consentVersion !== "first-service-browser-v1") throw new StrictJsonError();
+        const initial = createInitialEveningServiceCheckpoint();
         const issued = await services.guests.issue({
           consentVersion: text(input.consentVersion),
-          contentVersion: text(input.contentVersion),
-          checkpointSchemaVersion: safeInteger(input.checkpointSchemaVersion),
-          checkpoint: plainObject(input.checkpoint),
+          contentVersion: browserIssue ? initial.contentVersion : text(input.contentVersion),
+          checkpointSchemaVersion: browserIssue ? initial.schemaVersion : safeInteger(input.checkpointSchemaVersion),
+          checkpoint: browserIssue ? initial : plainObject(input.checkpoint),
         });
         if (!issued.claimCapability) throw new StrictJsonError();
         outgoing = [setAccountCookie("guest", issued.resumeSecret), setAccountCookie("claim", issued.claimCapability)];
-        payload = { guestId: issued.session.id, expiresAt: issued.session.expiresAt.toISOString(), revision: issued.progress.revision };
+        payload = browserIssue ? { issued: true }
+          : { guestId: issued.session.id, expiresAt: issued.session.expiresAt.toISOString(), revision: issued.progress.revision };
         break;
       }
       case "guest.resume": {
@@ -374,30 +415,21 @@ export async function handleAccountHttpRequest(
       }
       case "service.query": {
         exactEmpty(body);
-        const queried = await services.evening.query(serviceCredential(cookies));
-        payload = {
-          checkpoint: queried.checkpoint,
-          projection: serviceProjection(queried.checkpoint, "query", null),
-          disposition: "query",
-        };
+        const credential = serviceCredential(cookies);
+        const queried = await services.evening.query(credential);
+        payload = { view: serviceView(queried.checkpoint, credential, "query", null) };
         break;
       }
       case "service.command": {
         const input = strictObject(body, ["commandName", "expectedRevision", "idempotencyKey", "payload"]);
-        const executed = await services.evening.execute(serviceCredential(cookies), {
+        const credential = serviceCredential(cookies);
+        const executed = await services.evening.execute(credential, {
           commandName: text(input.commandName),
           expectedRevision: safeInteger(input.expectedRevision),
           idempotencyKey: text(input.idempotencyKey),
           payload: plainObject(input.payload) as JsonObject,
         });
-        payload = {
-          checkpoint: executed.response.checkpoint,
-          projection: serviceProjection(executed.response.checkpoint, executed.disposition, executed.response.correctiveCueId),
-          disposition: executed.disposition,
-          accepted: executed.response.accepted,
-          feedbackRef: executed.response.feedbackRef,
-          committedRevision: executed.committedRevision,
-        };
+        payload = { view: serviceView(executed.response.checkpoint, credential, executed.disposition, executed.response.correctiveCueId) };
         break;
       }
     }
@@ -406,6 +438,15 @@ export async function handleAccountHttpRequest(
   } catch (error) {
     if (error instanceof BodyTooLargeError) {
       return failure(operation, logger, { status: 413, body: PUBLIC_HTTP_FAILURES.request.body });
+    }
+    if ((operation === "service.query" || operation === "service.command")
+      && errorCode(error) === "GUEST_ROTATION_REQUIRED") {
+      return refreshGuestServiceCredential(operation, request, services, logger);
+    }
+    if ((operation === "service.query" || operation === "service.command")
+      && (error instanceof ServiceAuthorityCookieError || error instanceof CookieRejectedError
+        || error instanceof CommandAuthenticationError || errorCode(error) === "COMMAND_AUTHENTICATION_FAILED")) {
+      return failure(operation, logger, PUBLIC_HTTP_FAILURES.serviceAuthentication);
     }
     if (error instanceof StrictJsonError || error instanceof CookieRejectedError) {
       return failure(operation, logger, PUBLIC_HTTP_FAILURES.request);

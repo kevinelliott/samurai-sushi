@@ -9,7 +9,7 @@ import { compiledFirstEveningService } from "@samurai-sushi/content";
 import { walletSigningBytes } from "@samurai-sushi/domain/claim-protocol";
 import { Pool, type PoolClient, type QueryResult as PgQueryResult } from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { ACCOUNT_CLAIM_REAUTH_REQUIRED, applyMigrations, hmacKeyIdentity, keyIdentityBytes, PlayerSessionKeyring,
+import { ACCOUNT_CLAIM_REAUTH_REQUIRED, applyMigrations, HmacKeyring, hmacKeyIdentity, keyIdentityBytes, PlayerSessionKeyring,
   type ConnectedSqlClient, type QueryResult, type SqlPool, type SqlValue } from "@samurai-sushi/persistence";
 import { startAccountNextServer, type AccountNextServer } from "../src/server";
 
@@ -89,6 +89,30 @@ async function requestJson(
   });
 }
 
+async function requestAndDropAfterCommit(
+  port: number,
+  path: string,
+  body: string,
+  cookie: string,
+): Promise<void> {
+  return new Promise((resolveRequest, reject) => {
+    const request = httpRequest({
+      host: "127.0.0.1", port, path, method: "POST", headers: {
+        Host: canonicalHost, Origin: canonicalOrigin, Cookie: cookie,
+        "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body),
+      },
+    }, (response) => {
+      response.once("data", () => {
+        response.destroy();
+        resolveRequest();
+      });
+      response.once("error", () => resolveRequest());
+    });
+    request.once("error", reject);
+    request.end(body);
+  });
+}
+
 function setCookies(rawHeaders: readonly string[]): readonly string[] {
   const result: string[] = [];
   for (let index = 0; index < rawHeaders.length; index += 2) {
@@ -161,6 +185,22 @@ function rawIssue(headers: readonly string[] = [], target = "/api/account/guest/
 describe("built account HTTP boundary", () => {
   const admin = new Pool({ connectionString: databaseUrl });
   let server: AccountNextServer;
+
+  async function guestIdFor(secret: string, keyByte = 9, version = 1): Promise<string> {
+    const bytes = Buffer.alloc(32, keyByte);
+    const keys = new HmacKeyring({
+      version, key: bytes, keyIdentity: hmacKeyIdentity("resume", bytes),
+      activatedAt: new Date("2026-08-01T00:00:00.000Z"), retiredAt: null, verifyUntil: null, compromisedAt: null,
+    });
+    const digest = keys.digest(secret, new Date("2026-08-02T00:00:00.000Z"));
+    const row = (await admin.query<{ readonly guest_session_id: string }>(
+      `SELECT guest_session_id FROM samurai_persistence.guest_resume_digests
+        WHERE digest_key_version=$1 AND digest_key_identity=$2 AND digest=$3`,
+      [digest.keyVersion, keyIdentityBytes(digest.keyIdentity), digest.digest],
+    )).rows[0];
+    if (!row) throw new Error("Expected exact guest digest fixture.");
+    return row.guest_session_id;
+  }
 
   beforeAll(async () => {
     await admin.query("DROP SCHEMA IF EXISTS samurai_persistence CASCADE");
@@ -269,28 +309,156 @@ describe("built account HTTP boundary", () => {
     expect((await requestIssue(portOf(server))).status).toBe(200);
   });
 
+  it("maps missing, mixed, unknown, expired, tombstoned, and predecessor-expired service authority to one exact 401", async () => {
+    const rejected = async (cookie?: string) => {
+      const result = await requestJson(portOf(server), "/api/account/service", "{}", cookie);
+      expect(result.status).toBe(401);
+      expect(result.body).toBe(JSON.stringify({ code: "SERVICE_AUTHORITY_REJECTED", message: "Service access could not be authenticated." }));
+      expect(setCookies(result.rawHeaders)).toEqual([]);
+    };
+    const unknown = Buffer.alloc(32, 92).toString("base64url");
+    await rejected();
+    await rejected(`__Host-samurai-guest=${unknown}; __Host-samurai-player=${unknown}`);
+    await rejected(`__Host-samurai-guest=${unknown}`);
+    await rejected(`__Host-samurai-player=${unknown}`);
+
+    const expiredIssue = await requestJson(portOf(server), "/api/account/guest/issue", JSON.stringify({ consentVersion: "first-service-browser-v1" }));
+    const expiredSecret = cookieValue(expiredIssue.rawHeaders, "__Host-samurai-guest");
+    const expiredId = await guestIdFor(expiredSecret);
+    await admin.query(`UPDATE samurai_persistence.guest_sessions
+      SET created_at=clock_timestamp()-interval '40 days', last_seen_at=clock_timestamp()-interval '31 days',
+          rotate_after=clock_timestamp()-interval '32 days', expires_at=clock_timestamp()-interval '1 millisecond'
+      WHERE id=$1`, [expiredId]);
+    await rejected(`__Host-samurai-guest=${expiredSecret}`);
+
+    const deletedIssue = await requestJson(portOf(server), "/api/account/guest/issue", JSON.stringify({ consentVersion: "first-service-browser-v1" }));
+    const deletedSecret = cookieValue(deletedIssue.rawHeaders, "__Host-samurai-guest");
+    const deletedClaim = cookieValue(deletedIssue.rawHeaders, "__Host-samurai-guest-claim");
+    expect((await requestJson(portOf(server), "/api/account/guest/delete", "{}", cookiePair(deletedSecret, deletedClaim))).status).toBe(200);
+    await rejected(`__Host-samurai-guest=${deletedSecret}`);
+
+    const rotatedIssue = await requestJson(portOf(server), "/api/account/guest/issue", JSON.stringify({ consentVersion: "first-service-browser-v1" }));
+    const predecessorSecret = cookieValue(rotatedIssue.rawHeaders, "__Host-samurai-guest");
+    const rotated = await requestJson(portOf(server), "/api/account/guest/rotate", "{}", `__Host-samurai-guest=${predecessorSecret}`);
+    expect(rotated.status).toBe(200);
+    const rotatedId = await guestIdFor(predecessorSecret);
+    await admin.query("UPDATE samurai_persistence.guest_resume_digests SET valid_until=clock_timestamp()-interval '1 millisecond' WHERE guest_session_id=$1 AND slot='predecessor'", [rotatedId]);
+    await rejected(`__Host-samurai-guest=${predecessorSecret}`);
+  });
+
+  it("refreshes rotation-due guest authority on the same subject and survives a lost refresh response", async () => {
+    const issue = await requestJson(portOf(server), "/api/account/guest/issue", JSON.stringify({ consentVersion: "first-service-browser-v1" }));
+    const secret = cookieValue(issue.rawHeaders, "__Host-samurai-guest");
+    const claim = cookieValue(issue.rawHeaders, "__Host-samurai-guest-claim");
+    const guestId = await guestIdFor(secret);
+    const before = await requestJson(portOf(server), "/api/account/service", "{}", cookiePair(secret, claim));
+    await admin.query("UPDATE samurai_persistence.guest_sessions SET rotate_after=clock_timestamp()-interval '1 millisecond' WHERE id=$1", [guestId]);
+    const refreshed = await requestJson(portOf(server), "/api/account/service", "{}", cookiePair(secret, claim));
+    expect(refreshed.status).toBe(428);
+    expect(refreshed.body).toBe(JSON.stringify({ code: "SERVICE_CREDENTIAL_REFRESHED", message: "Service access was refreshed. Requery the saved service." }));
+    const rotatedSecret = cookieValue(refreshed.rawHeaders, "__Host-samurai-guest");
+    expect(setCookies(refreshed.rawHeaders)).toHaveLength(1);
+    const after = await requestJson(portOf(server), "/api/account/service", "{}", cookiePair(rotatedSecret, claim));
+    expect(after.status).toBe(200);
+    expect(JSON.parse(after.body).view).toEqual(JSON.parse(before.body).view);
+    expect((await admin.query<{ readonly count: string }>("SELECT count(*)::text AS count FROM samurai_persistence.guest_sessions WHERE id=$1", [guestId])).rows[0]?.count).toBe("1");
+
+    const lostIssue = await requestJson(portOf(server), "/api/account/guest/issue", JSON.stringify({ consentVersion: "first-service-browser-v1" }));
+    const lostSecret = cookieValue(lostIssue.rawHeaders, "__Host-samurai-guest");
+    const lostClaim = cookieValue(lostIssue.rawHeaders, "__Host-samurai-guest-claim");
+    const lostId = await guestIdFor(lostSecret);
+    await admin.query("UPDATE samurai_persistence.guest_sessions SET rotate_after=clock_timestamp()-interval '1 millisecond' WHERE id=$1", [lostId]);
+    await requestAndDropAfterCommit(portOf(server), "/api/account/service", "{}", cookiePair(lostSecret, lostClaim));
+    const recovered = await requestJson(portOf(server), "/api/account/service", "{}", cookiePair(lostSecret, lostClaim));
+    expect(recovered.status).toBe(200);
+    expect(JSON.parse(recovered.body)).toMatchObject({ view: { identity: "guest", revision: 0, generation: 0 } });
+  });
+
+  it("starts fresh abandoned runs for the same guest and acknowledged player without cookie mutation", async () => {
+    const command = (revision: number, commandName: string, payload: object = {}, idempotencyKey = randomUUID()) =>
+      JSON.stringify({ idempotencyKey, expectedRevision: revision, commandName, payload });
+    const issued = await requestJson(portOf(server), "/api/account/guest/issue", JSON.stringify({ consentVersion: "first-service-browser-v1" }));
+    const guestSecret = cookieValue(issued.rawHeaders, "__Host-samurai-guest");
+    const claimSecret = cookieValue(issued.rawHeaders, "__Host-samurai-guest-claim");
+    const guestCookies = cookiePair(guestSecret, claimSecret);
+    const guestStart = await requestJson(portOf(server), "/api/account/service/command", command(0, "service.start"), guestCookies);
+    expect(guestStart.status, `guest start: ${guestStart.body}`).toBe(200);
+    const guestAbandon = await requestJson(portOf(server), "/api/account/service/command", command(1, "service.abandon"), guestCookies);
+    expect(guestAbandon.status, `guest abandon: ${guestAbandon.body}`).toBe(200);
+    const guestFreshKey = randomUUID();
+    const guestFreshBody = command(2, "service.start-new", {}, guestFreshKey);
+    await requestAndDropAfterCommit(portOf(server), "/api/account/service/command", guestFreshBody, guestCookies);
+    const guestQuery = await requestJson(portOf(server), "/api/account/service", "{}", guestCookies);
+    expect(JSON.parse(guestQuery.body)).toMatchObject({ view: { identity: "guest", phase: "OPEN", generation: 1, revision: 3 } });
+    const guestReplay = await requestJson(portOf(server), "/api/account/service/command", guestFreshBody, guestCookies);
+    expect(JSON.parse(guestReplay.body)).toMatchObject({ view: { disposition: "replayed", phase: "OPEN", generation: 1, revision: 3, announceCeremony: false } });
+    expect(setCookies(guestQuery.rawHeaders)).toEqual([]);
+    expect(setCookies(guestReplay.rawHeaders)).toEqual([]);
+
+    const wallet = testWallet();
+    const playerIssue = await requestJson(portOf(server), "/api/account/guest/issue", JSON.stringify({ consentVersion: "first-service-browser-v1" }));
+    const playerGuest = cookieValue(playerIssue.rawHeaders, "__Host-samurai-guest");
+    const playerClaim = cookieValue(playerIssue.rawHeaders, "__Host-samurai-guest-claim");
+    const playerGuestCookies = cookiePair(playerGuest, playerClaim);
+    const playerStart = await requestJson(portOf(server), "/api/account/service/command", command(0, "service.start"), playerGuestCookies);
+    expect(playerStart.status, `player start: ${playerStart.body}`).toBe(200);
+    const playerAbandon = await requestJson(portOf(server), "/api/account/service/command", command(1, "service.abandon"), playerGuestCookies);
+    expect(playerAbandon.status, `player abandon: ${playerAbandon.body}`).toBe(200);
+    const intent = { claimId: randomUUID(), createPlayer: true, guestRevision: 2, idempotencyKey: randomUUID(),
+      contentVersion: compiledFirstEveningService.contentVersion, cosmeticSelections: {} } as const;
+    const challenged = await requestJson(portOf(server), "/api/account/claim/challenge", JSON.stringify({ intent, account: wallet.account }), playerGuestCookies);
+    const challenge = challengeBody(challenged);
+    const proof = { challenge: challenge.challenge, publicKey: wallet.publicKey, signature: wallet.sign(challenge.challenge) };
+    const claimed = await requestJson(portOf(server), "/api/account/claim", JSON.stringify({ intent, challengeId: challenge.challengeId, proof }), playerGuestCookies);
+    expect(claimed.status, `player claim: ${claimed.body}`).toBe(200);
+    const claimPayload = JSON.parse(claimed.body) as { readonly playerId: string; readonly claimId: string; readonly sessionId: string; readonly deliveryGeneration: number };
+    const playerSecret = cookieValue(claimed.rawHeaders, "__Host-samurai-player");
+    const playerCookie = `__Host-samurai-player=${playerSecret}`;
+    const delivery = await requestJson(portOf(server), "/api/account/claim/delivery", JSON.stringify({
+      playerId: claimPayload.playerId, claimId: claimPayload.claimId, sessionId: claimPayload.sessionId,
+      deliveryGeneration: claimPayload.deliveryGeneration,
+    }), playerCookie);
+    expect(delivery.status, `player delivery: ${delivery.body}`).toBe(200);
+    const playerFresh = await requestJson(portOf(server), "/api/account/service/command", command(2, "service.start-new"), playerCookie);
+    expect(playerFresh.status, `player fresh: ${playerFresh.body}`).toBe(200);
+    expect(JSON.parse(playerFresh.body)).toMatchObject({ view: { identity: "player", phase: "OPEN", generation: 1, revision: 3 } });
+    expect(setCookies(playerFresh.rawHeaders)).toEqual([]);
+  });
+
   it("drives signed claim, exact delivery, lost-response recovery, and wallet deletion through production Next and PostgreSQL", async () => {
     const wallet = testWallet();
-    const issued = await requestIssue(portOf(server));
+    const issued = await requestJson(portOf(server), "/api/account/guest/issue", JSON.stringify({ consentVersion: "first-service-browser-v1" }));
     const guest = cookieValue(issued.rawHeaders, "__Host-samurai-guest");
     const capability = cookieValue(issued.rawHeaders, "__Host-samurai-guest-claim");
     const guestCookies = cookiePair(guest, capability);
     const initialService = await requestJson(portOf(server), "/api/account/service", "{}", guestCookies);
     expect(initialService.status, initialService.body).toBe(200);
-    expect(JSON.parse(initialService.body)).toMatchObject({ disposition: "query", checkpoint: { phase: "IDLE", revision: 0 } });
-    let guestServiceBody = "";
-    for (const entry of compiledFirstEveningService.goldenReplay.slice(1, 3)) {
+    expect(JSON.parse(initialService.body)).toMatchObject({ view: { disposition: "query", phase: "IDLE", revision: 0 } });
+    const firstEntry = compiledFirstEveningService.goldenReplay[1] as { readonly command: { readonly idempotencyKey: string;
+      readonly expectedRevision: number; readonly commandName: string; readonly payload: object } };
+    const droppedServiceBody = JSON.stringify({ idempotencyKey: firstEntry.command.idempotencyKey,
+      expectedRevision: firstEntry.command.expectedRevision, commandName: firstEntry.command.commandName,
+      payload: firstEntry.command.payload });
+    await requestAndDropAfterCommit(portOf(server), "/api/account/service/command", droppedServiceBody, guestCookies);
+    const afterDroppedCommand = await requestJson(portOf(server), "/api/account/service", "{}", guestCookies);
+    expect(JSON.parse(afterDroppedCommand.body)).toMatchObject({ view: { disposition: "query", revision: 1,
+      prompt: { ref: "prompt.rice.wash" } } });
+    const recoveredService = await requestJson(portOf(server), "/api/account/service/command", droppedServiceBody, guestCookies);
+    expect(JSON.parse(recoveredService.body)).toMatchObject({ view: { disposition: "replayed", revision: 1,
+      announceCeremony: false } });
+
+    for (const entry of compiledFirstEveningService.goldenReplay.slice(2, 3)) {
       const command = (entry as { readonly command: { readonly idempotencyKey: string; readonly expectedRevision: number;
         readonly commandName: string; readonly payload: object } }).command;
-      guestServiceBody = JSON.stringify({ idempotencyKey: command.idempotencyKey, expectedRevision: command.expectedRevision,
+      const guestServiceBody = JSON.stringify({ idempotencyKey: command.idempotencyKey, expectedRevision: command.expectedRevision,
         commandName: command.commandName, payload: command.payload });
       const serviceCommand = await requestJson(portOf(server), "/api/account/service/command", guestServiceBody, guestCookies);
       expect(serviceCommand.status, serviceCommand.body).toBe(200);
       expect(serviceCommand.body).not.toMatch(/guestId|playerId|subjectKind|resumeSecret|sessionSecret/);
     }
     const beforeClaimService = await requestJson(portOf(server), "/api/account/service", "{}", guestCookies);
-    const beforeClaimCheckpoint = (JSON.parse(beforeClaimService.body) as { readonly checkpoint: unknown }).checkpoint;
-    expect(beforeClaimCheckpoint).toMatchObject({ phase: "OPEN", revision: 2, riceBeatIndex: 1 });
+    const beforeClaimView = (JSON.parse(beforeClaimService.body) as { readonly view: Record<string, unknown> }).view;
+    expect(beforeClaimView).toMatchObject({ phase: "OPEN", revision: 2, prompt: { ref: "prompt.rice.steam" } });
     const intent = {
       claimId: randomUUID(), createPlayer: true, guestRevision: 2, idempotencyKey: randomUUID(),
       contentVersion: compiledFirstEveningService.contentVersion, cosmeticSelections: {},
@@ -329,7 +497,11 @@ describe("built account HTTP boundary", () => {
     expect((await requestJson(portOf(server), "/api/account/player/session", "{}", playerCookie)).status).toBe(200);
     const afterClaimService = await requestJson(portOf(server), "/api/account/service", "{}", playerCookie);
     expect(afterClaimService.status, afterClaimService.body).toBe(200);
-    expect((JSON.parse(afterClaimService.body) as { readonly checkpoint: unknown }).checkpoint).toEqual(beforeClaimCheckpoint);
+    const afterClaimView = (JSON.parse(afterClaimService.body) as { readonly view: Record<string, unknown> }).view;
+    const { identity: _beforeIdentity, identityLabel: _beforeLabel, ...beforeProjection } = beforeClaimView;
+    const { identity: afterIdentity, identityLabel: afterLabel, ...afterProjection } = afterClaimView;
+    expect({ afterIdentity, afterLabel }).toEqual({ afterIdentity: "player", afterLabel: "Saved play · no wallet" });
+    expect(afterProjection).toEqual(beforeProjection);
     let finalCommandBody = "";
     for (const entry of compiledFirstEveningService.goldenReplay.slice(3)) {
       const command = (entry as { readonly command: { readonly idempotencyKey: string; readonly expectedRevision: number;
@@ -338,12 +510,12 @@ describe("built account HTTP boundary", () => {
         commandName: command.commandName, payload: command.payload });
       const serviceCommand = await requestJson(portOf(server), "/api/account/service/command", finalCommandBody, playerCookie);
       expect(serviceCommand.status, `${command.commandName}: ${serviceCommand.body}`).toBe(200);
-      expect(JSON.parse(serviceCommand.body)).toMatchObject({ disposition: "committed", accepted: true });
+      expect(JSON.parse(serviceCommand.body)).toMatchObject({ view: { disposition: "committed" } });
     }
     const settledService = await requestJson(portOf(server), "/api/account/service", "{}", playerCookie);
-    expect(JSON.parse(settledService.body)).toMatchObject({ checkpoint: {
-      phase: "SETTLED", unlocks: ["atlantic-salmon-sashimi@1"], revision: 29,
-    }, projection: { disposition: "query", ledgerRows: [{ orderId: "ceramicist-kappa" },
+    expect(JSON.parse(settledService.body)).toMatchObject({ view: {
+      phase: "SETTLED", unlock: { key: "dish-salmon-sashimi" }, revision: 29,
+      disposition: "query", ledgerRows: [{ orderId: "ceramicist-kappa" },
       { orderId: "fishmonger-tamago" }, { orderId: "courier-salmon" }] } });
     const serviceMatrixBeforeReplay = (await admin.query<{ events: string; outbox: string; receipts: string }>(`SELECT
       (SELECT count(*)::text FROM samurai_persistence.domain_events WHERE player_id=$1 AND event_type LIKE 'service.%') AS events,
@@ -353,9 +525,8 @@ describe("built account HTTP boundary", () => {
     [claimPayload.playerId])).rows[0]!;
     expect(serviceMatrixBeforeReplay).toEqual({ events: "29", outbox: "29", receipts: "29" });
     const exactSettlementReplay = await requestJson(portOf(server), "/api/account/service/command", finalCommandBody, playerCookie);
-    expect(JSON.parse(exactSettlementReplay.body)).toMatchObject({ disposition: "replayed", accepted: true,
-      checkpoint: { phase: "SETTLED", unlocks: ["atlantic-salmon-sashimi@1"] },
-      projection: { announceCeremony: false } });
+    expect(JSON.parse(exactSettlementReplay.body)).toMatchObject({ view: { disposition: "replayed",
+      phase: "SETTLED", unlock: { key: "dish-salmon-sashimi" }, announceCeremony: false } });
     const serviceMatrixAfterReplay = (await admin.query<{ events: string; outbox: string; receipts: string }>(`SELECT
       (SELECT count(*)::text FROM samurai_persistence.domain_events WHERE player_id=$1 AND event_type LIKE 'service.%') AS events,
       (SELECT count(*)::text FROM samurai_persistence.outbox_deliveries o JOIN samurai_persistence.domain_events e ON e.event_id=o.event_id
@@ -543,6 +714,9 @@ describe("built account HTTP boundary", () => {
     );
     const initialCookie = `__Host-samurai-player=${initialSecret}`;
     expect((await requestJson(portOf(server), "/api/account/player/session", "{}", initialCookie)).status).toBe(401);
+    const pendingService = await requestJson(portOf(server), "/api/account/service", "{}", initialCookie);
+    expect(pendingService.status).toBe(401);
+    expect(pendingService.body).toBe(JSON.stringify({ code: "SERVICE_AUTHORITY_REJECTED", message: "Service access could not be authenticated." }));
     const acknowledgement = JSON.stringify({ playerId, claimId, sessionId, deliveryGeneration: 1 });
     expect((await requestJson(portOf(server), "/api/account/claim/delivery", acknowledgement, initialCookie)).status).toBe(200);
     expect((await requestJson(portOf(server), "/api/account/claim/delivery", acknowledgement, initialCookie)).status).toBe(200);
@@ -574,6 +748,10 @@ describe("built account HTTP boundary", () => {
     );
     const logoutReplay = await requestJson(portOf(server), "/api/account/player/logout", "{}", replacementCookie);
     expect(logoutReplay.status).toBe(200);
+    const revokedService = await requestJson(portOf(server), "/api/account/service", "{}", replacementCookie);
+    expect(revokedService.status).toBe(401);
+    expect(revokedService.body).toBe(JSON.stringify({ code: "SERVICE_AUTHORITY_REJECTED", message: "Service access could not be authenticated." }));
+    expect(setCookies(revokedService.rawHeaders)).toEqual([]);
     expect((await admin.query<{ state: string }>(
       "SELECT state FROM samurai_persistence.player_sessions WHERE id=$1", [sessionId],
     )).rows[0]?.state).toBe("revoked");
@@ -582,14 +760,49 @@ describe("built account HTTP boundary", () => {
     )).rows[0]?.count).toBe("1");
   });
 
-  it("keeps Node authority and representative secret/config markers out of client chunks", async () => {
+  it("refreshes a verification-only-key current guest after an immutable runtime key transition", async () => {
+    const issue = await requestJson(portOf(server), "/api/account/guest/issue", JSON.stringify({ consentVersion: "first-service-browser-v1" }));
+    const oldSecret = cookieValue(issue.rawHeaders, "__Host-samurai-guest");
+    const claim = cookieValue(issue.rawHeaders, "__Host-samurai-guest-claim");
+    const oldCookies = cookiePair(oldSecret, claim);
+    const before = await requestJson(portOf(server), "/api/account/service", "{}", oldCookies);
+    const guestId = await guestIdFor(oldSecret);
+
+    await server.closeAll();
+    const rotatedEnvironment = environment(16, "samurai_http_resume_key_two");
+    rotatedEnvironment.SAMURAI_HMAC_RESUME_KEY = Buffer.alloc(32, 19).toString("base64url");
+    rotatedEnvironment.SAMURAI_HMAC_RESUME_PREVIOUS_KEY = Buffer.alloc(32, 9).toString("base64url");
+    rotatedEnvironment.SAMURAI_HMAC_RESUME_PREVIOUS_RETIRED_AT = "2026-08-01T01:00:00.000Z";
+    rotatedEnvironment.SAMURAI_HMAC_RESUME_PREVIOUS_VERIFY_UNTIL = "2027-01-01T00:00:00.000Z";
+    server = await startAccountNextServer({ appRoot, port: 0, hostname: "127.0.0.1", dev: false, environment: rotatedEnvironment });
+
+    const refreshed = await requestJson(portOf(server), "/api/account/service", "{}", oldCookies);
+    expect(refreshed.status).toBe(428);
+    expect(refreshed.body).toBe(JSON.stringify({ code: "SERVICE_CREDENTIAL_REFRESHED", message: "Service access was refreshed. Requery the saved service." }));
+    const newSecret = cookieValue(refreshed.rawHeaders, "__Host-samurai-guest");
+    const after = await requestJson(portOf(server), "/api/account/service", "{}", cookiePair(newSecret, claim));
+    expect(after.status).toBe(200);
+    expect(JSON.parse(after.body).view).toEqual(JSON.parse(before.body).view);
+    expect((await admin.query<{ readonly id: string }>(
+      "SELECT id FROM samurai_persistence.guest_sessions WHERE id=$1", [guestId],
+    )).rows[0]?.id).toBe(guestId);
+  });
+
+  it("keeps Node authority and representative secret/config markers out of client chunks, maps, HTML, and RSC payloads", async () => {
     const staticRoot = resolve(appRoot, ".next/static");
-    const files = (await readdir(staticRoot, { recursive: true })).filter((file) => file.endsWith(".js"));
-    const source = (await Promise.all(files.map((file) => readFile(resolve(staticRoot, file), "utf8")))).join("\n");
+    const staticFiles = (await readdir(staticRoot, { recursive: true })).filter((file) => file.endsWith(".js") || file.endsWith(".map"));
+    const appOutputRoot = resolve(appRoot, ".next/server/app");
+    const appFiles = (await readdir(appOutputRoot, { recursive: true })).filter((file) => /\.(?:html|rsc|txt)$/u.test(file));
+    const source = (await Promise.all([
+      ...staticFiles.map((file) => readFile(resolve(staticRoot, file), "utf8")),
+      ...appFiles.map((file) => readFile(resolve(appOutputRoot, file), "utf8")),
+    ])).join("\n");
     for (const marker of ["account-http-runtime", "@samurai-sushi/persistence", "service-authority",
-      "@samurai-sushi/content", "claim-protocol", "node:crypto", "pg-pool", "@taquito", "@noble",
+      "@samurai-sushi/content", "account-proof-verifier", "claim-protocol", "node:crypto", "pg-pool", "@taquito", "@noble",
       "SAMURAI_DATABASE_URL", "SAMURAI_HMAC_RESUME_KEY", "SAMURAI_HMAC_GUEST_CLAIM_KEY",
-      "x-samurai-raw-header-guard", "postgresql://", "tz1", "edpk"]) {
+      "x-samurai-raw-header-guard", "__Host-samurai", "postgresql://", "challengeId", "claimId", "guestId", "playerId",
+      "subjectId", "payloadHash", "resultHash", "publicKey", "signature", "checkpoint", "tz1", "edpk",
+      "NetXtJqPyJGB6Pc", "NetXsqzbfFenSTS", "rpc.shadownet.teztnets.com", "api.shadownet.tzkt.io", "127.0.0.1:8732"]) {
       expect(source).not.toContain(marker);
     }
   });

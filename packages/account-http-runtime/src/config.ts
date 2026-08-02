@@ -10,6 +10,7 @@ export interface AccountRuntimeConfig {
   readonly databaseUrl: string;
   readonly rawHeaderGuard: string;
   readonly keys: Readonly<Record<"resume" | "tombstone" | "guestClaim" | "playerSession", VersionedHmacKey>>;
+  readonly resumeVerificationKeys: readonly VersionedHmacKey[];
 }
 
 export class RuntimeConfigurationError extends Error {
@@ -50,13 +51,14 @@ function key(
   variable: string,
   purpose: HmacKeyPurpose,
   activatedAt: Date,
+  version = 1,
 ): VersionedHmacKey {
   const encoded = required(environment, variable);
   if (!SECRET_PATTERN.test(encoded)) throw new RuntimeConfigurationError();
   const bytes = Buffer.from(encoded, "base64url");
   if (bytes.byteLength !== 32 || bytes.toString("base64url") !== encoded) throw new RuntimeConfigurationError();
   return Object.freeze({
-    version: 1,
+    version,
     key: bytes,
     keyIdentity: hmacKeyIdentity(purpose, bytes),
     activatedAt,
@@ -64,6 +66,13 @@ function key(
     verifyUntil: null,
     compromisedAt: null,
   });
+}
+
+function exactDate(value: string | undefined): Date {
+  if (!value) throw new RuntimeConfigurationError();
+  const parsed = new Date(value);
+  if (!Number.isFinite(parsed.getTime()) || parsed.toISOString() !== value) throw new RuntimeConfigurationError();
+  return parsed;
 }
 
 export function loadAccountRuntimeConfig(environment: NodeJS.ProcessEnv): AccountRuntimeConfig {
@@ -76,13 +85,22 @@ export function loadAccountRuntimeConfig(environment: NodeJS.ProcessEnv): Accoun
   try { assertCanonicalTezosChainId(chainId); } catch { throw new RuntimeConfigurationError(); }
   const guard = environment.SAMURAI_INTERNAL_RAW_HEADER_GUARD ?? randomBytes(32).toString("base64url");
   if (!SECRET_PATTERN.test(guard)) throw new RuntimeConfigurationError();
+  const previousResumeValues = [environment.SAMURAI_HMAC_RESUME_PREVIOUS_KEY,
+    environment.SAMURAI_HMAC_RESUME_PREVIOUS_RETIRED_AT, environment.SAMURAI_HMAC_RESUME_PREVIOUS_VERIFY_UNTIL];
+  if (previousResumeValues.some(Boolean) && !previousResumeValues.every(Boolean)) throw new RuntimeConfigurationError();
+  const resumeVerificationKeys = previousResumeValues.every(Boolean) ? [Object.freeze({
+    ...key(environment, "SAMURAI_HMAC_RESUME_PREVIOUS_KEY", "resume", activatedAt, 1),
+    retiredAt: exactDate(environment.SAMURAI_HMAC_RESUME_PREVIOUS_RETIRED_AT),
+    verifyUntil: exactDate(environment.SAMURAI_HMAC_RESUME_PREVIOUS_VERIFY_UNTIL),
+  })] : [];
   return Object.freeze({
     canonicalOrigin: canonicalOrigin(environment),
     chainId,
     databaseUrl: databaseUrl(environment),
     rawHeaderGuard: guard,
+    resumeVerificationKeys: Object.freeze(resumeVerificationKeys),
     keys: Object.freeze({
-      resume: key(environment, "SAMURAI_HMAC_RESUME_KEY", "resume", activatedAt),
+      resume: key(environment, "SAMURAI_HMAC_RESUME_KEY", "resume", activatedAt, resumeVerificationKeys.length ? 2 : 1),
       tombstone: key(environment, "SAMURAI_HMAC_TOMBSTONE_KEY", "tombstone", activatedAt),
       guestClaim: key(environment, "SAMURAI_HMAC_GUEST_CLAIM_KEY", "guest-claim", activatedAt),
       playerSession: key(environment, "SAMURAI_HMAC_PLAYER_SESSION_KEY", "player-session", activatedAt),

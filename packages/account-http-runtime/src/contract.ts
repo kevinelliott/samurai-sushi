@@ -29,6 +29,8 @@ export const RAW_HEADER_GUARD = "x-samurai-raw-header-guard";
 export const PUBLIC_HTTP_FAILURES = Object.freeze({
   request: Object.freeze({ status: 400, body: Object.freeze({ code: "REQUEST_REJECTED", message: "The request could not be processed." }) }),
   guest: Object.freeze({ status: 401, body: Object.freeze({ code: "GUEST_SESSION_REJECTED", message: "The guest session could not be authenticated." }) }),
+  serviceAuthentication: Object.freeze({ status: 401, body: Object.freeze({ code: "SERVICE_AUTHORITY_REJECTED", message: "Service access could not be authenticated." }) }),
+  serviceCredentialRefreshed: Object.freeze({ status: 428, body: Object.freeze({ code: "SERVICE_CREDENTIAL_REFRESHED", message: "Service access was refreshed. Requery the saved service." }) }),
   service: Object.freeze({ status: 409, body: Object.freeze({ code: "SERVICE_REQUEST_REJECTED", message: "The saved service could not be updated." }) }),
   runtime: Object.freeze({ status: 503, body: Object.freeze({ code: "SERVICE_UNAVAILABLE", message: "The account service is unavailable." }) }),
 } as const);

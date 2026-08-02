@@ -66,7 +66,7 @@ async function waitForHtml(port) {
   throw lastError ?? new Error("Production server did not become ready.");
 }
 
-async function startAndAssert(profile, forbidden, port) {
+async function startAndAssert(profile, port) {
   const child = spawn("pnpm", ["start:raw"], {
     cwd: projectRoot,
     env: environment(profile, { PORT: String(port) }),
@@ -74,9 +74,12 @@ async function startAndAssert(profile, forbidden, port) {
   });
   try {
     const html = await waitForHtml(port);
-    assert.match(html, new RegExp(profile.network, "i"));
-    assert.match(html, new RegExp(profile.chainId));
-    assert.doesNotMatch(html, new RegExp(forbidden.chainId));
+    assert.match(html, /Counter Ledger/i);
+    for (const hidden of [profiles.localnet.network, profiles.shadownet.network,
+      profiles.localnet.chainId, profiles.shadownet.chainId, profiles.localnet.rpcUrl,
+      profiles.shadownet.rpcUrl, profiles.shadownet.indexerUrl, pin.revision]) {
+      assert.doesNotMatch(html, new RegExp(hidden.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i"));
+    }
   } finally {
     child.kill("SIGTERM");
     await new Promise((resolveExit) => child.once("exit", resolveExit));
@@ -84,6 +87,6 @@ async function startAndAssert(profile, forbidden, port) {
 }
 
 await run(["build:raw"], profiles.localnet);
-await startAndAssert(profiles.shadownet, profiles.localnet, 3111);
+await startAndAssert(profiles.shadownet, 3111);
 await run(["build:raw"], profiles.shadownet);
-await startAndAssert(profiles.localnet, profiles.shadownet, 3112);
+await startAndAssert(profiles.localnet, 3112);

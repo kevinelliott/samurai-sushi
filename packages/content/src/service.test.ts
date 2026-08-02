@@ -1,4 +1,6 @@
 import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import { projectEveningService, type EveningServiceCheckpoint } from "@samurai-sushi/domain/evening-service";
 import { FIRST_EVENING_SERVICE_DEFINITION } from "@samurai-sushi/domain/evening-service";
@@ -8,6 +10,9 @@ import { firstEveningServiceCatalogBundle } from "./fixtures/first-service";
 import { canonicalContentJson, contentHashFor, contentManifestHashFor } from "./hash";
 import type { ContentBundle, PreparedComponent } from "./model";
 import { compiledFirstEveningService, compileFirstServiceContent, firstEveningServiceCanonicalBytes, firstEveningServiceSource } from "./service";
+import { attestedFirstServiceBrowserAssets, buildBrowserEveningServiceView, firstServiceBrowserAssetManifestHash } from "./browser-view";
+import { verifyFirstServiceSpriteAttestation } from "./asset-attestation";
+import { FIRST_SERVICE_SPRITE_ATTESTATION } from "./browser-assets-attestation.generated";
 
 type Mutable<T> = T extends readonly (infer Item)[]
   ? Mutable<Item>[]
@@ -58,17 +63,50 @@ describe("first evening service content compiler", () => {
     expect(compiledFirstEveningService.goldenReplay).toHaveLength(30);
     expect(compiledFirstEveningService.correctiveReplay).toHaveLength(4);
     expect(compiledFirstEveningService.abandonmentReplay).toHaveLength(9);
+    expect(compiledFirstEveningService.newRunReplay).toHaveLength(5);
     expect(compiledFirstEveningService.terminalReplay).toHaveLength(2);
     expect(compiledFirstEveningService.source.firstServiceCatalog.packContentHash).toBe("sha256:6499e22dbfc30f6e817029f96f0e199b700103d831b874d2a75316f29c4c88d9");
-    expect(compiledFirstEveningService.contentManifestHash).toBe("sha256:697136e190a573bad3c6c135a0842c1620c05bd08a840fce4fdf04639f4ae3a1");
-    expect(compiledFirstEveningService.artAssetMapHash).toBe("sha256:9c924461bf9d601c50ea9d8f086c15254dc26bb670a1cb81d253a9f55d8c70ad");
-    expect(compiledFirstEveningService.serviceHash).toBe("sha256:1fdaf199ec3d39fe9cb7af084000481e7349f3d96d2aad5b181b316799c0cd7b");
-    expect(compiledFirstEveningService.replayHash).toBe("sha256:3b923d2c165153f0c5daec7cbb706f23ac1de848b96b35db241309e45721d3b4");
-    expect(compiledFirstEveningService.correctiveReplayHash).toBe("sha256:637e0d17efbd71f702aa2d8b37822e2be117a3e4086e2e41f0cf4deadbe12cb7");
-    expect(compiledFirstEveningService.abandonmentReplayHash).toBe("sha256:97d514cbbb507968f6b15151087b58a88b22d3928a2c6356187cb1ec7f375eaa");
-    expect(compiledFirstEveningService.terminalReplayHash).toBe("sha256:691656622bcc341186efbee76dbf025013e96150fb38bcc967bcf3782cc269ac");
-    expect(createHash("sha256").update(firstEveningServiceCanonicalBytes).digest("hex")).toBe("9af8c262e902260e613ae96be2d716631c09234cc53109ba79e0a359c115a52a");
+    expect(compiledFirstEveningService.contentManifestHash).toBe("sha256:a4a54539c31af18675d0302c4e180039a099fcdaa0e178962517b72003365180");
+    expect(compiledFirstEveningService.artAssetMapHash).toBe("sha256:2b6c9ac0b139e8bd6fe20e6c63371f8ed1120726593e1ac142997dfb55691b3f");
+    expect(compiledFirstEveningService.serviceHash).toBe("sha256:2e24887d7066bc811d1f10fd911a4b0109be7308a823052d239ab439683e44c5");
+    expect(compiledFirstEveningService.replayHash).toBe("sha256:21fa4dcb57878d1854449beb4bd0a4ba4faf794848aba76d07621293af823e2f");
+    expect(compiledFirstEveningService.correctiveReplayHash).toBe("sha256:14bddcb47912b3a2db2c802bb6233ce1e22e6b7d574915678bac1f2dfb372ebd");
+    expect(compiledFirstEveningService.abandonmentReplayHash).toBe("sha256:ce101e3a1d5647ff58c5381038cc7f4b5af96599701fd98be7f1985991dbbf3c");
+    expect(compiledFirstEveningService.newRunReplayHash).toBe("sha256:e9c8fc096587e399efeacde06d7b040b32742373b2fece0bf68f7600b1a327fa");
+    expect(compiledFirstEveningService.terminalReplayHash).toBe("sha256:c3590f4756959dc53bf3a3dbeea3d1b2f3dbadffd4535b22d1a8f4ebb4b6c239");
+    expect(createHash("sha256").update(firstEveningServiceCanonicalBytes).digest("hex")).toBe("9809b5d11a267fd30dc3802d3d595c2e0a12be7965724a1d93eaead8727c89ad");
+    expect(firstServiceBrowserAssetManifestHash).toBe("sha256:deda1b1f3763d66ae8b527b8620c23321f4b3d5e89735bd712747a65e3a4cde6");
+    expect(attestedFirstServiceBrowserAssets).toHaveLength(44);
+    expect(FIRST_SERVICE_SPRITE_ATTESTATION.fileDigest).toBe("sha256:8fd8e0a21c812e02e0bff0c16fc50bdbc774c0c60cad9dfcf60e45f693138436");
     expect(Object.isFrozen(compiledFirstEveningService)).toBe(true);
+  });
+
+  it("attests the exact sprite bytes and rejects body, viewBox, missing, duplicate, and orphan drift", () => {
+    const source = readFileSync(resolve(import.meta.dirname, "../../../apps/web/public/service-assets/first-service.svg"), "utf8");
+    expect(verifyFirstServiceSpriteAttestation(source, firstEveningServiceSource.artRequirements, FIRST_SERVICE_SPRITE_ATTESTATION).fileDigest)
+      .toBe(FIRST_SERVICE_SPRITE_ATTESTATION.fileDigest);
+    expect(() => verifyFirstServiceSpriteAttestation(source.replace("#f4e9d2", "#f4e9d3"), firstEveningServiceSource.artRequirements, FIRST_SERVICE_SPRITE_ATTESTATION)).toThrow(/pinned attestation/u);
+    expect(() => verifyFirstServiceSpriteAttestation(source.replace('viewBox="0 0 320 180"', 'viewBox="0 0 319 180"'), firstEveningServiceSource.artRequirements, FIRST_SERVICE_SPRITE_ATTESTATION)).toThrow(/viewBox/u);
+    const firstSymbol = source.match(/<symbol id="counter-curtain-closed"[\s\S]*?<\/symbol>\n/u)?.[0];
+    expect(firstSymbol).toBeTruthy();
+    expect(() => verifyFirstServiceSpriteAttestation(source.replace(firstSymbol!, ""), firstEveningServiceSource.artRequirements, FIRST_SERVICE_SPRITE_ATTESTATION)).toThrow(/Missing/u);
+    expect(() => verifyFirstServiceSpriteAttestation(source.replace(firstSymbol!, `${firstSymbol!}${firstSymbol!}`), firstEveningServiceSource.artRequirements, FIRST_SERVICE_SPRITE_ATTESTATION)).toThrow(/Duplicate/u);
+    expect(() => verifyFirstServiceSpriteAttestation(source.replace("</svg>\n", '<symbol id="orphan" viewBox="0 0 1 1"><rect width="1" height="1"/></symbol>\n</svg>\n'), firstEveningServiceSource.artRequirements, FIRST_SERVICE_SPRITE_ATTESTATION)).toThrow(/Orphan/u);
+  });
+
+  it("resolves every replay projection to the hash-free browser view exactly once", () => {
+    const vectors = [compiledFirstEveningService.goldenReplay, compiledFirstEveningService.correctiveReplay,
+      compiledFirstEveningService.abandonmentReplay];
+    for (const vector of vectors) {
+      for (const item of vector) {
+        const checkpoint = ("response" in item ? (item as { response: { checkpoint: EveningServiceCheckpoint } }).response.checkpoint : item) as EveningServiceCheckpoint;
+        const projection = projectEveningService(checkpoint, compiledFirstEveningService.projectionManifest, { disposition: "query", correctiveCueId: null });
+        const view = buildBrowserEveningServiceView(checkpoint, projection, "guest");
+        expect(JSON.stringify(view)).not.toMatch(/contentManifestHash|artAssetMapHash|serviceHash|replayHash|catalog|checkpoint|digest/u);
+        expect(view.facts.every((fact) => fact.text.length > 0)).toBe(true);
+        expect(new Set(view.choices.map((choice) => choice.id)).size).toBe(view.choices.length);
+      }
+    }
   });
 
   it("binds every first-service order to the exact transitive seasoned-rice ingredients", () => {

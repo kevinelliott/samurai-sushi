@@ -46,7 +46,7 @@ export async function composeAccountRuntime(config: AccountRuntimeConfig): Promi
   const rawPool = new Pool({ connectionString: config.databaseUrl, max: 10 });
   const pool = new PgPoolAdapter(rawPool);
   try {
-    const resumeKeys = new HmacKeyring(config.keys.resume);
+    const resumeKeys = new HmacKeyring(config.keys.resume, config.resumeVerificationKeys);
     const tombstoneKeys = new TombstoneKeyring(config.keys.tombstone);
     const guestClaimKeys = new GuestClaimKeyring(config.keys.guestClaim);
     const playerSessionKeys = new PlayerSessionKeyring(config.keys.playerSession);

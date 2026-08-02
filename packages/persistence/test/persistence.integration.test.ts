@@ -8,7 +8,9 @@ import { walletSigningBytes } from "@samurai-sushi/domain/claim-protocol";
 import {
   FIRST_EVENING_CONTENT_VERSION,
   FIRST_EVENING_SERVICE_DEFINITION,
+  SALMON_SASHIMI_UNLOCK_ID,
   createInitialEveningServiceCheckpoint,
+  decodeEveningServiceCheckpoint,
   reduceEveningService,
   type EveningServiceCheckpoint,
 } from "@samurai-sushi/domain/evening-service";
@@ -838,7 +840,7 @@ describe("PostgreSQL persistence spine", () => {
     );
     await applyMigrations(pool);
     const result = await rawPool.query<CountRow>("SELECT count(*)::text AS count FROM samurai_persistence.schema_migrations");
-    expect(result.rows[0]?.count).toBe("4");
+    expect(result.rows[0]?.count).toBe("5");
   });
 
   it("upgrades an exactly attested 0001 catalog to 0002 atomically", async () => {
@@ -870,6 +872,7 @@ describe("PostgreSQL persistence spine", () => {
       "0002_portable_recovery.sql",
       "0003_account_claim_persistence.sql",
       "0004_evening_service_authority.sql",
+      "0005_evening_service_generation.sql",
     ]);
     const tables = await rawPool.query<{ readonly table_name: string }>(
       `SELECT table_name FROM information_schema.tables
@@ -1092,7 +1095,7 @@ describe("PostgreSQL persistence spine", () => {
     await Promise.all([first, second]);
     await expect(waiter.acquired.promise).resolves.toBe(waiterPid);
     const result = await rawPool.query<CountRow>("SELECT count(*)::text AS count FROM samurai_persistence.schema_migrations");
-    expect(result.rows[0]?.count).toBe("4");
+    expect(result.rows[0]?.count).toBe("5");
   });
 
   it("canonicalizes caller search_path and rejects ACL, type, collation, and generic schema-object drift", async () => {
@@ -6407,7 +6410,7 @@ describe("PostgreSQL persistence spine", () => {
     await rawPool.query(
       `INSERT INTO samurai_persistence.player_progress
         (player_id,revision,content_version,checkpoint_schema_version,checkpoint,created_at,updated_at)
-       VALUES ('hostile-player-0001',0,$1,1,$2::jsonb,
+       VALUES ('hostile-player-0001',0,$1,2,$2::jsonb,
                '2026-08-01T20:00:00Z','2026-08-01T20:00:00Z')`,
       [FIRST_EVENING_CONTENT_VERSION, JSON.stringify(createInitialEveningServiceCheckpoint())],
     );
@@ -6416,6 +6419,19 @@ describe("PostgreSQL persistence spine", () => {
           SET revision=1,checkpoint=$1::jsonb
         WHERE player_id='hostile-player-0001'`,
       [JSON.stringify(createInitialEveningServiceCheckpoint())],
+    )).rejects.toMatchObject({ code: "23514" });
+    await expect(rawPool.query(
+      `UPDATE samurai_persistence.player_progress
+          SET checkpoint=$1::jsonb
+        WHERE player_id='hostile-player-0001'`,
+      [JSON.stringify({ ...createInitialEveningServiceCheckpoint(), generation: Number.MAX_SAFE_INTEGER + 1 })],
+    )).rejects.toMatchObject({ code: "23514" });
+    const { generation: _legacyGeneration, ...legacyCheckpoint } = createInitialEveningServiceCheckpoint();
+    await expect(rawPool.query(
+      `UPDATE samurai_persistence.player_progress
+          SET checkpoint_schema_version=1,checkpoint=$1::jsonb
+        WHERE player_id='hostile-player-0001'`,
+      [JSON.stringify({ ...legacyCheckpoint, schemaVersion: 1 })],
     )).rejects.toMatchObject({ code: "23514" });
     const hostileGuest = await sessionService.issue({
       consentVersion: "service-v1", contentVersion: "bootstrap-v1", checkpointSchemaVersion: 1, checkpoint: { bootstrap: true },
@@ -6525,6 +6541,107 @@ describe("PostgreSQL persistence spine", () => {
         (SELECT count(*)::text FROM samurai_persistence.outbox_deliveries o JOIN samurai_persistence.domain_events e USING(event_id) WHERE e.guest_session_id=$1) AS outbox
     `, [guest.session.id]);
     expect(matrix.rows[0]).toEqual({ receipts: "2", advanced: "1", events: "1", outbox: "1" });
+  });
+
+  it("starts canonical fresh runs for the same guest and acknowledged player with exact replay", async () => {
+    const guest = await sessionService.issue({
+      consentVersion: "service-v1", contentVersion: "bootstrap-v1", checkpointSchemaVersion: 1, checkpoint: { bootstrap: true },
+    });
+    const guestCredential = { kind: "guest", resumeSecret: guest.resumeSecret } as const;
+    const service = new EveningServiceAuthority(pool, authority, stage3Service());
+    const started = await service.execute(guestCredential, {
+      idempotencyKey: randomUUID(), expectedRevision: 0, commandName: "service.start", payload: {},
+    });
+    const abandoned = await service.execute(guestCredential, {
+      idempotencyKey: randomUUID(), expectedRevision: started.committedRevision, commandName: "service.abandon", payload: {},
+    });
+    const durableAbandoned = decodeEveningServiceCheckpoint({
+      ...abandoned.response.checkpoint, revision: 12, generation: 7,
+      storyFlags: [FIRST_EVENING_SERVICE_DEFINITION.orders[0]!.storyFlagId], unlocks: [SALMON_SASHIMI_UNLOCK_ID],
+    });
+    await rawPool.query(
+      `UPDATE samurai_persistence.guest_progress
+          SET revision=12,content_version=$2,checkpoint_schema_version=2,checkpoint=$3::jsonb,updated_at=clock_timestamp()
+        WHERE guest_session_id=$1`,
+      [guest.session.id, FIRST_EVENING_CONTENT_VERSION, JSON.stringify(durableAbandoned)],
+    );
+    const key = randomUUID();
+    const fresh = await service.execute(guestCredential, {
+      idempotencyKey: key, expectedRevision: 12, commandName: "service.start-new", payload: {},
+    });
+    expect(fresh).toMatchObject({ disposition: "committed", committedRevision: 13, response: { accepted: true,
+      feedbackRef: "feedback.service.new-shift", checkpoint: { phase: "OPEN", generation: 8, revision: 13,
+        storyFlags: durableAbandoned.storyFlags, unlocks: durableAbandoned.unlocks } } });
+    expect(fresh.response.checkpoint.orders).toEqual(createInitialEveningServiceCheckpoint().orders);
+    expect(fresh.response.checkpoint.components).toEqual(createInitialEveningServiceCheckpoint().components);
+    await expect(service.execute(guestCredential, {
+      idempotencyKey: key, expectedRevision: 12, commandName: "service.start-new", payload: {},
+    })).resolves.toMatchObject({ disposition: "replayed", committedRevision: 13, response: fresh.response });
+    await expect(service.execute(guestCredential, {
+      idempotencyKey: key, expectedRevision: 12, commandName: "service.start-new", payload: { changed: true },
+    })).rejects.toBeInstanceOf(IdempotencyPayloadMismatchError);
+    await expect(service.execute(guestCredential, {
+      idempotencyKey: randomUUID(), expectedRevision: 12, commandName: "service.start-new", payload: {},
+    })).rejects.toBeInstanceOf(RevisionConflictError);
+
+    const wallet = stage3Wallet();
+    const claimCapability = randomBytes(32).toString("base64url");
+    const playerGuest = await new GuestSessionService(pool, authority, {
+      claimKeys: guestClaimKeys, issueClaimCapability: () => claimCapability,
+    }).issue({ consentVersion: "service-v1", contentVersion: "bootstrap-v1", checkpointSchemaVersion: 1, checkpoint: { bootstrap: true } });
+    const playerGuestCredential = { kind: "guest", resumeSecret: playerGuest.resumeSecret } as const;
+    const beforeClaimService = new EveningServiceAuthority(pool, authority, stage3Service());
+    await beforeClaimService.execute(playerGuestCredential, {
+      idempotencyKey: randomUUID(), expectedRevision: 0, commandName: "service.start", payload: {},
+    });
+    await beforeClaimService.execute(playerGuestCredential, {
+      idempotencyKey: randomUUID(), expectedRevision: 1, commandName: "service.abandon", payload: {},
+    });
+    const intent = { claimId: randomUUID(), guestClaimCommitment: claimCapability, createPlayer: true, guestRevision: 2,
+      idempotencyKey: randomUUID(), contentVersion: FIRST_EVENING_CONTENT_VERSION, cosmeticSelections: {} } as const;
+    const accountService = stage3Service();
+    const challenge = await accountService.issueClaimChallenge({ resumeSecret: playerGuest.resumeSecret, intent, account: wallet.account });
+    if ("code" in challenge) throw new Error("Fresh-run player challenge failed.");
+    const proof = { challenge: challenge.challenge, publicKey: wallet.publicKey,
+      signature: b58Encode(signMessage(null, blake2b(walletSigningBytes(challenge.challenge), { dkLen: 32 }), wallet.privateKey), PrefixV2.Ed25519Signature) };
+    const claimed = await accountService.claimGuest({ resumeSecret: playerGuest.resumeSecret, intent, challengeId: challenge.challengeId, proof });
+    if ("code" in claimed) throw new Error(`Fresh-run player claim failed: ${claimed.code}`);
+    await accountService.acknowledgeClaimDeliveryExact(
+      claimed.playerId, claimed.claimId, claimed.sessionId, claimed.sessionSecret, claimed.deliveryGeneration,
+    );
+    const playerCredential = { kind: "player", sessionSecret: claimed.sessionSecret } as const;
+    const playerService = new EveningServiceAuthority(pool, authority, accountService);
+    await expect(playerService.query(playerCredential)).resolves.toMatchObject({ revision: 2, checkpoint: { phase: "ABANDONED", generation: 0 } });
+    await expect(playerService.execute(playerCredential, {
+      idempotencyKey: randomUUID(), expectedRevision: 2, commandName: "service.start-new", payload: {},
+    })).resolves.toMatchObject({ disposition: "committed", committedRevision: 3,
+      response: { checkpoint: { phase: "OPEN", generation: 1, revision: 3 } } });
+  });
+
+  it("rolls back a fresh-run transition at every service write boundary", async () => {
+    for (const boundary of ["checkpoint", "event", "outbox", "receipt"] as const) {
+      const guest = await sessionService.issue({
+        consentVersion: "service-v1", contentVersion: "bootstrap-v1", checkpointSchemaVersion: 1, checkpoint: { bootstrap: true },
+      });
+      const credential = { kind: "guest", resumeSecret: guest.resumeSecret } as const;
+      const ordinary = new EveningServiceAuthority(pool, authority, stage3Service());
+      await ordinary.execute(credential, { idempotencyKey: randomUUID(), expectedRevision: 0, commandName: "service.start", payload: {} });
+      await ordinary.execute(credential, { idempotencyKey: randomUUID(), expectedRevision: 1, commandName: "service.abandon", payload: {} });
+      const state = () => rawPool.query<{ readonly revision: string; readonly checkpoint: unknown; readonly receipts: string; readonly events: string; readonly outbox: string }>(`
+        SELECT p.revision::text,p.checkpoint,
+          (SELECT count(*)::text FROM samurai_persistence.command_receipts WHERE guest_session_id=$1) AS receipts,
+          (SELECT count(*)::text FROM samurai_persistence.domain_events WHERE guest_session_id=$1) AS events,
+          (SELECT count(*)::text FROM samurai_persistence.outbox_deliveries o JOIN samurai_persistence.domain_events e USING(event_id) WHERE e.guest_session_id=$1) AS outbox
+        FROM samurai_persistence.guest_progress p WHERE p.guest_session_id=$1`, [guest.session.id]);
+      const before = (await state()).rows[0];
+      const faulting = new EveningServiceAuthority(pool, authority, stage3Service(), {
+        afterWriteBoundary(current) { if (current === boundary) throw new Error(`Injected fresh-run failure after ${boundary}.`); },
+      });
+      await expect(faulting.execute(credential, {
+        idempotencyKey: randomUUID(), expectedRevision: 2, commandName: "service.start-new", payload: {},
+      })).rejects.toThrow(`Injected fresh-run failure after ${boundary}.`);
+      expect((await state()).rows[0]).toEqual(before);
+    }
   });
 
   it("rolls back every service checkpoint, event, outbox, and receipt boundary", async () => {
@@ -6785,7 +6902,7 @@ describe("PostgreSQL persistence spine", () => {
         claimKeys: guestClaimKeys, issueClaimCapability: () => claimCapability,
       }).issue({
         consentVersion: "service-v1", contentVersion: FIRST_EVENING_CONTENT_VERSION,
-        checkpointSchemaVersion: 1, checkpoint: createInitialEveningServiceCheckpoint(),
+        checkpointSchemaVersion: 2, checkpoint: createInitialEveningServiceCheckpoint(),
       });
       const intent = {
         claimId: randomUUID(), guestClaimCommitment: claimCapability, createPlayer: true, guestRevision: 0,
@@ -6909,7 +7026,7 @@ describe("PostgreSQL persistence spine", () => {
       await rawPool.query(
         `INSERT INTO samurai_persistence.player_progress
           (player_id,revision,content_version,checkpoint_schema_version,checkpoint,created_at,updated_at)
-         VALUES ($1,$2,$3,1,$4::jsonb,clock_timestamp(),clock_timestamp())`,
+         VALUES ($1,$2,$3,2,$4::jsonb,clock_timestamp(),clock_timestamp())`,
         [playerId, scenario.playerRevision, FIRST_EVENING_CONTENT_VERSION, JSON.stringify(scenario.playerCheckpoint)],
       );
 
@@ -7005,7 +7122,7 @@ describe("PostgreSQL persistence spine", () => {
     await rawPool.query(
       `INSERT INTO samurai_persistence.player_progress
         (player_id,revision,content_version,checkpoint_schema_version,checkpoint,created_at,updated_at)
-       VALUES ($1,12,$2,1,$3::jsonb,clock_timestamp(),clock_timestamp())`,
+       VALUES ($1,12,$2,2,$3::jsonb,clock_timestamp(),clock_timestamp())`,
       [playerId, FIRST_EVENING_CONTENT_VERSION, JSON.stringify(playerCheckpoint)],
     );
     const claimCapability = randomBytes(32).toString("base64url");
@@ -7057,6 +7174,9 @@ describe("PostgreSQL persistence spine", () => {
         "ALTER TABLE samurai_persistence.player_progress DROP CONSTRAINT player_progress_service_revision_check",
       );
       await historicalClient.query(
+        "ALTER TABLE samurai_persistence.player_progress DROP CONSTRAINT player_progress_service_generation_check",
+      );
+      await historicalClient.query(
         "INSERT INTO samurai_persistence.players (id,created_at,updated_at) VALUES ($1,clock_timestamp(),clock_timestamp())",
         [playerId],
       );
@@ -7079,6 +7199,16 @@ describe("PostgreSQL persistence spine", () => {
             OR (jsonb_typeof(checkpoint -> 'revision') = 'number'
               AND checkpoint ->> 'revision' ~ '^(0|[1-9][0-9]{0,15})$'
               AND (checkpoint ->> 'revision')::numeric = revision)
+          ) NOT VALID
+      `);
+      await historicalClient.query(`
+        ALTER TABLE samurai_persistence.player_progress
+          ADD CONSTRAINT player_progress_service_generation_check CHECK (
+            content_version <> 'phase-1-evening-service-v1'
+            OR (checkpoint_schema_version = 2
+              AND jsonb_typeof(checkpoint -> 'generation') = 'number'
+              AND checkpoint ->> 'generation' ~ '^(0|[1-9][0-9]{0,15})$'
+              AND (checkpoint ->> 'generation')::numeric <= 9007199254740991)
           ) NOT VALID
       `);
       await historicalClient.query("COMMIT");

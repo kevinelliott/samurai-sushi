@@ -1,6 +1,6 @@
 {
   "schemaVersion": 2,
-  "generatedAt": "2026-08-01T04:10:57Z",
+  "generatedAt": "2026-08-02T04:42:42Z",
   "title": "Design System: Samurai Sushi",
   "extensions": {
     "colorMeta": {
@@ -29,8 +29,9 @@
       { "name": "placement", "value": "140ms ease-out", "purpose": "Ingredient and dish-piece placement feedback; disabled under reduced motion." }
     ],
     "breakpoints": [
-      { "name": "counter-ribbon", "value": "1120px" },
-      { "name": "mobile-counter", "value": "767px" }
+      { "name": "counter-wide", "value": "1180px" },
+      { "name": "counter-tablet", "value": "768px" },
+      { "name": "counter-mobile", "value": "767px" }
     ]
   },
   "components": [

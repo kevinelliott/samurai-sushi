@@ -3,7 +3,7 @@ import { validateCommandEnvelope } from "./commands";
 import { PersistenceDomainError } from "./errors";
 import type { CommandEnvelope, JsonObject, JsonValue } from "./model";
 
-export const EVENING_SERVICE_SCHEMA_VERSION = 1 as const;
+export const EVENING_SERVICE_SCHEMA_VERSION = 2 as const;
 export const FIRST_EVENING_SERVICE_ID = "first-evening-service" as const;
 export const FIRST_EVENING_CONTENT_VERSION = "phase-1-evening-service-v1" as const;
 export const SALMON_SASHIMI_UNLOCK_ID = "atlantic-salmon-sashimi@1" as const;
@@ -81,6 +81,7 @@ export interface EveningServiceCheckpoint extends JsonObject {
   readonly serviceId: typeof FIRST_EVENING_SERVICE_ID;
   readonly contentVersion: typeof FIRST_EVENING_CONTENT_VERSION;
   readonly revision: number;
+  readonly generation: number;
   readonly phase: ServicePhase;
   readonly riceBeatIndex: number;
   readonly presentationChoice: PresentationChoice | null;
@@ -93,7 +94,7 @@ export interface EveningServiceCheckpoint extends JsonObject {
 }
 
 export type EveningServiceCommandName =
-  | "service.start" | "service.prepare-rice" | "service.accept-order" | "service.perform-step"
+  | "service.start" | "service.start-new" | "service.prepare-rice" | "service.accept-order" | "service.perform-step"
   | "service.choose-presentation" | "service.plate-order" | "service.serve-order"
   | "service.close-ledger" | "service.choose-restoration" | "service.abandon";
 
@@ -306,6 +307,7 @@ export function createInitialEveningServiceCheckpoint(): EveningServiceCheckpoin
     serviceId: FIRST_EVENING_SERVICE_ID,
     contentVersion: FIRST_EVENING_CONTENT_VERSION,
     revision: 0,
+    generation: 0,
     phase: "IDLE",
     riceBeatIndex: 0,
     presentationChoice: null,
@@ -322,9 +324,13 @@ export function decodeEveningServiceCheckpoint(input: unknown): EveningServiceCh
   assertBoundedJson(input, "$checkpoint");
   const detached = JSON.parse(canonicalJson(input)) as unknown;
   const row = plainObject(detached, "$checkpoint");
-  exactKeys(row, ["activeOrderIndex", "components", "contentVersion", "orders", "phase", "presentationChoice", "restorationChoice", "revision", "riceBeatIndex", "schemaVersion", "serviceId", "storyFlags", "unlocks"], "$checkpoint");
-  if (row.schemaVersion !== 1 || row.serviceId !== FIRST_EVENING_SERVICE_ID || row.contentVersion !== FIRST_EVENING_CONTENT_VERSION) invalid("The checkpoint is not the pinned first-service schema.");
+  const legacy = row.schemaVersion === 1;
+  exactKeys(row, legacy
+    ? ["activeOrderIndex", "components", "contentVersion", "orders", "phase", "presentationChoice", "restorationChoice", "revision", "riceBeatIndex", "schemaVersion", "serviceId", "storyFlags", "unlocks"]
+    : ["activeOrderIndex", "components", "contentVersion", "generation", "orders", "phase", "presentationChoice", "restorationChoice", "revision", "riceBeatIndex", "schemaVersion", "serviceId", "storyFlags", "unlocks"], "$checkpoint");
+  if ((!legacy && row.schemaVersion !== EVENING_SERVICE_SCHEMA_VERSION) || row.serviceId !== FIRST_EVENING_SERVICE_ID || row.contentVersion !== FIRST_EVENING_CONTENT_VERSION) invalid("The checkpoint is not the pinned first-service schema.");
   const revision = safeRevision(row.revision, "$checkpoint.revision");
+  const generation = legacy ? 0 : safeRevision(row.generation, "$checkpoint.generation");
   if (!["IDLE", "OPEN", "CLOSING", "SETTLED", "ABANDONED"].includes(row.phase as string)) invalid("Invalid service phase.");
   if (!Number.isSafeInteger(row.riceBeatIndex) || (row.riceBeatIndex as number) < 0 || (row.riceBeatIndex as number) > 3) invalid("Invalid rice beat index.");
   if (!Number.isSafeInteger(row.activeOrderIndex) || (row.activeOrderIndex as number) < 0 || (row.activeOrderIndex as number) > 3) invalid("Invalid active order index.");
@@ -352,7 +358,7 @@ export function decodeEveningServiceCheckpoint(input: unknown): EveningServiceCh
       .some((count) => !Number.isSafeInteger(count) || (count as number) < 0)) invalid("Invalid component conservation row.");
     return component as unknown as ServiceComponentCheckpoint;
   });
-  const decoded = { ...row, revision, orders, components } as unknown as EveningServiceCheckpoint;
+  const decoded = { ...row, schemaVersion: EVENING_SERVICE_SCHEMA_VERSION, revision, generation, orders, components } as unknown as EveningServiceCheckpoint;
   assertEveningServiceInvariants(decoded);
   return deepFreeze(decoded);
 }
@@ -370,10 +376,13 @@ export function rebaseEveningServiceCheckpointForClaim(
 
 export function assertEveningServiceInvariants(checkpoint: EveningServiceCheckpoint): void {
   if (checkpoint.revision > MAX_SAFE_REVISION) invalid("Checkpoint revision exceeds the protocol maximum.");
+  if (!Number.isSafeInteger(checkpoint.generation) || checkpoint.generation < 0 || checkpoint.generation > MAX_SAFE_REVISION) invalid("Service generation exceeds the protocol maximum.");
   const served = checkpoint.orders.filter((order) => order.state === "SERVED").length;
   if (served !== checkpoint.activeOrderIndex) invalid("Served-order conservation does not match the active order index.");
-  const expectedStoryFlags = FIRST_EVENING_SERVICE_DEFINITION.orders.slice(0, served).map((order) => order.storyFlagId);
-  if (canonicalJson(checkpoint.storyFlags) !== canonicalJson(expectedStoryFlags)) invalid("Continuing story facts must match the served order prefix.");
+  const authoredStoryFlags = FIRST_EVENING_SERVICE_DEFINITION.orders.map((order) => order.storyFlagId);
+  const expectedCurrentStoryFlags = authoredStoryFlags.slice(0, served);
+  if (canonicalJson(checkpoint.storyFlags) !== canonicalJson(authoredStoryFlags.slice(0, checkpoint.storyFlags.length))
+    || expectedCurrentStoryFlags.some((flag) => !checkpoint.storyFlags.includes(flag))) invalid("Continuing story facts must be a monotonic authored prefix containing the current run's served facts.");
   checkpoint.orders.forEach((order, index) => {
     const definition = FIRST_EVENING_SERVICE_DEFINITION.orders[index]!;
     if (order.state === "EXPIRED" || order.state === "FAILED") invalid("The forgiving first service cannot persist punitive order outcomes.");
@@ -400,7 +409,7 @@ export function assertEveningServiceInvariants(checkpoint: EveningServiceCheckpo
   const kappa = checkpoint.orders[0]!;
   if (checkpoint.presentationChoice && !["READY_TO_PLATE", "PLATED", "SERVED"].includes(kappa.state)) invalid("Presentation can be chosen only after kappa preparation.");
   if (checkpoint.phase === "IDLE") {
-    if (checkpoint.riceBeatIndex !== 0 || checkpoint.activeOrderIndex !== 0 || checkpoint.presentationChoice !== null
+    if (checkpoint.generation !== 0 || checkpoint.riceBeatIndex !== 0 || checkpoint.activeOrderIndex !== 0 || checkpoint.presentationChoice !== null
       || checkpoint.storyFlags.length !== 0 || checkpoint.orders.some((order) => order.state !== "OFFERED")) invalid("Idle must be the exact untouched first-service checkpoint.");
   }
   if (checkpoint.phase === "OPEN") {
@@ -424,7 +433,7 @@ function payloadObject(command: CommandEnvelope, expected: readonly string[]): R
 
 function buildDecision(checkpoint: EveningServiceCheckpoint, command: CommandEnvelope, accepted: boolean, feedbackRef: string, settledNow: boolean, unlockedNow: readonly string[], outcomeClass: OrderOutcomeClass | null = null): EveningServiceDecision {
   const correctiveCueId = accepted ? null : feedbackRef;
-  const eventPayload: JsonObject = { serviceId: FIRST_EVENING_SERVICE_ID, commandName: command.commandName, accepted, phase: checkpoint.phase, revision: checkpoint.revision, feedbackRef, settledNow, unlockedNow, outcomeClass };
+  const eventPayload: JsonObject = { serviceId: FIRST_EVENING_SERVICE_ID, commandName: command.commandName, accepted, phase: checkpoint.phase, revision: checkpoint.revision, generation: checkpoint.generation, feedbackRef, settledNow, unlockedNow, outcomeClass };
   return deepFreeze({
     checkpointSchemaVersion: EVENING_SERVICE_SCHEMA_VERSION,
     checkpoint,
@@ -447,7 +456,8 @@ export function reduceEveningService(checkpointInput: unknown, commandInput: unk
   assertBoundedJson(commandInput, "$command");
   const command = deepFreeze(validateCommandEnvelope(JSON.parse(canonicalJson(commandInput))));
   if (command.expectedRevision !== checkpoint.revision || checkpoint.revision === MAX_SAFE_REVISION || command.contentVersion !== FIRST_EVENING_CONTENT_VERSION) invalid("The command does not match the canonical service revision or content version.");
-  if (["SETTLED", "ABANDONED"].includes(checkpoint.phase)) return correction(checkpoint, command, "cue.service.complete");
+  if (["SETTLED", "ABANDONED"].includes(checkpoint.phase)
+    && !(checkpoint.phase === "ABANDONED" && command.commandName === "service.start-new")) return correction(checkpoint, command, "cue.service.complete");
 
   const definition = FIRST_EVENING_SERVICE_DEFINITION.orders[checkpoint.activeOrderIndex];
   const order = checkpoint.orders[checkpoint.activeOrderIndex];
@@ -456,6 +466,22 @@ export function reduceEveningService(checkpointInput: unknown, commandInput: unk
       payloadObject(command, []);
       if (checkpoint.phase !== "IDLE") return correction(checkpoint, command, "cue.start.invalid");
       return buildDecision(nextCheckpoint(checkpoint, { phase: "OPEN" }), command, true, "feedback.service.opened", false, []);
+    }
+    case "service.start-new": {
+      payloadObject(command, []);
+      if (checkpoint.phase !== "ABANDONED") return correction(checkpoint, command, "cue.start-new.invalid");
+      if (checkpoint.generation === MAX_SAFE_REVISION) invalid("The service generation cannot advance safely.");
+      const orders = FIRST_EVENING_SERVICE_DEFINITION.orders.map((item) => ({ id: item.id, state: "OFFERED" as const, stepIndex: 0, plateFeedbackRef: null, serveFeedbackRef: null }));
+      return buildDecision(nextCheckpoint(checkpoint, {
+        generation: checkpoint.generation + 1,
+        phase: "OPEN",
+        riceBeatIndex: 0,
+        presentationChoice: null,
+        restorationChoice: null,
+        activeOrderIndex: 0,
+        orders,
+        components: createInitialEveningServiceCheckpoint().components,
+      }), command, true, "feedback.service.new-shift", false, []);
     }
     case "service.prepare-rice": {
       const payload = payloadObject(command, ["beat"]);
@@ -511,7 +537,7 @@ export function reduceEveningService(checkpointInput: unknown, commandInput: unk
       return buildDecision(nextCheckpoint(checkpoint, {
         orders,
         activeOrderIndex: checkpoint.activeOrderIndex + 1,
-        storyFlags: [...checkpoint.storyFlags, definition.storyFlagId],
+        storyFlags: checkpoint.storyFlags.includes(definition.storyFlagId) ? checkpoint.storyFlags : [...checkpoint.storyFlags, definition.storyFlagId],
       }), command, true, definition.serveFeedbackRef, false, [], definition.outcomeClass);
     }
     case "service.close-ledger": {
@@ -605,7 +631,7 @@ export function projectEveningService(checkpointInput: unknown, manifestInput: E
     displayRefs.push("ledger.first-evening", `unlock.${SALMON_SASHIMI_UNLOCK_ID}`);
   } else if (checkpoint.phase === "ABANDONED") {
     currentPromptId = manifest.serviceDefinition.abandonedPromptRef;
-    primaryCommand = null;
+    primaryCommand = "service.start-new";
   }
   checkpoint.orders.forEach((item, index) => {
     if (item.state === "SERVED" && item.serveFeedbackRef) {

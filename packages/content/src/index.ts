@@ -4,6 +4,8 @@ export * from "./hash";
 export * from "./model";
 export * from "./replay";
 export * from "./service";
+export * from "./browser-view";
+export * from "./asset-attestation";
 export * from "./seasonality";
 export { firstEveningServiceCatalogBundle } from "./fixtures/first-service";
 export { salmonSashimiDraftBundle } from "./fixtures/salmon-sashimi";

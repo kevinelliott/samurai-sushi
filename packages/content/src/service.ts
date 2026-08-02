@@ -69,11 +69,13 @@ export interface CompiledFirstServiceContent {
   readonly replayHash: string;
   readonly correctiveReplayHash: string;
   readonly abandonmentReplayHash: string;
+  readonly newRunReplayHash: string;
   readonly terminalReplayHash: string;
   readonly source: FirstServiceContentSource;
   readonly goldenReplay: readonly JsonObject[];
   readonly correctiveReplay: readonly JsonObject[];
   readonly abandonmentReplay: readonly JsonObject[];
+  readonly newRunReplay: readonly JsonObject[];
   readonly terminalReplay: readonly JsonObject[];
   readonly projectionManifest: EveningServiceProjectionManifest;
 }
@@ -284,6 +286,25 @@ export function buildFirstServiceAbandonmentReplay(): readonly JsonObject[] {
   return replay;
 }
 
+export function buildFirstServiceNewRunReplay(): readonly JsonObject[] {
+  const replay = buildReplayVector([
+    ["service.start", {}],
+    ["service.prepare-rice", { beat: "wash" }],
+    ["service.abandon", {}],
+    ["service.start-new", {}],
+  ], 950);
+  const abandoned = (replay.at(-2) as { response: { checkpoint: EveningServiceCheckpoint } }).response.checkpoint;
+  const restarted = (replay.at(-1) as { response: { checkpoint: EveningServiceCheckpoint } }).response.checkpoint;
+  if (abandoned.phase !== "ABANDONED" || restarted.phase !== "OPEN" || restarted.generation !== abandoned.generation + 1
+    || restarted.revision !== abandoned.revision + 1 || restarted.riceBeatIndex !== 0 || restarted.activeOrderIndex !== 0
+    || restarted.presentationChoice !== null || restarted.restorationChoice !== null
+    || restarted.orders.some((order) => order.state !== "OFFERED" || order.stepIndex !== 0)
+    || restarted.components.some((row) => row.placed !== 0 || row.served !== 0 || row.discarded !== 0)) {
+    fail("new-run replay must advance generation and reset only the run-scoped service graph");
+  }
+  return replay;
+}
+
 export function buildFirstServiceTerminalReplay(goldenReplay: readonly JsonObject[]): readonly JsonObject[] {
   const settlement = goldenReplay.at(-1)!;
   const response = (settlement as { response: { checkpoint: EveningServiceCheckpoint; settledNow: boolean; unlockedNow: readonly string[] } }).response;
@@ -341,9 +362,9 @@ export function compileFirstServiceContent(input: unknown): CompiledFirstService
   const runtimeRefs = [
     "cue.abandon.invalid", "cue.ledger.orders-incomplete", "cue.orders.complete", "cue.orders.served", "cue.presentation.invalid",
     "cue.restoration.invalid", "cue.rice.complete", "cue.rice.expected.season", "cue.rice.expected.steam", "cue.rice.expected.wash",
-    "cue.service.complete", "cue.start.invalid", "feedback.ledger.closed", "feedback.presentation.indigo-rim",
+    "cue.service.complete", "cue.start-new.invalid", "cue.start.invalid", "feedback.ledger.closed", "feedback.presentation.indigo-rim",
     "feedback.presentation.sand-speckle", "feedback.rice.season.saved", "feedback.rice.steam.saved", "feedback.rice.wash.saved",
-    "feedback.service.abandoned", "feedback.service.opened", "feedback.service.settled", "prompt.presentation.choose",
+    "feedback.service.abandoned", "feedback.service.new-shift", "feedback.service.opened", "feedback.service.settled", "prompt.presentation.choose",
     ...source.serviceDefinition.orders.flatMap((order) => [
       `cue.order.accept.${order.id}`, `cue.order.expected.${order.id}`, `cue.plate.required.${order.id}`, `cue.serve.required.${order.id}`,
     ]),
@@ -358,6 +379,7 @@ export function compileFirstServiceContent(input: unknown): CompiledFirstService
   const goldenReplay = buildFirstServiceGoldenReplay();
   const correctiveReplay = buildFirstServiceCorrectiveReplay();
   const abandonmentReplay = buildFirstServiceAbandonmentReplay();
+  const newRunReplay = buildFirstServiceNewRunReplay();
   const terminalReplay = buildFirstServiceTerminalReplay(goldenReplay);
   const semanticRefs = [
     "dish.kappa-maki", "dish.salmon-nigiri", "dish.tamago-nigiri", "guest.ceramicist", "guest.courier", "guest.fishmonger",
@@ -384,11 +406,13 @@ export function compileFirstServiceContent(input: unknown): CompiledFirstService
     replayHash: contentHashFor(goldenReplay),
     correctiveReplayHash: contentHashFor(correctiveReplay),
     abandonmentReplayHash: contentHashFor(abandonmentReplay),
+    newRunReplayHash: contentHashFor(newRunReplay),
     terminalReplayHash: contentHashFor(terminalReplay),
     source,
     goldenReplay,
     correctiveReplay,
     abandonmentReplay,
+    newRunReplay,
     terminalReplay,
     projectionManifest,
   });
@@ -416,6 +440,13 @@ export const firstEveningServiceSource: FirstServiceContentSource = deepFreeze({
   firstServiceCatalog,
   salmonSashimiUnlockCatalog,
   copy: [
+    copy("action.service.start-new", "Start a fresh shift"),
+    copy("action.service.abandon", "End shift early"),
+    copy("action.presentation.indigo-rim", "Use the double-rim plate"),
+    copy("action.presentation.sand-speckle", "Use the speckled-field plate"),
+    copy("action.restoration.mend-counter-stool", "Mend the counter stool"),
+    copy("action.restoration.polish-display-shelf", "Polish the display shelf"),
+    copy("action.restoration.refresh-menu-board", "Refresh the menu board"),
     copy("cue.abandon.invalid", "Open the counter before ending a shift."),
     copy("cue.ledger.orders-incomplete", "Serve all three authored orders before closing the ledger."),
     copy("cue.order.accept.ceramicist-kappa", "Accept the ceramicist's kappa maki order next."),
@@ -439,6 +470,7 @@ export const firstEveningServiceSource: FirstServiceContentSource = deepFreeze({
     copy("cue.serve.required.courier-salmon", "Plate the salmon nigiri before serving it."),
     copy("cue.serve.required.fishmonger-tamago", "Plate the tamago nigiri before serving it."),
     copy("cue.service.complete", "This service is already complete."),
+    copy("cue.start-new.invalid", "Start a fresh shift only after the current shift closes early."),
     copy("cue.start.invalid", "Open the service only from the idle ledger."),
     copy("cue.step.ceramicist-kappa.cut-kappa", "Cut the completed roll only after rolling it."),
     copy("cue.step.ceramicist-kappa.layer-nori", "Layer nori on the rolling mat first."),
@@ -453,6 +485,9 @@ export const firstEveningServiceSource: FirstServiceContentSource = deepFreeze({
     copy("cue.step.fishmonger-tamago.place-tamago", "Place the cooked tamago after shaping the rice."),
     copy("cue.step.fishmonger-tamago.portion-rice", "Portion prepared sushi rice at the nigiri counter."),
     copy("cue.step.fishmonger-tamago.press-rice", "Press the portioned rice before adding the topping."),
+    copy("dish.kappa-maki", "Kappa maki"),
+    copy("dish.salmon-nigiri", "Salmon nigiri"),
+    copy("dish.tamago-nigiri", "Tamago nigiri"),
     copy("feedback.ledger.closed", "The evening ledger is closed."),
     copy("feedback.plate.ceramicist-kappa", "The ceramicist notices the clean, even roll."),
     copy("feedback.plate.courier-salmon", "The courier sees the final plate arrive complete."),
@@ -466,6 +501,7 @@ export const firstEveningServiceSource: FirstServiceContentSource = deepFreeze({
     copy("feedback.rice.steam.saved", "The steaming beat is saved."),
     copy("feedback.rice.wash.saved", "The washing beat is saved."),
     copy("feedback.service.abandoned", "Shift closed early without settlement or unlocks."),
+    copy("feedback.service.new-shift", "A fresh shift is open on the same saved service."),
     copy("feedback.service.opened", "The counter is open for the first service."),
     copy("feedback.service.settled", "The counter is restored and salmon sashimi is now available."),
     copy("guest.ceramicist.dialogue", "The ceramicist asks for the authored cucumber roll."),
@@ -475,6 +511,13 @@ export const firstEveningServiceSource: FirstServiceContentSource = deepFreeze({
     copy("guest.fishmonger.dialogue", "The fishmonger asks for the authored cooked-egg nigiri."),
     copy("guest.fishmonger", "The fishmonger"),
     copy("ledger.first-evening", "First evening ledger"),
+    copy("order-state.accepted", "Accepted"),
+    copy("order-state.discarded", "Closed early"),
+    copy("order-state.offered", "Waiting"),
+    copy("order-state.plated", "Plated"),
+    copy("order-state.preparing", "Preparing"),
+    copy("order-state.ready-to-plate", "Ready to plate"),
+    copy("order-state.served", "Served"),
     copy("outcome.content", "Content"),
     copy("outcome.delighted", "Delighted"),
     copy("outcome.recoverable-concern", "Recoverable concern"),
@@ -519,6 +562,10 @@ export const firstEveningServiceSource: FirstServiceContentSource = deepFreeze({
     copy("prompt.step.fishmonger-tamago.place-tamago", "Place the cooked tamago over the rice."),
     copy("prompt.step.fishmonger-tamago.portion-rice", "Portion prepared sushi rice at the nigiri counter."),
     copy("prompt.step.fishmonger-tamago.press-rice", "Press the rice into its authored nigiri shape."),
+    copy("rice.season", "Seasoned rice"),
+    copy("rice.steam", "Steamed rice"),
+    copy("rice.wash", "Washed rice"),
+    copy("service.first-evening", "First evening service"),
     copy("station.nigiri-counter", "Nigiri counter"),
     copy("station.prep-sashimi-board", "Prep and sashimi board"),
     copy("station.rice-hearth", "Rice hearth"),
@@ -537,12 +584,15 @@ export const firstEveningServiceSource: FirstServiceContentSource = deepFreeze({
     art("counter-lamp-lit", "64x64", "A lit counter lamp with a distinct radiant outline."),
     art("dish-kappa-maki-build", "48x48", "Layered nori, rice, and cucumber build silhouette."),
     art("dish-kappa-maki", "48x48", "A sliced cucumber roll with an outer nori ring."),
+    art("dish-kappa-maki-plated", "64x48", "The sliced cucumber roll centered on a plainly outlined plate."),
     art("dish-salmon-nigiri-build", "48x48", "Layered broad salmon topping and compact rice build silhouette."),
     art("dish-salmon-nigiri", "48x48", "A broad salmon topping over a compact rice base."),
+    art("dish-salmon-nigiri-plated", "64x48", "The salmon nigiri centered on a plainly outlined plate."),
     art("dish-salmon-sashimi-locked", "48x48", "A locked tile around a rice-free three-slice silhouette."),
     art("dish-salmon-sashimi", "48x48", "Three rice-free broad salmon slices in a staggered fan."),
     art("dish-tamago-nigiri-build", "48x48", "Layered rectangular egg, center binding, and rice build silhouette."),
     art("dish-tamago-nigiri", "48x48", "A rectangular cooked egg topping bound to rice by a center nori strip."),
+    art("dish-tamago-nigiri-plated", "64x48", "The tamago nigiri centered on a plainly outlined plate."),
     art("guest-ceramicist-content", "32x48", "Ceramicist role portrait with a relaxed open-hand silhouette."),
     art("guest-ceramicist-delighted", "32x48", "Ceramicist role portrait with an upright open-hand silhouette."),
     art("guest-ceramicist-neutral", "32x48", "Ceramicist role portrait with a relaxed closed-hand silhouette."),

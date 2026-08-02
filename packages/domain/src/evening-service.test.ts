@@ -91,6 +91,41 @@ describe("first evening service reducer", () => {
     expect(abandoned.response.payload.settledNow).toBe(false);
   });
 
+  it("starts a new run only from abandonment while preserving subject-durable facts", () => {
+    const initial = createInitialEveningServiceCheckpoint();
+    const started = apply(initial, "service.start", {}, 30);
+    const abandoned = apply(started.checkpoint, "service.abandon", {}, 31);
+    const durableAbandoned = decodeEveningServiceCheckpoint({
+      ...abandoned.checkpoint,
+      revision: 47,
+      generation: 7,
+      storyFlags: [FIRST_EVENING_SERVICE_DEFINITION.orders[0]!.storyFlagId],
+      unlocks: [SALMON_SASHIMI_UNLOCK_ID],
+    });
+    const restarted = apply(durableAbandoned, "service.start-new", {}, 32);
+    expect(restarted.response.payload).toMatchObject({ accepted: true, feedbackRef: "feedback.service.new-shift", settledNow: false });
+    expect(restarted.checkpoint).toMatchObject({ revision: 48, generation: 8, phase: "OPEN", riceBeatIndex: 0,
+      activeOrderIndex: 0, presentationChoice: null, restorationChoice: null,
+      storyFlags: durableAbandoned.storyFlags, unlocks: durableAbandoned.unlocks });
+    expect(restarted.checkpoint.orders).toEqual(initial.orders);
+    expect(restarted.checkpoint.components).toEqual(initial.components);
+    expect(Object.isFrozen(restarted.checkpoint)).toBe(true);
+
+    const idleAttempt = apply(initial, "service.start-new", {}, 33);
+    expect(idleAttempt.response.payload).toMatchObject({ accepted: false, correctiveCueId: "cue.start-new.invalid" });
+    expect(idleAttempt.checkpoint).toStrictEqual(initial);
+    expect(() => apply(decodeEveningServiceCheckpoint({ ...abandoned.checkpoint, generation: Number.MAX_SAFE_INTEGER }),
+      "service.start-new", {}, 34)).toThrow();
+  });
+
+  it("normalizes the exact legacy checkpoint to generation zero and rejects extra legacy fields", () => {
+    const current = createInitialEveningServiceCheckpoint();
+    const { generation: _generation, ...withoutGeneration } = current;
+    const legacy = { ...withoutGeneration, schemaVersion: 1 };
+    expect(decodeEveningServiceCheckpoint(legacy)).toMatchObject({ schemaVersion: 2, generation: 0, revision: 0, phase: "IDLE" });
+    expect(() => decodeEveningServiceCheckpoint({ ...legacy, generation: 0 })).toThrow();
+  });
+
   it("exposes explicit projection refs and suppresses replay ceremony", () => {
     const checkpoint = createInitialEveningServiceCheckpoint();
     const manifest = {
@@ -104,6 +139,16 @@ describe("first evening service reducer", () => {
     expect(committed.announceCeremony).toBe(true);
     expect(replayed.announceCeremony).toBe(false);
     expect(replayed.displayRefs).toEqual(committed.displayRefs);
+
+    const opened = apply(checkpoint, "service.start", {}, 35).checkpoint;
+    const abandoned = apply(opened, "service.abandon", {}, 36).checkpoint;
+    const abandonedManifest = {
+      contentVersion: FIRST_EVENING_CONTENT_VERSION,
+      serviceDefinition: FIRST_EVENING_SERVICE_DEFINITION,
+      contentRefs: ["phase.abandoned", "prompt.service.abandoned", "service.first-evening"],
+    } as const;
+    const terminal = projectEveningService(abandoned, abandonedManifest, { disposition: "query", correctiveCueId: null });
+    expect(terminal).toMatchObject({ currentPromptId: "prompt.service.abandoned", primaryCommand: "service.start-new", announceCeremony: false });
   });
 
   it("binds settlement and salmon sashimi as one exact set fact", () => {
