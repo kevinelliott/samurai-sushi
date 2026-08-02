@@ -86,9 +86,9 @@ describe("Phase 2B durable receipt lifecycle authority", () => {
 
   afterAll(async () => { await rawPool.end(); });
 
-  async function prepare(nonceByte = "22", idempotencyKey = "phase2b-intent-0001", target = authority, account = OWNER) {
+  async function prepare(nonceByte = "22", idempotencyKey = "phase2b-intent-0001", target = authority, account = OWNER, issuedAtOverride?: number) {
     const clock = await rawPool.query<{ readonly now: Date }>("SELECT date_trunc('second', clock_timestamp()) AS now");
-    const issuedAt = Math.floor(clock.rows[0]!.now.getTime() / 1000);
+    const issuedAt = issuedAtOverride ?? Math.floor(clock.rows[0]!.now.getTime() / 1000);
     return target.prepareSettledReceiptIntent({ kind: "player", sessionSecret: "server-fixture" }, {
       idempotencyKey,
       commitmentNonce: FIXTURE_SETTLED_COMMITMENT_NONCE,
@@ -153,8 +153,10 @@ describe("Phase 2B durable receipt lifecycle authority", () => {
   }
 
   it("prepares one server-only reviewed intent idempotently without persisting or projecting private settlement inputs", async () => {
-    const first = await prepare();
-    const replay = await prepare();
+    const clock = await rawPool.query<{ readonly now: Date }>("SELECT date_trunc('second', clock_timestamp()) AS now");
+    const issuedAt = Math.floor(clock.rows[0]!.now.getTime() / 1000);
+    const first = await prepare("22", "phase2b-intent-0001", authority, OWNER, issuedAt);
+    const replay = await prepare("22", "phase2b-intent-0001", authority, OWNER, issuedAt);
     expect(replay).toEqual(first);
     expect(first.intent.intentRef).toMatch(/^ri_[A-Za-z0-9_-]{22}$/);
     expect(JSON.stringify(first)).not.toMatch(/commitmentNonce|checkpoint|signature|player_phase2b|server-fixture/i);
@@ -191,12 +193,119 @@ describe("Phase 2B durable receipt lifecycle authority", () => {
     await rawPool.query("UPDATE samurai_persistence.receipt_reconciliation_jobs SET available_at=clock_timestamp() WHERE state='pending'");
     const secondClaim = (await authority.claimReconciliation(1, 30_000))[0]!;
     await expect(authority.observeOperation(secondClaim, includedObservation(2, 101, "rpc:included:2", projection.reviewFacts.payloadHash))).resolves.toBe("applied");
-    const final = await rawPool.query<{ readonly state: string; readonly confirmations: number; readonly policy_evidence: string; readonly events: string }>(
-      `SELECT attempt.state,attempt.confirmations,attempt.policy_evidence,
+    const final = await rawPool.query<{ readonly state: string; readonly confirmations: number; readonly policy_evidence: string;
+      readonly rpc_sequence: string; readonly head_level: string; readonly head_hash: string; readonly operation_index: number; readonly events: string }>(
+      `SELECT attempt.state,attempt.confirmations,attempt.policy_evidence,attempt.last_rpc_source_sequence::text AS rpc_sequence,
+        attempt.last_head_level::text AS head_level,attempt.last_head_block_hash AS head_hash,attempt.included_operation_index AS operation_index,
         (SELECT count(*)::text FROM samurai_persistence.receipt_lifecycle_events WHERE intent_id=attempt.intent_id) AS events
        FROM samurai_persistence.operation_attempts attempt WHERE attempt.public_attempt_ref=$1`, [attempt.publicAttemptRef]);
-    expect(final.rows[0]).toMatchObject({ state: "FINALIZED", confirmations: 2, events: "7" });
+    expect(final.rows[0]).toMatchObject({ state: "FINALIZED", confirmations: 2, rpc_sequence: "2", head_level: "101",
+      head_hash: "Bbcdefghijkmnprs", operation_index: 0, events: "7" });
     expect(final.rows[0]!.policy_evidence).toContain("localnet-two-confirmation-rehearsal-v1:100:");
+  });
+
+  it("binds later canonical inclusion to the durable tuple before and after finality", async () => {
+    const { attempt, projection } = await submittedAttempt();
+    let claim = (await authority.claimReconciliation(1, 30_000))[0]!;
+    const first = includedObservation(1, 100, "rpc:continuity:first", projection.reviewFacts.payloadHash);
+    await authority.observeOperation(claim, first);
+    await rawPool.query("UPDATE samurai_persistence.receipt_reconciliation_jobs SET available_at=clock_timestamp() WHERE state='pending'");
+    claim = (await authority.claimReconciliation(1, 30_000))[0]!;
+    await expect(authority.observeOperation(claim, { ...includedObservation(2, 100, "rpc:continuity:block", projection.reviewFacts.payloadHash),
+      includedBlockHash: "B222222222222222", headBlockHash: "B222222222222222",
+      canonicalChainProof: [{ level: 100, blockHash: "B222222222222222", predecessorHash: null }] })).resolves.toBe("incident");
+    await rawPool.query("UPDATE samurai_persistence.receipt_reconciliation_jobs SET available_at=clock_timestamp() WHERE state='pending'");
+    claim = (await authority.claimReconciliation(1, 30_000))[0]!;
+    await expect(authority.observeOperation(claim, { ...includedObservation(3, 100, "rpc:continuity:index", projection.reviewFacts.payloadHash), operationIndex: 1 })).resolves.toBe("incident");
+    let row = await rawPool.query<{ readonly state: string; readonly block: string; readonly operation_index: number; readonly sequence: string; readonly incidents: string }>(
+      `SELECT state,canonical_block_hash AS block,included_operation_index AS operation_index,last_rpc_source_sequence::text AS sequence,
+        (SELECT count(*)::text FROM samurai_persistence.receipt_incidents WHERE attempt_id=attempt.id AND kind='CHAIN_OR_MANIFEST_DRIFT') AS incidents
+       FROM samurai_persistence.operation_attempts attempt WHERE public_attempt_ref=$1`, [attempt.publicAttemptRef]);
+    expect(row.rows[0]).toEqual({ state: "INCLUDED", block: "Babcdefghijkmnpq", operation_index: 0, sequence: "1", incidents: "2" });
+
+    await rawPool.query("UPDATE samurai_persistence.receipt_reconciliation_jobs SET available_at=clock_timestamp() WHERE state='pending'");
+    claim = (await authority.claimReconciliation(1, 30_000))[0]!;
+    const finalObservation = includedObservation(4, 101, "rpc:continuity:final", projection.reviewFacts.payloadHash);
+    await authority.observeOperation(claim, finalObservation);
+    await authority.scheduleReconciliation(claim.attemptId);
+    claim = (await authority.claimReconciliation(1, 30_000))[0]!;
+    await expect(authority.observeOperation(claim, { ...includedObservation(5, 101, "rpc:continuity:final-block", projection.reviewFacts.payloadHash),
+      includedBlockHash: "B222222222222222",
+      canonicalChainProof: [{ level: 100, blockHash: "B222222222222222", predecessorHash: null },
+        { level: 101, blockHash: "Bbcdefghijkmnprs", predecessorHash: "B222222222222222" }] })).resolves.toBe("incident");
+    row = await rawPool.query<{ readonly state: string; readonly block: string; readonly operation_index: number; readonly sequence: string; readonly incidents: string }>(
+      `SELECT state,canonical_block_hash AS block,included_operation_index AS operation_index,last_rpc_source_sequence::text AS sequence,
+        (SELECT count(*)::text FROM samurai_persistence.receipt_incidents WHERE attempt_id=attempt.id AND kind='FINALIZED_CHAIN_CONTRADICTION') AS incidents
+       FROM samurai_persistence.operation_attempts attempt WHERE public_attempt_ref=$1`, [attempt.publicAttemptRef]);
+    expect(row.rows[0]).toEqual({ state: "FINALIZED", block: "Babcdefghijkmnpq", operation_index: 0, sequence: "4", incidents: "1" });
+
+    await authority.scheduleReconciliation(claim.attemptId);
+    claim = (await authority.claimReconciliation(1, 30_000))[0]!;
+    await expect(authority.observeOperation(claim, { ...includedObservation(6, 101, "rpc:continuity:final-index", projection.reviewFacts.payloadHash), operationIndex: 1 })).resolves.toBe("incident");
+    row = await rawPool.query<{ readonly state: string; readonly block: string; readonly operation_index: number; readonly sequence: string; readonly incidents: string }>(
+      `SELECT state,canonical_block_hash AS block,included_operation_index AS operation_index,last_rpc_source_sequence::text AS sequence,
+        (SELECT count(*)::text FROM samurai_persistence.receipt_incidents WHERE attempt_id=attempt.id AND kind='FINALIZED_CHAIN_CONTRADICTION') AS incidents
+       FROM samurai_persistence.operation_attempts attempt WHERE public_attempt_ref=$1`, [attempt.publicAttemptRef]);
+    expect(row.rows[0]).toEqual({ state: "FINALIZED", block: "Babcdefghijkmnpq", operation_index: 0, sequence: "4", incidents: "2" });
+
+    await authority.scheduleReconciliation(claim.attemptId);
+    claim = (await authority.claimReconciliation(1, 30_000))[0]!;
+    await expect(authority.observeOperation(claim, finalObservation)).resolves.toBe("duplicate");
+  });
+
+  it("rejects a changed inclusion tuple from a durable confirmed state", async () => {
+    const { attempt, projection } = await submittedAttempt();
+    let claim = (await authority.claimReconciliation(1, 30_000))[0]!;
+    await authority.observeOperation(claim, includedObservation(1, 101, "rpc:confirmed:first", projection.reviewFacts.payloadHash));
+    await rawPool.query(`UPDATE samurai_persistence.operation_attempts SET state='CONFIRMED',finalized_at=NULL WHERE id=$1`, [claim.attemptId]);
+    await rawPool.query(`UPDATE samurai_persistence.service_receipts SET state='CONFIRMED',finalized_at=NULL WHERE attempt_id=$1`, [claim.attemptId]);
+    await rawPool.query(`UPDATE samurai_persistence.receipt_intents SET state='CONFIRMED',finalized_at=NULL
+      WHERE id=(SELECT intent_id FROM samurai_persistence.operation_attempts WHERE id=$1)`, [claim.attemptId]);
+    await authority.scheduleReconciliation(claim.attemptId);
+    claim = (await authority.claimReconciliation(1, 30_000))[0]!;
+    await expect(authority.observeOperation(claim, { ...includedObservation(2, 101, "rpc:confirmed:block", projection.reviewFacts.payloadHash),
+      includedBlockHash: "B222222222222222", canonicalChainProof: [
+        { level: 100, blockHash: "B222222222222222", predecessorHash: null },
+        { level: 101, blockHash: "Bbcdefghijkmnprs", predecessorHash: "B222222222222222" },
+      ] })).resolves.toBe("incident");
+    const row = await rawPool.query<{ readonly state: string; readonly block: string; readonly incidents: string }>(
+      `SELECT state,canonical_block_hash AS block,
+        (SELECT count(*)::text FROM samurai_persistence.receipt_incidents WHERE attempt_id=attempt.id AND kind='CHAIN_OR_MANIFEST_DRIFT') AS incidents
+       FROM samurai_persistence.operation_attempts attempt WHERE public_attempt_ref=$1`, [attempt.publicAttemptRef]);
+    expect(row.rows[0]).toEqual({ state: "CONFIRMED", block: "Babcdefghijkmnpq", incidents: "1" });
+  });
+
+  it("preserves finalized authority on regressed or discontinuous proofs and accepts exact continuation", async () => {
+    const { attempt, projection } = await submittedAttempt();
+    let claim = (await authority.claimReconciliation(1, 30_000))[0]!;
+    await authority.observeOperation(claim, includedObservation(1, 101, "rpc:terminal:first", projection.reviewFacts.payloadHash));
+
+    await authority.scheduleReconciliation(claim.attemptId);
+    claim = (await authority.claimReconciliation(1, 30_000))[0]!;
+    await expect(authority.observeOperation(claim, includedObservation(2, 100, "rpc:terminal:regressed", projection.reviewFacts.payloadHash))).resolves.toBe("incident");
+
+    await authority.scheduleReconciliation(claim.attemptId);
+    claim = (await authority.claimReconciliation(1, 30_000))[0]!;
+    await expect(authority.observeOperation(claim, { ...includedObservation(3, 102, "rpc:terminal:fork", projection.reviewFacts.payloadHash),
+      headBlockHash: "B333333333333333", canonicalChainProof: [
+        { level: 100, blockHash: "Babcdefghijkmnpq", predecessorHash: null },
+        { level: 101, blockHash: "B222222222222222", predecessorHash: "Babcdefghijkmnpq" },
+        { level: 102, blockHash: "B333333333333333", predecessorHash: "B222222222222222" },
+      ] })).resolves.toBe("incident");
+
+    await authority.scheduleReconciliation(claim.attemptId);
+    claim = (await authority.claimReconciliation(1, 30_000))[0]!;
+    await expect(authority.observeOperation(claim, { ...includedObservation(4, 102, "rpc:terminal:continued", projection.reviewFacts.payloadHash),
+      headBlockHash: "B333333333333333", canonicalChainProof: [
+        { level: 100, blockHash: "Babcdefghijkmnpq", predecessorHash: null },
+        { level: 101, blockHash: "Bbcdefghijkmnprs", predecessorHash: "Babcdefghijkmnpq" },
+        { level: 102, blockHash: "B333333333333333", predecessorHash: "Bbcdefghijkmnprs" },
+      ] })).resolves.toBe("applied");
+    const row = await rawPool.query<{ readonly state: string; readonly confirmations: number; readonly sequence: string; readonly head: string; readonly incidents: string }>(
+      `SELECT state,confirmations,last_rpc_source_sequence::text AS sequence,last_head_block_hash AS head,
+        (SELECT count(*)::text FROM samurai_persistence.receipt_incidents WHERE attempt_id=attempt.id AND kind='FINALIZED_CHAIN_CONTRADICTION') AS incidents
+       FROM samurai_persistence.operation_attempts attempt WHERE public_attempt_ref=$1`, [attempt.publicAttemptRef]);
+    expect(row.rows[0]).toEqual({ state: "FINALIZED", confirmations: 3, sequence: "4", head: "B333333333333333", incidents: "2" });
   });
 
   it("keeps finalized state on contradiction, emits one incident, and fences an expired worker", async () => {
@@ -445,6 +554,10 @@ describe("Phase 2B durable receipt lifecycle authority", () => {
       "state='INCLUDED',included_at=clock_timestamp(),confirmations=1",
       "state='CONFIRMED',included_at=clock_timestamp(),confirmed_at=clock_timestamp(),confirmations=2",
       "state='FINALIZED',included_at=clock_timestamp(),confirmed_at=clock_timestamp(),finalized_at=clock_timestamp(),confirmations=2,policy_evidence='PRETEND'",
+      "state='INCLUDED',canonical_block_level=1,canonical_block_hash='B111111111111111',included_operation_index=0,included_at=clock_timestamp(),confirmations=1,last_head_level=1,last_head_block_hash='B111111111111111'",
+      "state='INCLUDED',canonical_block_level=1,canonical_block_hash='B111111111111111',included_operation_index=0,included_at=clock_timestamp(),confirmations=1,last_rpc_source_sequence=1,last_head_level=2,last_head_block_hash='B222222222222222'",
+      "state='CONFIRMED',canonical_block_level=1,canonical_block_hash='B111111111111111',included_operation_index=0,included_at=clock_timestamp(),confirmed_at=clock_timestamp(),confirmations=3,policy_evidence='PRETEND',last_rpc_source_sequence=1,last_head_level=2,last_head_block_hash='B222222222222222'",
+      "state='FINALIZED',canonical_block_level=1,canonical_block_hash='B111111111111111',included_operation_index=0,included_at=clock_timestamp(),confirmed_at=clock_timestamp(),finalized_at=clock_timestamp(),confirmations=2,policy_evidence='PRETEND',last_head_level=2,last_head_block_hash='B222222222222222'",
       "state='REORGED',included_at=clock_timestamp(),orphaned_block_level=1,orphaned_block_hash='B111111111111111',orphaned_at=clock_timestamp(),canonical_block_level=1,canonical_block_hash='B222222222222222',included_operation_index=0",
     ];
     for (const assignment of illegal) {

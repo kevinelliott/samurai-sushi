@@ -109,6 +109,7 @@ interface AttemptRow {
   readonly last_head_block_hash: string | null;
   readonly canonical_block_level: string | null;
   readonly canonical_block_hash: string | null;
+  readonly included_operation_index: number | null;
   readonly confirmations: number;
   readonly submitted_at: Date;
 }
@@ -553,6 +554,7 @@ export class ReceiptLifecycleAuthority {
       lastHeadBlockHash: attempt.last_head_block_hash,
       canonicalBlockHash: attempt.canonical_block_hash,
       canonicalBlockLevel: attempt.canonical_block_level === null ? null : Number(attempt.canonical_block_level),
+      includedOperationIndex: attempt.included_operation_index,
       confirmations: attempt.confirmations,
     };
     const existing = await client.query<{ readonly id: string; readonly normalized_digest: Uint8Array }>(
@@ -689,8 +691,15 @@ export class ReceiptLifecycleAuthority {
       fromState = transition;
     }
     if (decision.transitions.length === 0) {
-      await client.query(`UPDATE samurai_persistence.operation_attempts SET last_rpc_source_sequence=$2,last_head_level=$3,
-        last_head_block_hash=$4,last_observed_at=$5 WHERE id=$1`, [attempt.id, observation.sourceSequence, observation.headLevel, observation.headBlockHash, now]);
+      if (decision.disposition === "APPLY" && observation.disposition === "INCLUDED") {
+        await client.query(`UPDATE samurai_persistence.operation_attempts SET last_rpc_source_sequence=$2,last_head_level=$3,
+          last_head_block_hash=$4,confirmations=$5,policy_evidence=CASE WHEN state IN ('CONFIRMED','FINALIZED') THEN $6 ELSE NULL END,
+          last_observed_at=$7 WHERE id=$1`, [attempt.id, observation.sourceSequence, observation.headLevel, observation.headBlockHash,
+          decision.next.confirmations, decision.policyEvidence, now]);
+      } else {
+        await client.query(`UPDATE samurai_persistence.operation_attempts SET last_rpc_source_sequence=$2,last_head_level=$3,
+          last_head_block_hash=$4,last_observed_at=$5 WHERE id=$1`, [attempt.id, observation.sourceSequence, observation.headLevel, observation.headBlockHash, now]);
+      }
     }
     await client.query(`UPDATE samurai_persistence.receipt_intents SET projection_revision=$2,state_changed_at=$3 WHERE id=$1`, [intent.id, revision, now]);
     await this.#finishSuccessfulClaim(client, claim, now, decision.next.state === "FINALIZED" || ["FAILED","DROPPED","REPLACED"].includes(decision.next.state));
@@ -705,8 +714,8 @@ export class ReceiptLifecycleAuthority {
         canonical_block_hash=$3,included_operation_index=$4,last_head_level=$5,last_head_block_hash=$6,confirmations=$7,
         included_at=COALESCE(included_at,$8),last_observed_at=$8,last_rpc_source_sequence=$9,failure_code=NULL,
         orphaned_block_level=NULL,orphaned_block_hash=NULL,orphaned_at=NULL WHERE id=$1`,
-        [attempt.id, observation.includedLevel, observation.includedBlockHash, observation.operationIndex, observation.headLevel,
-          observation.headBlockHash, Math.min(observation.headLevel - observation.includedLevel! + 1, 1), now, observation.sourceSequence]);
+        [attempt.id, observation.includedLevel, observation.includedBlockHash, observation.operationIndex, observation.includedLevel,
+          observation.includedBlockHash, 1, now, observation.sourceSequence]);
       const event = observation.receiptEvent!;
       await client.query(`INSERT INTO samurai_persistence.service_receipts
         (id,intent_id,attempt_id,chain_id,contract_address,owner,service_commitment,content_version,nonce,payload_hash,
@@ -721,11 +730,16 @@ export class ReceiptLifecycleAuthority {
       await client.query(`UPDATE samurai_persistence.receipt_intents SET state='INCLUDED',included_at=COALESCE(included_at,$2) WHERE id=$1`, [intent.id, now]);
     } else if (transition === "CONFIRMED") {
       await client.query(`UPDATE samurai_persistence.operation_attempts SET state='CONFIRMED',confirmations=$2,confirmed_at=COALESCE(confirmed_at,$3),
-        policy_evidence=$4,last_observed_at=$3 WHERE id=$1`, [attempt.id, observation.headLevel - observation.includedLevel! + 1, now, policyEvidence]);
+        policy_evidence=$4,last_rpc_source_sequence=$5,last_head_level=$6,last_head_block_hash=$7,last_observed_at=$3 WHERE id=$1`,
+        [attempt.id, observation.headLevel - observation.includedLevel! + 1, now, policyEvidence, observation.sourceSequence,
+          observation.headLevel, observation.headBlockHash]);
       await client.query(`UPDATE samurai_persistence.service_receipts SET state='CONFIRMED',updated_at=$2 WHERE attempt_id=$1`, [attempt.id, now]);
       await client.query(`UPDATE samurai_persistence.receipt_intents SET state='CONFIRMED',confirmed_at=COALESCE(confirmed_at,$2) WHERE id=$1`, [intent.id, now]);
     } else if (transition === "FINALIZED") {
-      await client.query(`UPDATE samurai_persistence.operation_attempts SET state='FINALIZED',policy_evidence=$2,finalized_at=$3,last_observed_at=$3 WHERE id=$1`, [attempt.id, policyEvidence, now]);
+      await client.query(`UPDATE samurai_persistence.operation_attempts SET state='FINALIZED',confirmations=$2,policy_evidence=$3,
+        last_rpc_source_sequence=$4,last_head_level=$5,last_head_block_hash=$6,finalized_at=$7,last_observed_at=$7 WHERE id=$1`,
+        [attempt.id, observation.headLevel - observation.includedLevel! + 1, policyEvidence, observation.sourceSequence,
+          observation.headLevel, observation.headBlockHash, now]);
       await client.query(`UPDATE samurai_persistence.service_receipts SET state='FINALIZED',finalized_at=$2,updated_at=$2 WHERE attempt_id=$1`, [attempt.id, now]);
       await client.query(`UPDATE samurai_persistence.receipt_intents SET state='FINALIZED',finalized_at=$2 WHERE id=$1`, [intent.id, now]);
     } else if (transition === "REORGED") {

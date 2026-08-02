@@ -259,6 +259,11 @@ authority in this slice. Fake indexer evidence is persisted as a bounded hint
 in its own ordering namespace and has zero projection authority. RPC/indexer
 confirmation counts and finalized booleans are untrusted; the named policy
 evaluator recomputes both from a strict contiguous included-block-to-head proof.
+Later authoritative inclusion observations must match the durable level, block
+hash, and operation index, and their proof must contain the exact previously
+accepted canonical head. Confirmation/finality rows bind the accepted RPC
+sequence, head, derived count, and policy evidence in one authority tuple;
+explicit `REORGED` processing is the only path to a different inclusion tuple.
 Byte-exact idempotency is evaluated per source namespace before reduction; the
 same source sequence with any changed normalized byte opens a durable incident.
 Fetching occurs outside the apply

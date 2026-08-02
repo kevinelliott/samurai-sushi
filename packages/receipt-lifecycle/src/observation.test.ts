@@ -26,7 +26,7 @@ function observation(disposition: string, overrides: Record<string, unknown> = {
       deploymentManifestHash: identity.deploymentManifestHash,
     } : null, ...overrides };
 }
-const submitted: AttemptObservationState = Object.freeze({ ...identity, state: "SUBMITTED", lastRpcSourceSequence: null, lastIndexerSourceSequence: null, lastHeadLevel: null, lastHeadBlockHash: null, canonicalBlockHash: null, canonicalBlockLevel: null, confirmations: 0 });
+const submitted: AttemptObservationState = Object.freeze({ ...identity, state: "SUBMITTED", lastRpcSourceSequence: null, lastIndexerSourceSequence: null, lastHeadLevel: null, lastHeadBlockHash: null, canonicalBlockHash: null, canonicalBlockLevel: null, includedOperationIndex: null, confirmations: 0 });
 
 describe("receipt lifecycle observation authority", () => {
   it("normalizes an exact untrusted observation and rejects extra or adapter-finality fields", () => {
@@ -51,9 +51,30 @@ describe("receipt lifecycle observation authority", () => {
     expect(reduceOperationObservation({ ...included.next, lastHeadLevel: 20 }, observation("INCLUDED", { sourceSequence: 2 }), RECEIPT_FINALITY_POLICY).disposition).toBe("STALE");
   });
   it("routes finalized contradiction and rejects identity drift", () => {
-    const finalized: AttemptObservationState = { ...submitted, state: "FINALIZED", lastRpcSourceSequence: 3, lastHeadLevel: 18, lastHeadBlockHash: "Bbcdefghijkmnprs", canonicalBlockLevel: 17, canonicalBlockHash: "Babcdefghijkmnpq" };
+    const finalized: AttemptObservationState = { ...submitted, state: "FINALIZED", lastRpcSourceSequence: 3, lastHeadLevel: 18, lastHeadBlockHash: "Bbcdefghijkmnprs", canonicalBlockLevel: 17, canonicalBlockHash: "Babcdefghijkmnpq", includedOperationIndex: 0, confirmations: 2 };
     expect(reduceOperationObservation(finalized, observation("REORGED", { sourceSequence: 4, headLevel: 19, headBlockHash: "Bbcdefghijkmnprt" }), RECEIPT_FINALITY_POLICY).disposition).toBe("FINALIZED_CONTRADICTION");
     expect(() => reduceOperationObservation(submitted, observation("INCLUDED", { chainId: "NetXdQprcVkpaWU" }), RECEIPT_FINALITY_POLICY)).toThrow(/identity/);
+  });
+  it("binds every later inclusion to the durable level, block, and operation index", () => {
+    const included = reduceOperationObservation(submitted, observation("INCLUDED"), RECEIPT_FINALITY_POLICY).next;
+    expect(reduceOperationObservation(included, observation("INCLUDED", { sourceSequence: 2, includedBlockHash: "B222222222222222", headBlockHash: "B222222222222222" }), RECEIPT_FINALITY_POLICY).disposition).toBe("ATTEMPT_CONTRADICTION");
+    expect(reduceOperationObservation(included, observation("INCLUDED", { sourceSequence: 2, operationIndex: 1 }), RECEIPT_FINALITY_POLICY).disposition).toBe("ATTEMPT_CONTRADICTION");
+    const finalized = reduceOperationObservation(included, observation("INCLUDED", { sourceSequence: 2, headLevel: 18, headBlockHash: "Bbcdefghijkmnprs" }), RECEIPT_FINALITY_POLICY).next;
+    expect(finalized).toMatchObject({ state: "FINALIZED", canonicalBlockHash: "Babcdefghijkmnpq", includedOperationIndex: 0, lastHeadLevel: 18, confirmations: 2 });
+    expect(reduceOperationObservation(finalized, observation("INCLUDED", { sourceSequence: 3, includedBlockHash: "B222222222222222", headBlockHash: "B222222222222222" }), RECEIPT_FINALITY_POLICY).disposition).toBe("FINALIZED_CONTRADICTION");
+    expect(reduceOperationObservation(finalized, observation("INCLUDED", { sourceSequence: 3, operationIndex: 1, headLevel: 18, headBlockHash: "Bbcdefghijkmnprs" }), RECEIPT_FINALITY_POLICY).disposition).toBe("FINALIZED_CONTRADICTION");
+  });
+  it("requires later proofs to continue the durable head and incidents finalized regression", () => {
+    const first = reduceOperationObservation(submitted, observation("INCLUDED"), RECEIPT_FINALITY_POLICY).next;
+    const finalized = reduceOperationObservation(first, observation("INCLUDED", { sourceSequence: 2, headLevel: 18, headBlockHash: "Bbcdefghijkmnprs" }), RECEIPT_FINALITY_POLICY).next;
+    expect(reduceOperationObservation(finalized, observation("INCLUDED", { sourceSequence: 3, headLevel: 17, headBlockHash: "Babcdefghijkmnpq" }), RECEIPT_FINALITY_POLICY).disposition).toBe("FINALIZED_CONTRADICTION");
+    expect(reduceOperationObservation(finalized, observation("INCLUDED", { sourceSequence: 3, headLevel: 19, headBlockHash: "Bbcdefghijkmnprt" }), RECEIPT_FINALITY_POLICY).disposition).toBe("FINALIZED_CONTRADICTION");
+    const continued = observation("INCLUDED", { sourceSequence: 3, headLevel: 19, headBlockHash: "Bbcdefghijkmnprt", canonicalChainProof: [
+      { level: 17, blockHash: "Babcdefghijkmnpq", predecessorHash: null },
+      { level: 18, blockHash: "Bbcdefghijkmnprs", predecessorHash: "Babcdefghijkmnpq" },
+      { level: 19, blockHash: "Bbcdefghijkmnprt", predecessorHash: "Bbcdefghijkmnprs" },
+    ] });
+    expect(reduceOperationObservation(finalized, continued, RECEIPT_FINALITY_POLICY)).toMatchObject({ disposition: "APPLY", transitions: [], next: { state: "FINALIZED", lastHeadLevel: 19, confirmations: 3 } });
   });
   it("records indexer evidence only as a hint and keeps source ordering independent", () => {
     const hint = reduceOperationObservation(submitted, observation("INCLUDED", { observer: "fake-indexer", canonicalChainProof: null, sourceSequence: 999 }), RECEIPT_FINALITY_POLICY);

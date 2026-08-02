@@ -112,6 +112,7 @@ export interface AttemptObservationState extends OperationIdentity {
   readonly lastHeadBlockHash: string | null;
   readonly canonicalBlockHash: string | null;
   readonly canonicalBlockLevel: number | null;
+  readonly includedOperationIndex: number | null;
   readonly confirmations: number;
 }
 
@@ -240,6 +241,21 @@ function sameIdentity(current: AttemptObservationState, observation: NormalizedO
     && current.deploymentManifestHash === observation.deploymentManifestHash;
 }
 
+function sameCanonicalInclusion(current: AttemptObservationState, observation: NormalizedOperationObservation): boolean {
+  return current.canonicalBlockLevel !== null && current.canonicalBlockHash !== null && current.includedOperationIndex !== null
+    && observation.includedLevel === current.canonicalBlockLevel
+    && observation.includedBlockHash === current.canonicalBlockHash
+    && observation.operationIndex === current.includedOperationIndex;
+}
+
+function proofContinuesDurableHead(current: AttemptObservationState, observation: NormalizedOperationObservation): boolean {
+  if (current.lastHeadLevel === null || current.lastHeadBlockHash === null || current.canonicalBlockLevel === null
+    || observation.headLevel < current.lastHeadLevel) return false;
+  const durableHeadOffset = current.lastHeadLevel - current.canonicalBlockLevel;
+  const durableHead = observation.canonicalChainProof?.[durableHeadOffset];
+  return durableHead?.level === current.lastHeadLevel && durableHead.blockHash === current.lastHeadBlockHash;
+}
+
 export function reduceOperationObservation(current: AttemptObservationState, input: unknown, policyId: string): ObservationDecision {
   const observation = normalizeOperationObservation(input);
   if (!sameIdentity(current, observation)) throw new Error("Operation observation identity does not match the durable attempt.");
@@ -249,9 +265,24 @@ export function reduceOperationObservation(current: AttemptObservationState, inp
   if (observation.observer === "fake-indexer") {
     return Object.freeze({ disposition: "HINT", observation, transitions: [], next: Object.freeze({ ...current, lastIndexerSourceSequence: observation.sourceSequence }) });
   }
+  if (current.state === "FINALIZED" && observation.disposition !== "INCLUDED") {
+    return Object.freeze({ disposition: "FINALIZED_CONTRADICTION", next: current, observation, transitions: [] });
+  }
+  if (observation.disposition === "INCLUDED" && ["INCLUDED", "CONFIRMED", "FINALIZED"].includes(current.state)) {
+    if (!sameCanonicalInclusion(current, observation)) {
+      return Object.freeze({ disposition: current.state === "FINALIZED" ? "FINALIZED_CONTRADICTION" : "ATTEMPT_CONTRADICTION",
+        next: current, observation, transitions: [] });
+    }
+    if (observation.headLevel >= (current.lastHeadLevel ?? 0) && !proofContinuesDurableHead(current, observation)) {
+      return Object.freeze({ disposition: current.state === "FINALIZED" ? "FINALIZED_CONTRADICTION" : "ATTEMPT_CONTRADICTION",
+        next: current, observation, transitions: [] });
+    }
+    if (current.state === "FINALIZED" && current.lastHeadLevel !== null && observation.headLevel < current.lastHeadLevel) {
+      return Object.freeze({ disposition: "FINALIZED_CONTRADICTION", next: current, observation, transitions: [] });
+    }
+  }
   if (current.lastHeadLevel !== null && observation.headLevel < current.lastHeadLevel) return Object.freeze({ disposition: "STALE", next: current, transitions: [] });
   if (current.lastHeadLevel === observation.headLevel && current.lastHeadBlockHash !== null && current.lastHeadBlockHash !== observation.headBlockHash) throw new Error("Operation observation history contradicts the durable head.");
-  if (current.state === "FINALIZED" && observation.disposition !== "INCLUDED") return Object.freeze({ disposition: "FINALIZED_CONTRADICTION", next: current, observation, transitions: [] });
   const base = { ...current, lastRpcSourceSequence: observation.sourceSequence, lastHeadLevel: observation.headLevel, lastHeadBlockHash: observation.headBlockHash };
   if (observation.disposition === "PENDING") {
     return Object.freeze({ disposition: "APPLY", observation, transitions: [], policyEvidence: null, next: Object.freeze(base) });
@@ -268,7 +299,8 @@ export function reduceOperationObservation(current: AttemptObservationState, inp
     if (policy.confirmed && from === "INCLUDED") { assertAttemptTransition(from, "CONFIRMED"); transitions.push("CONFIRMED"); from = "CONFIRMED"; }
     if (policy.finalized && from === "CONFIRMED") { assertAttemptTransition(from, "FINALIZED"); transitions.push("FINALIZED"); from = "FINALIZED"; }
     return Object.freeze({ disposition: "APPLY", observation, transitions: Object.freeze(transitions), policyEvidence: policy.evidence, next: Object.freeze({
-      ...base, state: from, canonicalBlockHash: observation.includedBlockHash, canonicalBlockLevel: observation.includedLevel, confirmations: policy.confirmations,
+      ...base, state: from, canonicalBlockHash: observation.includedBlockHash, canonicalBlockLevel: observation.includedLevel,
+      includedOperationIndex: observation.operationIndex, confirmations: policy.confirmations,
     }) });
   }
   const target = observation.disposition as "FAILED" | "DROPPED" | "REORGED";
@@ -287,6 +319,6 @@ export function reduceOperationObservation(current: AttemptObservationState, inp
   }
   assertAttemptTransition(current.state, target);
   return Object.freeze({ disposition: "APPLY", observation, transitions: Object.freeze([target]), policyEvidence: null, next: Object.freeze({
-    ...base, state: target, canonicalBlockHash: null, canonicalBlockLevel: null, confirmations: 0,
+    ...base, state: target, canonicalBlockHash: null, canonicalBlockLevel: null, includedOperationIndex: null, confirmations: 0,
   }) });
 }

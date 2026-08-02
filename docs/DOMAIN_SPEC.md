@@ -48,6 +48,13 @@ reorg, fail, or drop lifecycle state. Adapter-supplied confirmation
 counts or finalized booleans have no authority. When one observation reaches
 both boundaries, the ordered `CONFIRMED` and `FINALIZED` lifecycle facts commit
 atomically.
+Every later inclusion proof is bound to the attempt's immutable canonical
+inclusion tuple: level, block hash, and operation index. Before finality, tuple
+or ancestry drift becomes bounded contradiction evidence with no projection
+mutation. After finality, any tuple drift, head regression, or proof that does
+not contain the exact previously accepted head opens finality incident review.
+An accepted same-tuple proof atomically persists its RPC sequence, canonical
+head, derived confirmations, and policy evidence.
 
 An old attempt marked `REPLACED` records the replacement hash; a new attempt
 starts at `SUBMITTED` under the same intent. Contract uniqueness ensures at most

@@ -161,12 +161,18 @@ CREATE TABLE samurai_persistence.operation_attempts (
     (state = 'SUBMITTED' AND canonical_block_hash IS NULL AND confirmations = 0 AND policy_evidence IS NULL
       AND orphaned_block_hash IS NULL AND failure_code IS NULL AND included_at IS NULL AND confirmed_at IS NULL AND finalized_at IS NULL)
     OR (state = 'INCLUDED' AND canonical_block_hash IS NOT NULL AND confirmations BETWEEN 1 AND 1
+      AND last_rpc_source_sequence IS NOT NULL AND last_head_level IS NOT NULL
+      AND confirmations = last_head_level - canonical_block_level + 1
       AND policy_evidence IS NULL AND orphaned_block_hash IS NULL AND failure_code IS NULL
       AND included_at IS NOT NULL AND confirmed_at IS NULL AND finalized_at IS NULL)
-    OR (state = 'CONFIRMED' AND canonical_block_hash IS NOT NULL AND confirmations >= 2
+    OR (state = 'CONFIRMED' AND canonical_block_hash IS NOT NULL AND confirmations BETWEEN 2 AND 64
+      AND last_rpc_source_sequence IS NOT NULL AND last_head_level IS NOT NULL
+      AND confirmations = last_head_level - canonical_block_level + 1
       AND policy_evidence IS NOT NULL AND orphaned_block_hash IS NULL AND failure_code IS NULL
       AND included_at IS NOT NULL AND confirmed_at IS NOT NULL AND finalized_at IS NULL)
-    OR (state = 'FINALIZED' AND canonical_block_hash IS NOT NULL AND confirmations >= 2
+    OR (state = 'FINALIZED' AND canonical_block_hash IS NOT NULL AND confirmations BETWEEN 2 AND 64
+      AND last_rpc_source_sequence IS NOT NULL AND last_head_level IS NOT NULL
+      AND confirmations = last_head_level - canonical_block_level + 1
       AND policy_evidence IS NOT NULL AND orphaned_block_hash IS NULL AND failure_code IS NULL
       AND included_at IS NOT NULL AND confirmed_at IS NOT NULL AND finalized_at IS NOT NULL)
     OR (state = 'REORGED' AND canonical_block_hash IS NULL AND confirmations = 0 AND policy_evidence IS NULL

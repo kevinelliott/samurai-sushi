@@ -57,8 +57,8 @@ const MIGRATION_MANIFEST = [
   },
   {
     name: "0006_receipt_lifecycle_authority.sql",
-    checksumHex: "653532f002fdd3282552ea7c630835dbaef008e339a008b3702f71fb6179eff6",
-    catalogChecksumHex: "1fbc8ff02999f6f88c5b14cef7231733f9ffa9c309be66a69ff09f9233df471d",
+    checksumHex: "b9bfc74074a477beef7026172665306bade5024cbec630d309fd357be93f5901",
+    catalogChecksumHex: "481808417cb340ac79690eeb5b9a162ee3f509e414f80e66490c596fdfae4584",
   },
 ] as const;
 
