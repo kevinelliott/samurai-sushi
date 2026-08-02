@@ -31,4 +31,11 @@ describe("receipt Localnet lifecycle command boundary", () => {
     expect(source).toContain("originationOperation");
     expect(source).toContain("acceptedOperation");
   });
+
+  it("passes confirmation waiting as an Octez global option before address-bearing commands", () => {
+    expect(source).toContain('"--wait", "2", "originate", "contract"');
+    expect(source).toContain('"--wait", "2", "transfer", "0", "from", "alice"');
+    expect(source).not.toContain('"--burn-cap", "6", "--wait"');
+    expect(source).not.toContain('"--burn-cap", "1", "--wait"');
+  });
 });

@@ -120,8 +120,15 @@ const ready = JSON.parse(requireSuccess("node", ["scripts/consumers.mjs", "ready
   namespace?: { generation?: unknown; manifests?: { fresh?: unknown; stale?: unknown } };
 };
 const generation = ready.namespace?.generation;
-if (!Number.isSafeInteger(generation) || ready.namespace?.manifests?.fresh !== 1 || ready.namespace.manifests.stale !== 0) {
-  throw new Error("Samurai consumer readiness did not return one exact current-generation manifest.");
+const freshManifests = ready.namespace?.manifests?.fresh;
+const staleManifests = ready.namespace?.manifests?.stale;
+if (
+  !Number.isSafeInteger(generation)
+  || !Number.isSafeInteger(freshManifests)
+  || (freshManifests as number) < 1
+  || staleManifests !== 0
+) {
+  throw new Error("Samurai consumer readiness did not return exclusively fresh current-generation manifest evidence.");
 }
 const requestedGeneration = Number(process.env.SAMURAI_RECEIPT_LOCALNET_GENERATION);
 if (!Number.isSafeInteger(requestedGeneration) || requestedGeneration !== generation) {
@@ -145,8 +152,8 @@ const containerArtifact = `/tmp/${alias}.tz`;
 requireSuccess("docker", ["cp", resolve(root, "contracts/receipt/build/samurai_sushi_receipt_v1.tz"), `${container}:${containerArtifact}`]);
 const initialStorage = readFileSync(resolve(root, "contracts/receipt/build/samurai_sushi_receipt_v1.storage.tz"), "utf8").trim();
 const originationOutput = client([
-  "originate", "contract", alias, "transferring", "0", "from", "alice", "running", containerArtifact,
-  "--init", initialStorage, "--burn-cap", "6", "--wait", "2",
+  "--wait", "2", "originate", "contract", alias, "transferring", "0", "from", "alice", "running", containerArtifact,
+  "--init", initialStorage, "--burn-cap", "6",
 ]);
 const address = contractAddress(originationOutput);
 const originationOperation = operationHash(originationOutput, "Origination");
@@ -177,8 +184,8 @@ const payloadHash = hashReceiptPayload(payload);
 const permit: ReceiptPermitV1 = { payload, payloadHash, signature: sign(payloadHash) };
 const argument = receiptPermitMichelsonArgument(permit);
 const invocationArgs = [
-  "transfer", "0", "from", "alice", "to", address, "--entrypoint", "submit_receipt", "--arg", argument,
-  "--burn-cap", "1", "--wait", "2",
+  "--wait", "2", "transfer", "0", "from", "alice", "to", address, "--entrypoint", "submit_receipt", "--arg", argument,
+  "--burn-cap", "1",
 ];
 const acceptedOutput = client(invocationArgs);
 const acceptedOperation = operationHash(acceptedOutput, "Accepted receipt invocation");
