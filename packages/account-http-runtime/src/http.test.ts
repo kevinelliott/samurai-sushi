@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import { ACCOUNT_CLAIM_REAUTH_REQUIRED, ACCOUNT_PLAYER_DELETE_PUBLIC_FAILURE } from "@samurai-sushi/persistence";
+import { createInitialEveningServiceCheckpoint } from "@samurai-sushi/domain/evening-service";
 import { ACCOUNT_COOKIE_NAMES } from "./cookies";
 import { ACCOUNT_ROUTE_PATHS, MAX_JSON_BODY_BYTES, type AccountRouteId } from "./contract";
 import type { AccountRuntimeConfig } from "./config";
@@ -37,6 +38,7 @@ function request(operation: AccountRouteId, body: string, authorityCookies = "")
 function services(overrides: {
   readonly guests?: Readonly<Record<string, unknown>>;
   readonly accounts?: Readonly<Record<string, unknown>>;
+  readonly evening?: Readonly<Record<string, unknown>>;
 } = {}): AccountHttpServices {
   const guests = {
     issue: vi.fn(async () => ({
@@ -66,7 +68,21 @@ function services(overrides: {
     deletePlayerWithWalletProof: vi.fn(async () => undefined),
     ...overrides.accounts,
   };
-  return { guests, accounts } as unknown as AccountHttpServices;
+  const checkpoint = createInitialEveningServiceCheckpoint();
+  const evening = {
+    query: vi.fn(async () => ({ checkpoint, revision: 0, contentVersion: checkpoint.contentVersion })),
+    execute: vi.fn(async () => ({
+      disposition: "committed",
+      checkpointAdvanced: false,
+      responseSchemaVersion: 1,
+      response: { accepted: false, checkpoint, feedbackRef: "cue.start.invalid", correctiveCueId: "cue.start.invalid",
+        settledNow: false, unlockedNow: [], outcomeClass: null },
+      resultHash: `sha256:${"0".repeat(64)}`,
+      committedRevision: 0,
+    })),
+    ...overrides.evening,
+  };
+  return { guests, accounts, evening } as unknown as AccountHttpServices;
 }
 
 const createIntent = {
@@ -224,6 +240,39 @@ describe("account HTTP boundary", () => {
     expect(rejected.headers.has("set-cookie")).toBe(false);
   });
 
+  it("derives the service subject only from the admitted cookie and returns pinned projections", async () => {
+    const execute = vi.fn(services().evening!.execute.bind(services().evening));
+    const runtime = services({ evening: { execute } });
+    const body = JSON.stringify({ idempotencyKey: randomUUID(), expectedRevision: 0,
+      commandName: "service.start", payload: {} });
+    const guest = await handleAccountHttpRequest("service.command",
+      request("service.command", body, cookie("guest", "claim")), runtime, config);
+    expect(guest.status).toBe(200);
+    expect(execute).toHaveBeenCalledWith({ kind: "guest", resumeSecret: guestSecret }, expect.objectContaining({ commandName: "service.start" }));
+    const published = await guest.text();
+    expect(published).toContain('"currentPromptId":"prompt.service.start"');
+    expect(published).toContain('"disposition":"committed"');
+    expect(published).not.toMatch(new RegExp(`${guestSecret}|${claimSecret}|guestId|playerId|subjectKind|resultHash`));
+
+    const playerRuntime = services();
+    const player = await handleAccountHttpRequest("service.query",
+      request("service.query", "{}", cookie("player")), playerRuntime, config);
+    expect(player.status).toBe(200);
+    expect(playerRuntime.evening!.query).toHaveBeenCalledWith({ kind: "player", sessionSecret: playerSecret });
+  });
+
+  it.each(["subjectKind", "guestId", "playerId", "account", "publicKey", "signature", "claimId", "chainId", "origin", "clock", "rngSeed", "keyVersion"])(
+    "rejects forbidden gameplay authority field %s before repository work",
+    async (field) => {
+      const runtime = services();
+      const result = await handleAccountHttpRequest("service.command", request("service.command", JSON.stringify({
+        idempotencyKey: randomUUID(), expectedRevision: 0, commandName: "service.start", payload: {}, [field]: "hostile",
+      }), cookie("guest", "claim")), runtime, config);
+      expect(result.status).toBe(400);
+      expect(runtime.evening!.execute).not.toHaveBeenCalled();
+    },
+  );
+
   it("pins the complete cookie-authority inventory for every operation", async () => {
     const id = randomUUID();
     const bodies: Readonly<Record<AccountRouteId, string>> = {
@@ -241,6 +290,8 @@ describe("account HTTP boundary", () => {
       "deletion.challenge": JSON.stringify({ deletionIntent: {}, account: "tz1fake" }),
       "deletion.submit": JSON.stringify({ deletionIntent: {}, challengeId: id,
         proof: { challenge: {}, publicKey: "key", signature: "signature" } }),
+      "service.query": "{}",
+      "service.command": JSON.stringify({ idempotencyKey: id, expectedRevision: 0, commandName: "service.start", payload: {} }),
     };
     const allowed: Readonly<Record<AccountRouteId, readonly string[]>> = {
       "cookies.reset": ["", "guest", "claim", "player", "claim,guest", "guest,player", "claim,player", "claim,guest,player"],
@@ -252,6 +303,8 @@ describe("account HTTP boundary", () => {
       "recovery.submit": ["", "claim", "guest", "claim,guest"],
       "claim.delivery": ["player"], "player.authenticate": ["player"], "player.rotate": ["player"], "player.logout": ["player"],
       "deletion.challenge": ["", "player"], "deletion.submit": ["", "player"],
+      "service.query": ["guest", "claim,guest", "player"],
+      "service.command": ["guest", "claim,guest", "player"],
     };
     const combinations = [[], ["guest"], ["claim"], ["player"], ["guest", "claim"],
       ["guest", "player"], ["claim", "player"], ["guest", "claim", "player"]] as const;

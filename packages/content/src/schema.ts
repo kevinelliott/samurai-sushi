@@ -40,6 +40,7 @@ const ROW_KEYS = {
   components: [
     ...ENTITY_FIELDS,
     "ingredientRef",
+    "preparationInputs",
     "cutStyleRef",
     "treatment",
     "rawNotice",
@@ -234,7 +235,7 @@ function decodeRows(bundle: UnknownRecord, key: keyof typeof ROW_KEYS, issues: C
     const item = record(entry, path, issues);
     if (!item) return;
     const allowed = ROW_KEYS[key];
-    const optional = key === "ingredients" ? ["speciesRef", "productKind"] : key === "components" ? ["cutStyleRef"] : [];
+    const optional = key === "ingredients" ? ["speciesRef", "productKind"] : key === "components" ? ["cutStyleRef", "preparationInputs"] : [];
     const required = allowed.filter((field) => !optional.includes(field));
     exactKeys(item, allowed, required, path, issues);
     baseEntity(item, path, issues);
@@ -266,6 +267,17 @@ function decodeRows(bundle: UnknownRecord, key: keyof typeof ROW_KEYS, issues: C
         break;
       case "components":
         ref(item.ingredientRef, `${path}.ingredientRef`, issues);
+        if (item.preparationInputs !== undefined) {
+          if (!Array.isArray(item.preparationInputs)) issue(issues, `${path}.preparationInputs`, "Expected an array.");
+          else item.preparationInputs.forEach((input, inputIndex) => {
+            const inputPath = `${path}.preparationInputs[${inputIndex}]`;
+            const inputRecord = record(input, inputPath, issues);
+            if (!inputRecord) return;
+            exactKeys(inputRecord, ["ingredientRef", "stationStep"], ["ingredientRef", "stationStep"], inputPath, issues);
+            ref(inputRecord.ingredientRef, `${inputPath}.ingredientRef`, issues);
+            stationSteps([inputRecord.stationStep], `${inputPath}.stationStep`, issues);
+          });
+        }
         if (item.cutStyleRef !== undefined) ref(item.cutStyleRef, `${path}.cutStyleRef`, issues);
         enumValue(item.treatment, ["raw", "cooked", "cured", "smoked", "surface-seared", "seasoned", "plant"], `${path}.treatment`, issues);
         enumValue(item.rawNotice, ["none", "required"], `${path}.rawNotice`, issues);

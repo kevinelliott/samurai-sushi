@@ -5,6 +5,7 @@ import { resolve } from "node:path";
 import { generateKeyPairSync, randomUUID, sign as signMessage } from "node:crypto";
 import { blake2b } from "@noble/hashes/blake2b";
 import { b58Encode, getPkhfromPk, PrefixV2 } from "@taquito/utils";
+import { compiledFirstEveningService } from "@samurai-sushi/content";
 import { walletSigningBytes } from "@samurai-sushi/domain/claim-protocol";
 import { Pool, type PoolClient, type QueryResult as PgQueryResult } from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -274,9 +275,25 @@ describe("built account HTTP boundary", () => {
     const guest = cookieValue(issued.rawHeaders, "__Host-samurai-guest");
     const capability = cookieValue(issued.rawHeaders, "__Host-samurai-guest-claim");
     const guestCookies = cookiePair(guest, capability);
+    const initialService = await requestJson(portOf(server), "/api/account/service", "{}", guestCookies);
+    expect(initialService.status, initialService.body).toBe(200);
+    expect(JSON.parse(initialService.body)).toMatchObject({ disposition: "query", checkpoint: { phase: "IDLE", revision: 0 } });
+    let guestServiceBody = "";
+    for (const entry of compiledFirstEveningService.goldenReplay.slice(1, 3)) {
+      const command = (entry as { readonly command: { readonly idempotencyKey: string; readonly expectedRevision: number;
+        readonly commandName: string; readonly payload: object } }).command;
+      guestServiceBody = JSON.stringify({ idempotencyKey: command.idempotencyKey, expectedRevision: command.expectedRevision,
+        commandName: command.commandName, payload: command.payload });
+      const serviceCommand = await requestJson(portOf(server), "/api/account/service/command", guestServiceBody, guestCookies);
+      expect(serviceCommand.status, serviceCommand.body).toBe(200);
+      expect(serviceCommand.body).not.toMatch(/guestId|playerId|subjectKind|resumeSecret|sessionSecret/);
+    }
+    const beforeClaimService = await requestJson(portOf(server), "/api/account/service", "{}", guestCookies);
+    const beforeClaimCheckpoint = (JSON.parse(beforeClaimService.body) as { readonly checkpoint: unknown }).checkpoint;
+    expect(beforeClaimCheckpoint).toMatchObject({ phase: "OPEN", revision: 2, riceBeatIndex: 1 });
     const intent = {
-      claimId: randomUUID(), createPlayer: true, guestRevision: 0, idempotencyKey: randomUUID(),
-      contentVersion: "v1", cosmeticSelections: {},
+      claimId: randomUUID(), createPlayer: true, guestRevision: 2, idempotencyKey: randomUUID(),
+      contentVersion: compiledFirstEveningService.contentVersion, cosmeticSelections: {},
     } as const;
     const challenged = await requestJson(portOf(server), "/api/account/claim/challenge",
       JSON.stringify({ intent, account: wallet.account }), guestCookies);
@@ -310,6 +327,42 @@ describe("built account HTTP boundary", () => {
     const acknowledgement = JSON.stringify(claimResult);
     expect((await requestJson(portOf(server), "/api/account/claim/delivery", acknowledgement, playerCookie)).status).toBe(200);
     expect((await requestJson(portOf(server), "/api/account/player/session", "{}", playerCookie)).status).toBe(200);
+    const afterClaimService = await requestJson(portOf(server), "/api/account/service", "{}", playerCookie);
+    expect(afterClaimService.status, afterClaimService.body).toBe(200);
+    expect((JSON.parse(afterClaimService.body) as { readonly checkpoint: unknown }).checkpoint).toEqual(beforeClaimCheckpoint);
+    let finalCommandBody = "";
+    for (const entry of compiledFirstEveningService.goldenReplay.slice(3)) {
+      const command = (entry as { readonly command: { readonly idempotencyKey: string; readonly expectedRevision: number;
+        readonly commandName: string; readonly payload: object } }).command;
+      finalCommandBody = JSON.stringify({ idempotencyKey: command.idempotencyKey, expectedRevision: command.expectedRevision,
+        commandName: command.commandName, payload: command.payload });
+      const serviceCommand = await requestJson(portOf(server), "/api/account/service/command", finalCommandBody, playerCookie);
+      expect(serviceCommand.status, `${command.commandName}: ${serviceCommand.body}`).toBe(200);
+      expect(JSON.parse(serviceCommand.body)).toMatchObject({ disposition: "committed", accepted: true });
+    }
+    const settledService = await requestJson(portOf(server), "/api/account/service", "{}", playerCookie);
+    expect(JSON.parse(settledService.body)).toMatchObject({ checkpoint: {
+      phase: "SETTLED", unlocks: ["atlantic-salmon-sashimi@1"], revision: 29,
+    }, projection: { disposition: "query", ledgerRows: [{ orderId: "ceramicist-kappa" },
+      { orderId: "fishmonger-tamago" }, { orderId: "courier-salmon" }] } });
+    const serviceMatrixBeforeReplay = (await admin.query<{ events: string; outbox: string; receipts: string }>(`SELECT
+      (SELECT count(*)::text FROM samurai_persistence.domain_events WHERE player_id=$1 AND event_type LIKE 'service.%') AS events,
+      (SELECT count(*)::text FROM samurai_persistence.outbox_deliveries o JOIN samurai_persistence.domain_events e ON e.event_id=o.event_id
+        WHERE e.player_id=$1 AND e.event_type LIKE 'service.%') AS outbox,
+      (SELECT count(*)::text FROM samurai_persistence.command_receipts WHERE player_id=$1 AND command_name LIKE 'service.%') AS receipts`,
+    [claimPayload.playerId])).rows[0]!;
+    expect(serviceMatrixBeforeReplay).toEqual({ events: "29", outbox: "29", receipts: "29" });
+    const exactSettlementReplay = await requestJson(portOf(server), "/api/account/service/command", finalCommandBody, playerCookie);
+    expect(JSON.parse(exactSettlementReplay.body)).toMatchObject({ disposition: "replayed", accepted: true,
+      checkpoint: { phase: "SETTLED", unlocks: ["atlantic-salmon-sashimi@1"] },
+      projection: { announceCeremony: false } });
+    const serviceMatrixAfterReplay = (await admin.query<{ events: string; outbox: string; receipts: string }>(`SELECT
+      (SELECT count(*)::text FROM samurai_persistence.domain_events WHERE player_id=$1 AND event_type LIKE 'service.%') AS events,
+      (SELECT count(*)::text FROM samurai_persistence.outbox_deliveries o JOIN samurai_persistence.domain_events e ON e.event_id=o.event_id
+        WHERE e.player_id=$1 AND e.event_type LIKE 'service.%') AS outbox,
+      (SELECT count(*)::text FROM samurai_persistence.command_receipts WHERE player_id=$1 AND command_name LIKE 'service.%') AS receipts`,
+    [claimPayload.playerId])).rows[0]!;
+    expect(serviceMatrixAfterReplay).toEqual(serviceMatrixBeforeReplay);
     const rotated = await requestJson(portOf(server), "/api/account/player/session/rotate", "{}", playerCookie);
     expect(rotated.status).toBe(200);
     const rotatedSecret = cookieValue(rotated.rawHeaders, "__Host-samurai-player");
@@ -331,7 +384,7 @@ describe("built account HTTP boundary", () => {
       cookieValue(expiredIssue.rawHeaders, "__Host-samurai-guest"),
       cookieValue(expiredIssue.rawHeaders, "__Host-samurai-guest-claim"),
     );
-    const expiredIntent = { ...intent, claimId: randomUUID(), idempotencyKey: randomUUID() };
+    const expiredIntent = { ...intent, claimId: randomUUID(), idempotencyKey: randomUUID(), guestRevision: 0, contentVersion: "v1" };
     const expiring = await requestJson(portOf(server), "/api/account/claim/challenge",
       JSON.stringify({ intent: expiredIntent, account: expiredWallet.account }), expiredCookies);
     expect(expiring.status).toBe(200);
@@ -352,7 +405,7 @@ describe("built account HTTP boundary", () => {
     const lostGuest = cookieValue(lostGuestIssue.rawHeaders, "__Host-samurai-guest");
     const lostCapability = cookieValue(lostGuestIssue.rawHeaders, "__Host-samurai-guest-claim");
     const lostGuestCookies = cookiePair(lostGuest, lostCapability);
-    const lostIntent = { ...intent, claimId: randomUUID(), idempotencyKey: randomUUID() };
+    const lostIntent = { ...intent, claimId: randomUUID(), idempotencyKey: randomUUID(), guestRevision: 0, contentVersion: "v1" };
     const lostChallengeResult = await requestJson(portOf(server), "/api/account/claim/challenge",
       JSON.stringify({ intent: lostIntent, account: lostWallet.account }), lostGuestCookies);
     expect(lostChallengeResult.status).toBe(200);
@@ -533,9 +586,10 @@ describe("built account HTTP boundary", () => {
     const staticRoot = resolve(appRoot, ".next/static");
     const files = (await readdir(staticRoot, { recursive: true })).filter((file) => file.endsWith(".js"));
     const source = (await Promise.all(files.map((file) => readFile(resolve(staticRoot, file), "utf8")))).join("\n");
-    for (const marker of ["account-http-runtime", "@samurai-sushi/persistence", "node:crypto", "pg-pool",
-      "@taquito", "@noble", "SAMURAI_DATABASE_URL", "SAMURAI_HMAC_RESUME_KEY", "x-samurai-raw-header-guard",
-      "postgresql://"]) {
+    for (const marker of ["account-http-runtime", "@samurai-sushi/persistence", "service-authority",
+      "@samurai-sushi/content", "claim-protocol", "node:crypto", "pg-pool", "@taquito", "@noble",
+      "SAMURAI_DATABASE_URL", "SAMURAI_HMAC_RESUME_KEY", "SAMURAI_HMAC_GUEST_CLAIM_KEY",
+      "x-samurai-raw-header-guard", "postgresql://", "tz1", "edpk"]) {
       expect(source).not.toContain(marker);
     }
   });

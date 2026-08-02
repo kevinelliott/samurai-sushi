@@ -7,9 +7,10 @@ record a non-financial service keepsake on Tezos. Development and ordinary
 testing use the shared loopback-only Localnet; Shadownet is reserved for an
 explicit final rehearsal of the exact candidate.
 
-> **Phase 0 status:** the repository now contains a walletless counter shell, a
-> fail-closed network-environment spine, and a pure versioned content compiler.
-> It is not the playable three-order service. No deployed contract, compatible
+> **Phase 1 authority status:** the repository now contains the walletless
+> first-evening content, pure reducer/projector, PostgreSQL command authority,
+> and strict server HTTP query/command boundary. It does not yet contain the
+> browser gameplay interface. No deployed contract, compatible
 > Dos Esposas asset, DER utility, mainnet path, cultural approval, or public
 > availability is claimed.
 
@@ -43,6 +44,7 @@ reskin and does not inherit Dos Esposas assets or token behavior by name.
 - [Application stack and network authority ADR](docs/ADR/0001_APPLICATION_STACK_AND_NETWORK_AUTHORITY.md)
 - [Versioned content compiler ADR](docs/ADR/0002_VERSIONED_CONTENT_COMPILER.md)
 - [Guest persistence and account authority ADR](docs/ADR/0003_GUEST_PERSISTENCE_AND_ACCOUNT_AUTHORITY.md)
+- [First-evening service authority ADR](docs/ADR/0004_FIRST_EVENING_SERVICE_AUTHORITY.md)
 
 ## MVP in one line
 
@@ -68,7 +70,7 @@ Localnet mode must stop startup. Shadownet commands are explicit final-test
 commands and do not replace local development. See the
 [complete lifecycle](docs/TEZOS_LOCALNET_LIFECYCLE.md).
 
-## Phase 0 commands
+## Verification commands
 
 Install dependencies with Node 22+ and pnpm 10:
 
@@ -85,6 +87,16 @@ seasonality at activation, and emits byte-stable historical recipe snapshots
 without making archived playback depend on the host's newer tzdb. Its
 salmon-sashimi bundle is development fixture data with synthetic review
 references; it is not production culinary or cultural approval.
+
+The Phase 1 service extension compiles a complete versioned/hash-bound
+first-service `ContentBundle`, pins the existing salmon-sashimi unlock graph,
+art requirements, projection references, and
+happy/corrective/abandonment/terminal replay bytes.
+`@samurai-sushi/domain` owns the time-independent reducer and projector.
+PostgreSQL owns guest/player revisions, receipts, events, outbox rows, and
+atomic guest-to-player continuation. The two attested service routes expose
+canonical query and command results without accepting subject, wallet, clock,
+randomness, or key authority from JSON.
 
 Ordinary `dev`, `build`, `start`, and `test:integration` commands first verify
 the exact shared runtime revision in `.tezos-runtime.json`, require its worktree

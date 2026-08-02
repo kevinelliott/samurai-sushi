@@ -9,5 +9,8 @@
   "scripts": {
     "test": "vitest run --root ../.. packages/content/src",
     "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@samurai-sushi/domain": "workspace:*"
   }
 }

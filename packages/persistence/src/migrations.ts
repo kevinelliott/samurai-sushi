@@ -45,6 +45,11 @@ const MIGRATION_MANIFEST = [
     checksumHex: "f11f036d52b1658fe4b60151ee13aef6a3ff3c95efe56911c0f4ba1c90e43d09",
     catalogChecksumHex: "5fd91438ef6841724374b398e63481de60cd8b8698d72c31594469a1ecc21c92",
   },
+  {
+    name: "0004_evening_service_authority.sql",
+    checksumHex: "54e797f10f356aa72a2761fcb7ec4f896720f7014af06573f88dbe81e8b07e1a",
+    catalogChecksumHex: "a0de5c3593e07d08da13b4836560ae1cc4c2a7c067cb4954babccf61f0a4ce39",
+  },
 ] as const;
 
 type MigrationTextReader = (name: string) => Promise<string>;
@@ -251,6 +256,11 @@ async function catalogChecksum(client: SqlClient): Promise<Uint8Array> {
     SELECT kind, identity, definition FROM catalog_rows ORDER BY kind, identity, definition
   `);
   return createHash("sha256").update(JSON.stringify(result.rows)).digest();
+}
+
+/** Read-only migration attestation helper for disposable PostgreSQL tests. */
+export async function persistenceCatalogChecksumForTests(client: SqlClient): Promise<Uint8Array> {
+  return catalogChecksum(client);
 }
 
 async function applyMigrationsWithReader(pool: SqlPool, readMigration: MigrationTextReader): Promise<void> {

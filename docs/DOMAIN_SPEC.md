@@ -111,6 +111,24 @@ rechecked”; `DROPPED/FAILED/REJECTED` state that no receipt was recorded.
     closed.
 24. Updating content cannot alter a historical order's component identities,
     allergen/raw profile, recovery, art, output, or content hash.
+25. A first-evening checkpoint has exactly one nonnegative safe-integer
+    revision and one valid phase/order/component shape; no client or database
+    clock, random input, wallet, RPC, indexer, bearer, or key metadata may alter
+    a reducer decision.
+26. Accepted service commands advance revision by exactly one. Corrective
+    decisions preserve byte-identical checkpoint and revision while remaining
+    exactly replayable through their command receipt.
+27. Component accounting conserves `total = available + placed + served +
+    discarded` at every representable checkpoint. Service/order phases never
+    move backward.
+28. `SETTLED` is reachable only after the three authored orders are served in
+    order, ledger close, and one allowed restoration. Its salmon-sashimi unlock
+    is one idempotent set member committed with the settlement checkpoint,
+    event, receipt, and outbox write; `ABANDONED` cannot contain it.
+29. A service command identity is scoped by server-resolved subject kind,
+    subject ID, and idempotency key. Exact retry precedes revision rejection;
+    any changed command name, revision, content version, or canonical payload
+    rejects without mutation.
 
 ## 4. Stable failure codes
 

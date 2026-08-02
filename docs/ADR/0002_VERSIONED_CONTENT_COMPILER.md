@@ -1,6 +1,6 @@
 # ADR 0002: Versioned Content Compiler
 
-- Status: adopted for Phase 0
+- Status: adopted and extended for Phase 1
 - Date: 2026-07-31
 - Scope: authored sushi content before persistence or asset interoperability
 
@@ -66,5 +66,15 @@ come from closed enums so runtime code cannot silently interpret new prose.
   the immediate post-service salmon-sashimi unlock schema only.
 - Pack compilation is all-or-nothing and returns a deeply frozen result.
 - New content versions cannot reinterpret historical orders.
+- The first-evening extension compiles a complete schema-v1 `ContentBundle`
+  for every ingredient, component, family, dish, and recipe, reuses the exact
+  salmon species/product row, binds the sashimi unlock to the existing compiled
+  salmon species/cut/raw/allergen/dish/recipe graph, and pins separate literal
+  hashes for content, art, service, happy, corrective, abandonment, and
+  terminal replay bytes.
+- The projection manifest is the only authority for prompts, choices, guest and
+  dish labels, outcome, feedback, story consequence, presentation,
+  restoration, and unlock references. Browser code may not derive copy or game
+  rules from enum spelling.
 - Cultural approval, live network readiness, and onchain manifests remain
   separate evidence categories.

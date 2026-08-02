@@ -7,8 +7,13 @@ import {
   ACCOUNT_PLAYER_SESSION_ROTATION_DEFERRED,
   GuestRotationDeferredError,
   type AccountClaimService,
+  type EveningServiceAuthority,
   type GuestSessionService,
+  type ServiceSubjectCredential,
 } from "@samurai-sushi/persistence";
+import { compiledFirstEveningService } from "@samurai-sushi/content";
+import type { JsonObject } from "@samurai-sushi/domain";
+import { projectEveningService } from "@samurai-sushi/domain/evening-service";
 import { ACCOUNT_COOKIE_NAMES, clearAccountCookie, CookieRejectedError, parseAccountCookies, setAccountCookie } from "./cookies";
 import {
   ACCOUNT_ROUTE_PATHS,
@@ -23,6 +28,7 @@ import { BodyTooLargeError, parseStrictJson, plainObject, StrictJsonError, stric
 export interface AccountHttpServices {
   readonly guests: GuestSessionService;
   readonly accounts: AccountClaimService;
+  readonly evening: EveningServiceAuthority;
 }
 
 export interface AccountHttpLogEvent {
@@ -170,8 +176,29 @@ function assertAuthorityCookieInventory(
     "player.logout": ["player"],
     "deletion.challenge": ["", "player"],
     "deletion.submit": ["", "player"],
+    "service.query": ["guest", "claim,guest", "player"],
+    "service.command": ["guest", "claim,guest", "player"],
   };
   if (!allowed[operation].includes(key)) throw new StrictJsonError();
+}
+
+function serviceCredential(cookies: ReadonlyMap<string, string>): ServiceSubjectCredential {
+  const guest = cookies.get(ACCOUNT_COOKIE_NAMES.guest);
+  const player = cookies.get(ACCOUNT_COOKIE_NAMES.player);
+  if (guest && !player) return { kind: "guest", resumeSecret: guest };
+  if (player && !guest && !cookies.has(ACCOUNT_COOKIE_NAMES.claim)) return { kind: "player", sessionSecret: player };
+  throw new StrictJsonError();
+}
+
+function serviceProjection(
+  checkpoint: unknown,
+  disposition: "query" | "committed" | "replayed",
+  correctiveCueId: string | null,
+): Readonly<Record<string, unknown>> {
+  return projectEveningService(checkpoint, compiledFirstEveningService.projectionManifest, {
+    disposition,
+    correctiveCueId,
+  }) as unknown as Readonly<Record<string, unknown>>;
 }
 
 function assertRequestAuthority(request: Request, operation: AccountRouteId, config: AccountRuntimeConfig): void {
@@ -345,6 +372,34 @@ export async function handleAccountHttpRequest(
         outgoing = [clearAccountCookie("player")];
         break;
       }
+      case "service.query": {
+        exactEmpty(body);
+        const queried = await services.evening.query(serviceCredential(cookies));
+        payload = {
+          checkpoint: queried.checkpoint,
+          projection: serviceProjection(queried.checkpoint, "query", null),
+          disposition: "query",
+        };
+        break;
+      }
+      case "service.command": {
+        const input = strictObject(body, ["commandName", "expectedRevision", "idempotencyKey", "payload"]);
+        const executed = await services.evening.execute(serviceCredential(cookies), {
+          commandName: text(input.commandName),
+          expectedRevision: safeInteger(input.expectedRevision),
+          idempotencyKey: text(input.idempotencyKey),
+          payload: plainObject(input.payload) as JsonObject,
+        });
+        payload = {
+          checkpoint: executed.response.checkpoint,
+          projection: serviceProjection(executed.response.checkpoint, executed.disposition, executed.response.correctiveCueId),
+          disposition: executed.disposition,
+          accepted: executed.response.accepted,
+          feedbackRef: executed.response.feedbackRef,
+          committedRevision: executed.committedRevision,
+        };
+        break;
+      }
     }
     emit(logger, { event: "account_http_completed", operation, resultCode: "OK" });
     return response(200, payload, outgoing);
@@ -358,7 +413,9 @@ export async function handleAccountHttpRequest(
     if (error instanceof GuestRotationDeferredError) {
       return failure(operation, logger, { status: 409, body: { code: "GUEST_ROTATION_DEFERRED", message: "Guest rotation is temporarily deferred." } });
     }
-    const category = operation.startsWith("guest.") ? PUBLIC_HTTP_FAILURES.guest : PUBLIC_HTTP_FAILURES.request;
+    const category = operation.startsWith("guest.")
+      ? PUBLIC_HTTP_FAILURES.guest
+      : operation.startsWith("service.") ? PUBLIC_HTTP_FAILURES.service : PUBLIC_HTTP_FAILURES.request;
     return failure(operation, logger, category);
   }
 }

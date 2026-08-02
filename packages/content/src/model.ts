@@ -90,6 +90,10 @@ export type Treatment = "raw" | "cooked" | "cured" | "smoked" | "surface-seared"
 
 export interface PreparedComponent extends VersionedEntity {
   readonly ingredientRef: VersionedRef;
+  readonly preparationInputs?: readonly {
+    readonly ingredientRef: VersionedRef;
+    readonly stationStep: StationStep;
+  }[];
   readonly cutStyleRef?: VersionedRef;
   readonly treatment: Treatment;
   readonly rawNotice: "none" | "required";
