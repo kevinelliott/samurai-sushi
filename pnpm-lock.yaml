@@ -15,12 +15,21 @@ importers:
       '@eslint/js':
         specifier: 9.35.0
         version: 9.35.0
+      '@noble/curves':
+        specifier: 1.9.7
+        version: 1.9.7
+      '@noble/hashes':
+        specifier: 1.8.0
+        version: 1.8.0
       '@playwright/test':
         specifier: 1.62.1
         version: 1.62.1
       '@samurai-sushi/network':
         specifier: workspace:*
         version: link:packages/network
+      '@taquito/utils':
+        specifier: 25.0.0
+        version: 25.0.0
       '@types/node':
         specifier: 24.3.0
         version: 24.3.0
@@ -154,6 +163,22 @@ importers:
       '@types/pg':
         specifier: 8.15.5
         version: 8.15.5
+
+  packages/receipt-authority:
+    dependencies:
+      '@noble/hashes':
+        specifier: 1.8.0
+        version: 1.8.0
+      '@samurai-sushi/domain':
+        specifier: workspace:*
+        version: link:../domain
+      '@taquito/utils':
+        specifier: 25.0.0
+        version: 25.0.0
+    devDependencies:
+      '@noble/curves':
+        specifier: 1.9.7
+        version: 1.9.7
 
 packages:
 

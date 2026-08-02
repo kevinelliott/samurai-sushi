@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
   "repository": "../project-crypt-tezos-localnet",
-  "revision": "62c2abce341118a119a7eaebff2376ab8b91f01c",
+  "revision": "5edf9cb43af21c06e805eefdcdc0af1291bb789e",
   "profileEntrypoint": "scripts/profile.mjs"
 }

@@ -802,6 +802,8 @@ describe("built account HTTP boundary", () => {
       "SAMURAI_DATABASE_URL", "SAMURAI_HMAC_RESUME_KEY", "SAMURAI_HMAC_GUEST_CLAIM_KEY",
       "x-samurai-raw-header-guard", "__Host-samurai", "postgresql://", "challengeId", "claimId", "guestId", "playerId",
       "subjectId", "payloadHash", "resultHash", "publicKey", "signature", "checkpoint", "tz1", "edpk",
+      "issueSettledReceiptPermit", "admitSettledReceiptPermit", "deriveSettledServiceReceiptFacts",
+      "FIXTURE_SETTLED_COMMITMENT_NONCE", "deterministicSettledCheckpointFixture", "commitmentNonce",
       "NetXtJqPyJGB6Pc", "NetXsqzbfFenSTS", "rpc.shadownet.teztnets.com", "api.shadownet.tzkt.io", "127.0.0.1:8732"]) {
       expect(source).not.toContain(marker);
     }

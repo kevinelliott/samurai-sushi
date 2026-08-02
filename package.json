@@ -28,15 +28,21 @@
     "test:unit": "vitest run",
     "test:profile-artifact": "node scripts/profile-artifact-regression.mjs",
     "test:e2e": "playwright test",
+    "receipt:compile": "tsx scripts/build-receipt-authority.ts",
+    "receipt:verify": "tsx scripts/verify-receipt-authority.ts",
+    "receipt:lifecycle:localnet": "tsx scripts/receipt-localnet-lifecycle.ts",
     "dev:e2e": "tsx scripts/run-e2e-server.ts",
     "test:integration": "tsx scripts/run-network-command.ts localnet test:integration",
     "test:integration:raw": "tsx scripts/run-profiled-command.ts test:integration",
-    "typecheck": "pnpm -r --if-present typecheck",
+    "typecheck": "pnpm -r --if-present typecheck && tsc -p tsconfig.scripts.json --noEmit",
     "lint": "eslint apps packages scripts --max-warnings=0",
-    "validate": "pnpm lint && pnpm typecheck && pnpm test:unit && pnpm test:profile-artifact"
+    "validate": "pnpm lint && pnpm receipt:verify && pnpm typecheck && pnpm test:unit && pnpm test:profile-artifact"
   },
   "devDependencies": {
+    "@noble/curves": "1.9.7",
+    "@noble/hashes": "1.8.0",
     "@samurai-sushi/network": "workspace:*",
+    "@taquito/utils": "25.0.0",
     "@eslint/js": "9.35.0",
     "@playwright/test": "1.62.1",
     "@types/node": "24.3.0",

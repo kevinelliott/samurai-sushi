@@ -1,0 +1,34 @@
+{
+  "name": "@samurai-sushi/receipt-authority",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "exports": {
+    ".": "./src/index.ts",
+    "./deployment-manifest": "./src/deployment-manifest.ts",
+    "./server": {
+      "types": "./src/server.ts",
+      "browser": "./src/browser-rejected.ts",
+      "default": "./src/server.ts"
+    },
+    "./generated/localnet-source-binding": "./src/generated/localnet-source-binding.ts",
+    "./michelson-pack": "./src/michelson-pack.ts",
+    "./michelson-argument": "./src/michelson-argument.ts",
+    "./model": "./src/model.ts"
+  },
+  "scripts": {
+    "test": "vitest run --root ../.. packages/receipt-authority/src",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@noble/hashes": "1.8.0",
+    "@samurai-sushi/domain": "workspace:*",
+    "@taquito/utils": "25.0.0"
+  },
+  "devDependencies": {
+    "@noble/curves": "1.9.7"
+  }
+}
