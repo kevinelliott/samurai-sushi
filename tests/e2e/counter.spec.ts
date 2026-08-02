@@ -594,6 +594,53 @@ test("@receipt-review a prepared review honors the null recovery boundary after 
   expect(fixture.requests.filter((path) => path === "/api/account/receipt/review/prepare")).toHaveLength(1);
 });
 
+for (const boundary of ["import", "permission"] as const) {
+  test(`@receipt-review Stage B Not now closes a drifted reconnect at the deferred ${boundary} boundary`, async ({ page }, testInfo) => {
+    test.skip(testInfo.project.name !== "desktop", "the requesting dismissal boundaries are exercised once");
+    const settled = (compiledFirstEveningService.goldenReplay.at(-1) as {
+      readonly response: { readonly checkpoint: EveningServiceCheckpoint } }).response.checkpoint;
+    const fixture = serviceFixture(settled, true); await fixture.install(page); await installControlledReviewBrowser(page); await page.goto("/");
+    const invoker = page.getByRole("button", { name: "Review optional keepsake" }); await invoker.click();
+    await page.getByRole("button", { name: "Connect wallet for Localnet rehearsal" }).click();
+    await expect(page.getByRole("heading", { name: "Wallet connected for review" })).toBeFocused();
+    await expect(page.getByText("Nothing has been sent.", { exact: false })).toBeVisible();
+    await page.evaluate((runtime) => {
+      const state = (window as unknown as { __reviewBarrierState: { activeListeners: ((value: unknown) => void)[] } }).__reviewBarrierState;
+      for (const listener of [...state.activeListeners]) listener({ ...runtime, account: "tz1VSUr8wwNhLAzempoch5d6hLRiTh8Cjcjb" });
+    }, EXPECTED_REVIEW_RUNTIME);
+    await expect(page.getByRole("heading", { name: "Wallet account changed" })).toBeFocused();
+    if (boundary === "import") await page.evaluate(() => {
+      (window as unknown as { __reviewBarrierControl: { armImport(): void } }).__reviewBarrierControl.armImport();
+    });
+    await page.evaluate(() => { (window as unknown as { __reviewBarrierState: { mode: string } }).__reviewBarrierState.mode = "DEFER"; });
+    const before = await reviewTripwires(page);
+    await page.getByRole("button", { name: "Reconnect matching wallet" }).click();
+    if (boundary === "import") await expect.poll(() => page.evaluate(() =>
+      (window as unknown as { __reviewBarrierControl: { startedImport(): number } }).__reviewBarrierControl.startedImport())).toBe(1);
+    else await expect.poll(() => reviewTripwires(page).then((value) => value.permission)).toBe(before.permission + 1);
+    const atBarrierRequests = [...fixture.requests];
+    await expect(page.getByRole("button", { name: "Not now" })).toBeVisible();
+    await expect(page.getByRole("button", { name: /check review readiness|check again/iu })).toHaveCount(0);
+    await page.getByRole("button", { name: "Not now" }).click();
+    await expect(page.getByRole("dialog")).toHaveCount(0); await expect(invoker).toBeFocused();
+    if (boundary === "import") await page.evaluate(() => {
+      (window as unknown as { __reviewBarrierControl: { releaseImport(): void } }).__reviewBarrierControl.releaseImport();
+    });
+    else await page.evaluate((runtime) => {
+      const state = (window as unknown as { __reviewBarrierState: { permissionResolvers: ((value: unknown) => void)[] } }).__reviewBarrierState;
+      state.permissionResolvers.shift()?.(runtime);
+    }, EXPECTED_REVIEW_RUNTIME);
+    await page.evaluate(() => Promise.resolve()); await expect(invoker).toBeFocused();
+    const after = await reviewTripwires(page);
+    expect(after.permission).toBe(before.permission + (boundary === "permission" ? 1 : 0));
+    expect(after.subscribe).toBe(before.subscribe); expect(after.unsubscribe).toBe(before.unsubscribe);
+    expect(fixture.requests).toEqual(atBarrierRequests);
+    expect(fixture.requests.filter((path) => path === "/api/account/receipt/review/preflight")).toHaveLength(0);
+    expect(fixture.requests.filter((path) => path === "/api/account/receipt/review/prepare")).toHaveLength(1);
+    expect(after).toMatchObject({ sign: 0, send: 0, inject: 0, broadcast: 0, contract: 0, fee: 0, observe: 0 });
+  });
+}
+
 test("@receipt-review distinct access, drift, preflight, keyboard, announcement, and retirement states stay fail closed", async ({ page }, testInfo) => {
   test.skip(testInfo.project.name !== "desktop", "the complete outcome and controlled-race matrix is exercised once");
   const settled = (compiledFirstEveningService.goldenReplay.at(-1) as {

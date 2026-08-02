@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { notReady, parseReceiptReviewPreflightResult, RECEIPT_PREFLIGHT_REASONS } from "./preflight";
-import { parseReceiptReviewDoorway, parseWalletAccessView, parseWalletRuntimeSyncView,
+import { parseReceiptReviewDoorway, parseWalletAccessView, parseWalletReviewCopy, parseWalletRuntimeSyncView,
   RECEIPT_REVIEW_DOORWAY, WALLET_REVIEW_COPY } from "./presentation";
 
 describe("wallet review browser boundary", () => {
@@ -15,6 +15,8 @@ describe("wallet review browser boundary", () => {
     expect(() => parseWalletAccessView({ ...access, presentation: WALLET_REVIEW_COPY["receipt.preflight.ready"] })).toThrow();
     expect(() => parseWalletAccessView({ ...access, providerId: "provider--name" })).toThrow();
     expect(() => parseWalletAccessView({ ...access, rawProvider: {} })).toThrow();
+    expect(() => parseWalletReviewCopy({ ...WALLET_REVIEW_COPY["wallet.access.requesting"],
+      recoveryAction: { ref: "wallet.access.connect", label: "Not now" } })).toThrow();
   });
 
   it("strictly separates display-only guest access from durable player runtime authority", () => {

@@ -153,10 +153,11 @@ export function ReceiptReviewDoorway() {
   useEffect(() => () => { openRef.current = false; retireAsync(); }, [retireAsync]);
 
   const connect = useCallback(async () => {
-    retireAsync(); const token = generation.current; const runtimeGeneration = token; setPhase("requesting"); setPreflight(null); setRuntimeStale(false);
+    const priorWallet = wallet && durableWalletAccess(wallet) ? wallet : retiredWallet;
+    retireAsync(); const token = generation.current; const runtimeGeneration = token; walletRef.current = null; setWallet(null);
+    setPhase("requesting"); setPreflight(null); setRuntimeStale(false);
     commitCopy(token, WALLET_REVIEW_COPY["wallet.access.requesting"]);
     try {
-      const priorWallet = wallet && durableWalletAccess(wallet) ? wallet : retiredWallet;
       if (priorWallet) {
         if (!active(token)) return; const disconnected = await postJson(WALLET_RUNTIME_DISCONNECT_PATH, JSON.stringify({ idempotencyKey: requestId(),
           walletLinkRef: priorWallet.walletLinkRef, runtimeGeneration: priorWallet.runtimeGeneration, sessionRevision: priorWallet.sessionRevision }), controller().signal);
@@ -214,10 +215,15 @@ export function ReceiptReviewDoorway() {
     setProjection(null); setWallet(null); setRetiredWallet(null); setRuntimeStale(false); setPreflight(null); void restore(token, true);
   }, [restore, retireAsync]);
   const recoveryRef = actionCopy.recoveryAction?.ref;
-  const recover = recoveryRef?.startsWith("wallet.access") ? connect
-    : recoveryRef === "receipt.preflight.retry" ? check
-      : recoveryRef === "receipt.review.restore" ? restoreAcknowledged
-        : recoveryRef === "review.close" ? close : null;
+  const recover = (() => {
+    switch (recoveryRef) {
+      case "wallet.access.connect": case "wallet.access.retry": case "wallet.access.reconnect": case "wallet.access.retry-network": return connect;
+      case "wallet.access.close": case "review.close": return close;
+      case "receipt.preflight.retry": return check;
+      case "receipt.review.restore": case "receipt.review.refresh": return restoreAcknowledged;
+      default: return null;
+    }
+  })();
   return <section className="keepsake-doorway" aria-label="Optional service keepsake">
     <strong>Optional service keepsake</strong><span>Non-transferable · no financial value</span>
     <button ref={invokerRef} type="button" className="text-action review-invoker" onClick={openReview}>Review optional keepsake</button>
@@ -236,7 +242,7 @@ export function ReceiptReviewDoorway() {
           {doorway ? <ReceiptFacts projection={projection} doorway={doorway} generationToken={generation.current} commit={commitClipboard} /> : null}
           <section aria-labelledby="current-wallet"><h3 id="current-wallet">Current wallet</h3>{wallet ? <dl><div className="review-fact"><dt>Provider</dt><dd>{wallet.providerId}</dd></div><CopyFact label="Wallet account" value={wallet.account} compact generationToken={generation.current} commit={commitClipboard} /><CopyFact label="Wallet chain ID" value={wallet.chainId} generationToken={generation.current} commit={commitClipboard} /><div className="review-fact"><dt>Permission</dt><dd>Account access</dd></div><div className="review-fact"><dt>Credential match</dt><dd>{wallet.credentialMatch ? "Exact active credential match" : "Not verified"}</dd></div></dl> : <p>Wallet disconnected. The receipt details remain read-only.</p>}</section>
           <section aria-labelledby="review-readiness"><h3 id="review-readiness">Review readiness</h3><p>{preflight?.status === "REVIEW_READY" ? "Exact current facts match." : preflight?.presentation.message ?? "Not checked."}</p>{preflight?.status === "NOT_READY" && preflight.presentation.reasonRef ? <p><strong>Safe reason:</strong> <span className="selectable-fact">{preflight.presentation.reasonRef}</span></p> : null}</section>
-          <div className="review-actions">{preflight?.status === "NOT_READY" && recover && preflight.presentation.recoveryAction ? <button type="button" className="text-action" onClick={() => void recover()}>{preflight.presentation.recoveryAction.label}</button> : wallet?.credentialMatch && !runtimeStale ? <button type="button" className="primary-action" disabled={phase === "preflight"} onClick={() => void check()}>{phase === "preflight" ? "Checking…" : preflight?.status === "REVIEW_READY" ? "Check again" : "Check review readiness"}</button> : recover && actionCopy.recoveryAction ? <button type="button" className="text-action" onClick={() => void recover()}>{actionCopy.recoveryAction.label}</button> : null}<button type="button" className="text-action" onClick={close}>Close review</button></div>
+          <div className="review-actions">{phase === "requesting" && recover && actionCopy.recoveryAction ? <button type="button" className="text-action" onClick={() => void recover()}>{actionCopy.recoveryAction.label}</button> : preflight?.status === "NOT_READY" && recover && preflight.presentation.recoveryAction ? <button type="button" className="text-action" onClick={() => void recover()}>{preflight.presentation.recoveryAction.label}</button> : wallet?.credentialMatch && !runtimeStale ? <button type="button" className="primary-action" disabled={phase === "preflight"} onClick={() => void check()}>{phase === "preflight" ? "Checking…" : preflight?.status === "REVIEW_READY" ? "Check again" : "Check review readiness"}</button> : recover && actionCopy.recoveryAction ? <button type="button" className="text-action" onClick={() => void recover()}>{actionCopy.recoveryAction.label}</button> : null}<button type="button" className="text-action" onClick={close}>Close review</button></div>
           {wallet?.credentialMatch && !runtimeStale ? <p className="check-helper">Checks only. No signature or operation will be requested.</p> : null}
         </>}
       </div>

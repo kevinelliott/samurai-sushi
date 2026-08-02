@@ -5,7 +5,11 @@ export type WalletReviewDisplayState =
   | "ACCESS_UNAVAILABLE" | "ACCOUNT_PROOF_UNAVAILABLE" | "WRONG_NETWORK" | "ACCOUNT_CHANGED"
   | "PERMISSION_CHANGED" | "PROVIDER_CHANGED" | "REVIEW_EXPIRED" | "REVIEW_CHANGED"
   | "PREFLIGHT_CHECKING" | "PREFLIGHT_READY" | "PREFLIGHT_NOT_READY";
-export type WalletReviewRecoveryAction = Readonly<{ readonly ref: string; readonly label: string }> | null;
+export type WalletReviewRecoveryRef =
+  | "review.close"
+  | "wallet.access.close" | "wallet.access.connect" | "wallet.access.retry" | "wallet.access.reconnect" | "wallet.access.retry-network"
+  | "receipt.preflight.retry" | "receipt.review.restore" | "receipt.review.refresh";
+export type WalletReviewRecoveryAction = Readonly<{ readonly ref: WalletReviewRecoveryRef; readonly label: string }> | null;
 export interface WalletReviewCopy {
   readonly ref: string;
   readonly title: string;
