@@ -59,12 +59,16 @@ of the fetch/send privacy race; this persistence spine does not authorize one.
 
 ### Guest identity
 
-The server issues a random 256-bit resume secret only in a host-only
-`__Host-samurai_guest` cookie with `Secure`, `HttpOnly`, `SameSite=Lax`, and
-`Path=/`; no `Domain` is allowed. Unsafe methods require exact configured
-`Origin`, JSON content type, and `X-Samurai-Request: 1`; CORS does not admit
-credentialed foreign origins. Persistence-enabled local development uses
-loopback HTTPS rather than weakening production cookie attributes.
+The server issues distinct random 256-bit guest-resume and guest-claim
+capabilities only in host-only `__Host-samurai-guest` and
+`__Host-samurai-guest-claim` cookies with `Secure`, `HttpOnly`,
+`SameSite=Strict`, and `Path=/`; no `Domain` is allowed. Unsafe methods require
+one byte-exact configured `Origin`, one matching raw `Host`, an exact attested
+request target, and exact `application/json` before Next receives the request.
+The raw custom-server guard rejects caller-supplied forwarding or attestation
+headers and CORS does not admit credentialed foreign origins. Production uses
+HTTPS. A separately configured local profile may opt into loopback HTTP without
+weakening the cookie attributes.
 
 The database stores `HMAC-SHA-256(digestKey[keyVersion], secret)` plus the key
 version and a domain-separated SHA-256 identity of the exact private key bytes
@@ -81,7 +85,10 @@ Cookie-secret rotation accepts the single predecessor digest for at most 60
 seconds for in-flight requests. While that row is live, predecessor requests
 authenticate without recursive rotation, current automatic rotation is
 deferred, and explicit rotation returns a stable retry-at-grace-boundary error.
-At equality the predecessor is expired and may be replaced. Command admission
+Domain-separated deterministic rotation derivation makes a committed response
+loss and concurrent exact predecessor retries converge on the same current
+credential rather than successively invalidating browser cookies. At equality
+the predecessor is expired and may be replaced. Command admission
 requires rotation before receipt access when PostgreSQL time is at or beyond
 `rotate_after`, or when a current digest uses a verification-only key;
 predecessor requests inside grace remain admissible. Every committed or exact
@@ -257,7 +264,7 @@ wallets may link to one player only through an explicit account flow; one wallet
 cannot identify multiple players. Existing players are never auto-merged.
 
 Wallet proof creates or rotates a `PlayerSession` whose independent random
-256-bit secret uses a `__Host-samurai_player` cookie and the same host-only,
+256-bit secret uses a `__Host-samurai-player` cookie and the same host-only,
 digest-key, origin, comparison, redaction, expiry, and rotation rules as the
 guest session. Ordinary gameplay authenticates with that server session, not a
 repeated wallet signature. Sessions are individually revocable. A second device
@@ -265,6 +272,18 @@ requires a new wallet proof and creates a separately revocable session; logout
 revokes only the selected session unless the player chooses all devices. Player
 sessions have a seven-day idle and 30-day absolute maximum and rotate after
 claim, credential/recovery changes, seven active days, or a security event.
+Claim and rotation sessions remain `pending-delivery` until a dedicated request
+acknowledges the exact player, issuance, session, and generation tuple. Exact
+acknowledgement, selected-session logout, and guest deletion retries are
+idempotent after a committed response loss; unrelated invalid credentials keep
+the same public rejection. Logout revokes only the authenticated player session
+and never deletes the account.
+
+Because browser session restoration can retain an expired HttpOnly cookie past
+server authority, one exact Origin-protected strict POST transport reset clears
+all three account cookies with their original host-only attributes. It exposes
+no credential state, accepts no alternate authority, and does not change any
+server record; the next guest or wallet flow must establish fresh authority.
 
 `ClaimGuestProgress` requires the resume secret and a fresh, five-minute,
 single-use canonical signed challenge. First construct
@@ -508,7 +527,7 @@ Only the first stage is required before Phase 1 service-state code merges:
 - Cookie tests cover the exact host-only attributes, unsafe-method Origin/header
   policy, wrong origin, stale/concurrent cookies, digest-key rotation,
   constant-time comparison boundary, reverse-proxy/application redaction, and
-  loopback HTTPS behavior.
+  the profile-explicit loopback HTTP exception.
 - Rotation tests distinguish predecessor cookie-secret grace from the 30-day
   HMAC verification-key horizon, including inactive sessions, overlapping dual
   rotation, and emergency mass reauthentication.
@@ -520,9 +539,11 @@ Only the first stage is required before Phase 1 service-state code merges:
 
 ## Consequences and exclusions
 
-This decision authorizes the persistence/domain implementation boundary. It
-does not authorize wallet UI, receipt contracts, analytics collection, public
-deployment, offline mutation/synchronization, automatic player-to-player
+This decision authorizes the persistence/domain implementation boundary and the
+local Node/Next HTTP composition described above. It does not authorize wallet
+SDK or network calls, browser claim UI, receipt contracts, analytics collection,
+background workers, rate-limit infrastructure, durable TLS/proxy deployment,
+device proof, offline mutation/synchronization, automatic player-to-player
 merges, or wiring the current one-order shell to unfinished persistence.
 LocalStorage and IndexedDB are not gameplay authorities. Redis and multi-device
 live synchronization require measured need and a separate decision.

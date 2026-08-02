@@ -1102,6 +1102,15 @@ export class PortableRecoveryService {
     for (let attempt = 0; attempt < REPLACEMENT_SECRET_ATTEMPTS; attempt += 1) {
       const secret = this.issueReplacementSecret();
       const beforeLock = await this.persistence.assertTransactionReady(client);
+      const preliminaryDigest = this.persistence.resumeKeys.digest(secret, beforeLock);
+      const preliminaryCollision = await client.query<{ readonly found: number }>(
+        `SELECT 1 AS found
+           FROM samurai_persistence.guest_resume_digests
+          WHERE digest_key_version = $1 AND digest_key_identity = $2 AND digest = $3
+          LIMIT 1`,
+        [preliminaryDigest.keyVersion, keyIdentityBytes(preliminaryDigest.keyIdentity), preliminaryDigest.digest],
+      );
+      if (preliminaryCollision.rows[0]) continue;
       await this.persistence.lockGuestSecretReplayFence(client, secret, beforeLock);
       const now = await this.persistence.assertTransactionReady(client);
       await revalidate(now);

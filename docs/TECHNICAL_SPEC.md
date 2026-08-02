@@ -130,8 +130,9 @@ overlapping matching windows with contradictory availability produce
 
 ### Guest identity and merge
 
-The adopted guest boundary issues a 256-bit opaque resume secret in a Secure,
-HttpOnly, SameSite=Lax cookie and stores only its keyed digest. Guest play is
+The adopted guest boundary issues distinct 256-bit opaque resume and claim
+capabilities in `__Host-samurai-guest` and `__Host-samurai-guest-claim`
+Secure, HttpOnly, SameSite=Strict, Path=/ cookies and stores only keyed digests. Guest play is
 device/browser-bound; no fingerprinting. Clearing site data loses the resume
 secret, so the close ledger offers the ADR 0003 encrypted save export until
 account link. Inactive unclaimed guests expire after 30 days. Explicit deletion
@@ -152,15 +153,21 @@ transaction. Service IDs and unlock events are idempotent sets. Conflicting
 single-choice cosmetics require explicit player selection. Success writes a
 `ProgressMerge`, creates a keyed-digest `PlayerSession`, tombstones the guest
 claim path, and is replay-safe. The new random player-session secret is returned
-only in a Secure, HttpOnly, SameSite=Lax cookie; ordinary gameplay does not
+only in the `__Host-samurai-player` Secure, HttpOnly, SameSite=Strict, Path=/ cookie; ordinary gameplay does not
 require repeat wallet signatures. Claim-issued sessions begin
-`pending-delivery`; the first authenticated player request activates them. If
+`pending-delivery`; only the dedicated exact player/claim/session/generation
+acknowledgement request activates them. If
 the claim response is lost, its retry receives `REAUTH_REQUIRED` without reading
 the claim receipt; fresh wallet proof resolves the player through its wallet
 credential, revokes the pending session, and issues a replacement. A guest
 already claimed by another wallet, stale revision, reused challenge, duplicate
 idempotency key with different payload, or partial write fails without mutation.
 Wallet linking never automatically merges two existing player identities.
+The account transport also provides one strict Origin-protected POST reset that
+clears guest, guest-claim, and player cookies with the exact original `__Host-`
+attributes. It reveals no credential validity and performs no persistence
+mutation; it exists only to recover from browser-retained expired HttpOnly
+cookies before beginning a fresh guest or wallet flow.
 
 Every `ServiceSession` has exactly one `SubjectRef`: an unclaimed guest session
 or a player. On a successful claim, the same transaction rewrites the guest's
@@ -321,6 +328,12 @@ match exactly. Localnet must use `127.0.0.1:8732`, chain
 controlled unavailable state until a separately validated local indexer exists.
 The implementation command contract and lifecycle are normative in
 `TEZOS_LOCALNET_LIFECYCLE.md`.
+
+The first account HTTP integration is a Node-only composition and local
+production-build proof, not a deployment claim. Wallet SDK/network calls,
+browser claim UI, analytics, background workers, rate-limit infrastructure,
+durable TLS/reverse-proxy deployment, and physical-device proof remain later
+gates.
 
 ## 8. Test strategy
 

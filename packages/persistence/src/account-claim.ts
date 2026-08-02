@@ -393,7 +393,10 @@ export type ClaimChallengePublicResult = IssuedClaimChallenge | typeof ACCOUNT_C
 export type RecoveryChallengePublicResult = IssuedClaimChallenge | typeof ACCOUNT_CLAIM_RECOVERY_PUBLIC_FAILURE;
 export type RecoverClaimSessionPublicResult = RecoveredPlayerSession | typeof ACCOUNT_CLAIM_RECOVERY_PUBLIC_FAILURE;
 export type PlayerDeletionChallengePublicResult = IssuedClaimChallenge | typeof ACCOUNT_PLAYER_DELETE_PUBLIC_FAILURE;
-export type DeletePlayerPublicResult = void | typeof ACCOUNT_PLAYER_DELETE_PUBLIC_FAILURE;
+export interface DeletedPlayerResult {
+  readonly disposition: "deleted" | "already-deleted";
+}
+export type DeletePlayerPublicResult = DeletedPlayerResult | typeof ACCOUNT_PLAYER_DELETE_PUBLIC_FAILURE;
 
 export interface RecoverClaimSessionInput {
   readonly recoveryIntent: unknown;
@@ -426,6 +429,10 @@ export interface AuthenticatedPlayerSession {
 
 export interface RotatedPlayerSession extends AuthenticatedPlayerSession {
   readonly sessionSecret: string;
+}
+
+export interface LoggedOutPlayerSession {
+  readonly disposition: "logged-out" | "already-logged-out";
 }
 
 export class AccountClaimService {
@@ -817,6 +824,7 @@ export class AccountClaimService {
   private async acknowledgeClaimDeliveryInternal(
     playerId: string,
     claimId: string,
+    sessionId: string | null,
     sessionSecret: string,
     expectedGeneration: number,
   ): Promise<void> {
@@ -833,8 +841,9 @@ export class AccountClaimService {
                 delivery_generation::text, last_seen_at, expires_at
            FROM samurai_persistence.player_sessions
           WHERE player_id = $1 AND issuance_kind = 'claim' AND issuance_id = $2::uuid
+            AND ($3::uuid IS NULL OR id = $3::uuid)
           FOR UPDATE`,
-        [playerId, claimId],
+        [playerId, claimId, sessionId],
       );
       const session = sessionResult.rows[0];
       const digestResult = session ? await client.query<SessionDigestRow>(
@@ -845,7 +854,7 @@ export class AccountClaimService {
       ) : { rows: [] as readonly SessionDigestRow[], rowCount: 0 };
       const now = await this.authority.assertTransactionReady(client, [], "retention");
       const stored = digestResult.rows[0];
-      if (!session || !stored || session.state !== "pending-delivery"
+      if (!session || !stored || !["pending-delivery", "active"].includes(session.state)
         || Number(session.delivery_generation) !== expectedGeneration
         || session.expires_at.getTime() <= now.getTime()
         || addMilliseconds(session.last_seen_at, PLAYER_SESSION_IDLE_MS).getTime() <= now.getTime()) {
@@ -860,6 +869,7 @@ export class AccountClaimService {
       if (candidate.keyIdentity !== keyIdentityFromBytes(stored.digest_key_identity)
         || !constantTimeDigestEqual(candidate.digest, stored.digest)) invalid("CLAIM_RECOVERY_INVALID");
       await this.assertPlayerSessionNotTombstoned(client, stored, now);
+      if (session.state === "active") return;
       const result = await client.query(
         "UPDATE samurai_persistence.player_sessions SET state = 'active', last_seen_at = $2 WHERE id = $1 AND state = 'pending-delivery'",
         [session.id, now],
@@ -883,7 +893,22 @@ export class AccountClaimService {
     expectedGeneration: number,
   ): Promise<void | typeof ACCOUNT_CLAIM_RECOVERY_PUBLIC_FAILURE> {
     try {
-      await this.acknowledgeClaimDeliveryInternal(playerId, claimId, sessionSecret, expectedGeneration);
+      await this.acknowledgeClaimDeliveryInternal(playerId, claimId, null, sessionSecret, expectedGeneration);
+    } catch {
+      return ACCOUNT_CLAIM_RECOVERY_PUBLIC_FAILURE;
+    }
+  }
+
+  async acknowledgeClaimDeliveryExact(
+    playerId: string,
+    claimId: string,
+    sessionId: string,
+    sessionSecret: string,
+    expectedGeneration: number,
+  ): Promise<void | typeof ACCOUNT_CLAIM_RECOVERY_PUBLIC_FAILURE> {
+    try {
+      if (!UUID_V4_PATTERN.test(sessionId)) invalid("CLAIM_RECOVERY_INVALID");
+      await this.acknowledgeClaimDeliveryInternal(playerId, claimId, sessionId, sessionSecret, expectedGeneration);
     } catch {
       return ACCOUNT_CLAIM_RECOVERY_PUBLIC_FAILURE;
     }
@@ -999,8 +1024,11 @@ export class AccountClaimService {
 
   private async rotatePlayerSessionInternal(sessionSecret: string): Promise<RotatedPlayerSession> {
     return this.#runner.run(async (client) => {
-      const { session, digest: authenticated } = await this.lockAuthenticatedPlayerSession(client, sessionSecret);
-      if (authenticated.slot !== "current") invalid("PLAYER_SESSION_INVALID");
+      const { session, digest: authenticated } = await this.lockAuthenticatedPlayerSession(
+        client,
+        sessionSecret,
+        ["active", "pending-delivery"],
+      );
       const existing = await client.query<ResolvedPlayerSessionRow>(
         `SELECT s.id::text, s.player_id, s.issuance_kind, s.issuance_id::text, s.state,
                 s.delivery_generation::text, s.expires_at, d.slot, d.valid_until,
@@ -1011,6 +1039,38 @@ export class AccountClaimService {
         [session.id],
       );
       const predecessor = existing.rows.find((row) => row.slot === "predecessor");
+      const currentDigest = existing.rows.find((row) => row.slot === "current");
+      if (session.state === "pending-delivery") {
+        if (authenticated.slot !== "predecessor" || !predecessor || !currentDigest) invalid("PLAYER_SESSION_INVALID");
+        const replacement = await this.derivePlayerRotationSecret(
+          client, sessionSecret, predecessor, currentDigest,
+        );
+        const now = replacement.now;
+        if (session.expires_at.getTime() <= now.getTime()
+          || addMilliseconds(session.last_seen_at, PLAYER_SESSION_IDLE_MS).getTime() <= now.getTime()
+          || !predecessor.valid_until || predecessor.valid_until.getTime() <= now.getTime()) {
+          invalid("PLAYER_SESSION_INVALID");
+        }
+        let candidate;
+        try {
+          candidate = this.authority.playerSessionKeys.digest(sessionSecret, now, predecessor.digest_key_version);
+        } catch {
+          invalid("PLAYER_SESSION_INVALID");
+        }
+        if (candidate.keyIdentity !== keyIdentityFromBytes(predecessor.digest_key_identity)
+          || !constantTimeDigestEqual(candidate.digest, predecessor.digest)) invalid("PLAYER_SESSION_INVALID");
+        await this.assertPlayerSessionNotTombstoned(client, predecessor, now);
+        return {
+          playerId: session.player_id,
+          sessionId: session.id,
+          claimId: session.issuance_id,
+          deliveryGeneration: Number(session.delivery_generation),
+          credentialKind: "current",
+          rotationRequired: false,
+          sessionSecret: replacement.secret,
+        };
+      }
+      if (authenticated.slot !== "current" || session.state !== "active") invalid("PLAYER_SESSION_INVALID");
       const lockedNow = await this.authority.assertTransactionReady(client, [], "retention");
       if (predecessor?.valid_until && predecessor.valid_until.getTime() > lockedNow.getTime()) {
         throw new PersistenceError(
@@ -1018,7 +1078,7 @@ export class AccountClaimService {
           ACCOUNT_PLAYER_SESSION_ROTATION_DEFERRED.message,
         );
       }
-      const issuedSession = await this.issueFreshPlayerSessionSecret(client, predecessor ? [predecessor] : []);
+      const issuedSession = await this.derivePlayerRotationSecret(client, sessionSecret, authenticated);
       const now = issuedSession.now;
       if (session.state !== "active" || session.expires_at.getTime() <= now.getTime()
         || addMilliseconds(session.last_seen_at, PLAYER_SESSION_IDLE_MS).getTime() <= now.getTime()) {
@@ -1064,14 +1124,17 @@ export class AccountClaimService {
         addMilliseconds(now, PLAYER_SESSION_ROTATE_MS).getTime(),
       ));
       await client.query(
-        "UPDATE samurai_persistence.player_sessions SET last_seen_at = $2, rotate_after = $3 WHERE id = $1::uuid",
+        `UPDATE samurai_persistence.player_sessions
+            SET state = 'pending-delivery', last_seen_at = $2, rotate_after = $3,
+                delivery_generation = delivery_generation + 1
+          WHERE id = $1::uuid AND state = 'active'`,
         [session.id, now, rotateAfter],
       );
       return {
         playerId: session.player_id,
         sessionId: session.id,
         claimId: session.issuance_id,
-        deliveryGeneration: Number(session.delivery_generation),
+        deliveryGeneration: Number(session.delivery_generation) + 1,
         credentialKind: "current",
         rotationRequired: false,
         sessionSecret: replacementSecret,
@@ -1091,6 +1154,110 @@ export class AccountClaimService {
       }
       return ACCOUNT_PLAYER_SESSION_PUBLIC_FAILURE;
     }
+  }
+
+  private async logoutPlayerSessionInternal(sessionSecret: string): Promise<LoggedOutPlayerSession> {
+    return this.#runner.run(async (client) => {
+      const initialNow = await this.authority.assertTransactionReady(client, [], "retention");
+      if (await this.isExactLogoutTombstone(client, sessionSecret, initialNow)) {
+        return { disposition: "already-logged-out" };
+      }
+      const { session, digest: authenticated } = await this.lockAuthenticatedPlayerSession(
+        client, sessionSecret, ["active", "pending-delivery"],
+      );
+      const digests = await client.query<ResolvedPlayerSessionRow>(
+        `SELECT s.id::text, s.player_id, s.issuance_kind, s.issuance_id::text, s.state,
+                s.delivery_generation::text, s.expires_at, d.slot, d.valid_until,
+                d.digest_key_version, d.digest_key_identity, d.digest
+           FROM samurai_persistence.player_sessions s
+           JOIN samurai_persistence.player_session_digests d ON d.player_session_id = s.id
+          WHERE s.id = $1::uuid ORDER BY d.slot FOR UPDATE OF d`,
+        [session.id],
+      );
+      await this.lockPlayerSessionReplayFences(client, digests.rows);
+      const current = await client.query<SessionRow>(
+        `SELECT id::text, player_id, issuance_kind, issuance_id::text, state,
+                delivery_generation::text, last_seen_at, expires_at
+           FROM samurai_persistence.player_sessions WHERE id = $1::uuid FOR UPDATE`,
+        [session.id],
+      );
+      const now = await this.authority.assertTransactionReady(client, [], "retention");
+      const locked = current.rows[0];
+      const matched = digests.rows.find((row) => row.slot === authenticated.slot
+        && row.digest_key_version === authenticated.digest_key_version
+        && keyIdentityFromBytes(row.digest_key_identity) === keyIdentityFromBytes(authenticated.digest_key_identity)
+        && constantTimeDigestEqual(row.digest, authenticated.digest));
+      if (!locked || !["active", "pending-delivery"].includes(locked.state) || locked.expires_at.getTime() <= now.getTime()
+        || addMilliseconds(session.last_seen_at, PLAYER_SESSION_IDLE_MS).getTime() <= now.getTime()
+        || !matched || (matched.slot === "predecessor" && (!matched.valid_until || matched.valid_until.getTime() <= now.getTime()))) {
+        invalid("PLAYER_SESSION_INVALID");
+      }
+      let candidate;
+      try {
+        candidate = this.authority.playerSessionKeys.digest(sessionSecret, now, matched.digest_key_version);
+      } catch {
+        invalid("PLAYER_SESSION_INVALID");
+      }
+      if (candidate.keyIdentity !== keyIdentityFromBytes(matched.digest_key_identity)
+        || !constantTimeDigestEqual(candidate.digest, matched.digest)) invalid("PLAYER_SESSION_INVALID");
+      await this.assertPlayerSessionNotTombstoned(client, matched, now);
+      for (const row of digests.rows) {
+        await this.insertTombstone(client, "player-session", this.playerSessionReplayKey(row), now,
+          "player-session", row.digest_key_version, row.digest_key_identity);
+        await this.insertTombstone(client, "player-session", `logout:${this.playerSessionReplayKey(row)}`, now,
+          "player-session", row.digest_key_version, row.digest_key_identity);
+      }
+      await client.query("DELETE FROM samurai_persistence.player_session_digests WHERE player_session_id = $1::uuid", [session.id]);
+      const revoked = await client.query(
+        `UPDATE samurai_persistence.player_sessions
+          SET state = 'revoked', revoked_at = $2, last_seen_at = $2
+          WHERE id = $1::uuid AND state IN ('active','pending-delivery')`,
+        [session.id, now],
+      );
+      if (revoked.rowCount !== 1) invalid("PLAYER_SESSION_INVALID");
+      return { disposition: "logged-out" };
+    });
+  }
+
+  async logoutPlayerSession(
+    sessionSecret: string,
+  ): Promise<LoggedOutPlayerSession | typeof ACCOUNT_PLAYER_SESSION_PUBLIC_FAILURE> {
+    try {
+      return await this.logoutPlayerSessionInternal(sessionSecret);
+    } catch {
+      try {
+        const replay = await this.#runner.run(async (client) => {
+          const now = await this.authority.assertTransactionReady(client, [], "retention");
+          return this.isExactLogoutTombstone(client, sessionSecret, now);
+        });
+        if (replay) return { disposition: "already-logged-out" };
+      } catch {
+        // A failed exact replay probe remains the same public session rejection.
+      }
+      return ACCOUNT_PLAYER_SESSION_PUBLIC_FAILURE;
+    }
+  }
+
+  private async isExactLogoutTombstone(client: SqlClient, sessionSecret: string, now: Date): Promise<boolean> {
+    let identities;
+    try {
+      identities = this.authority.playerSessionKeys.tombstoneCandidates(sessionSecret, now);
+    } catch {
+      return false;
+    }
+    for (const identity of identities) {
+      const replayKey = `logout:player-session:v${identity.keyVersion}:${Buffer.from(identity.digest).toString("base64url")}`;
+      for (const candidate of this.authority.persistence.tombstoneKeys.replayCandidates("player-session", replayKey, now)) {
+        const result = await client.query<{ readonly found: number }>(
+          `SELECT 1 AS found FROM samurai_persistence.deletion_tombstones
+            WHERE kind = 'player-session' AND digest_key_version = $1
+              AND digest_key_identity = $2 AND tombstone_digest = $3 AND expires_at > $4 LIMIT 1`,
+          [candidate.keyVersion, keyIdentityBytes(candidate.keyIdentity), candidate.digest, now],
+        );
+        if (result.rows[0]) return true;
+      }
+    }
+    return false;
   }
 
   private playerSessionReplayKey(row: SessionDigestRow): string {
@@ -1154,6 +1321,49 @@ export class AccountClaimService {
     invalid("PLAYER_SESSION_COLLISION");
   }
 
+  private async derivePlayerRotationSecret(
+    client: SqlClient,
+    sourceSecret: string,
+    source: SessionDigestRow,
+    allowedCurrent?: SessionDigestRow,
+  ): Promise<{ readonly secret: string; readonly digest: ReturnType<PlayerSessionKeyring["digest"]>; readonly now: Date }> {
+    const initialNow = await this.authority.assertTransactionReady(client, ["player-session"], "retention");
+    let secret: string;
+    try {
+      secret = this.authority.playerSessionKeys.deriveRotationSecret(sourceSecret, initialNow, source.digest_key_version);
+    } catch {
+      invalid("PLAYER_SESSION_INVALID");
+    }
+    const identities = this.authority.playerSessionKeys.tombstoneCandidates(secret, initialNow);
+    await this.lockPlayerSessionReplayFences(client, identities.map((identity) => ({
+      digest_key_version: identity.keyVersion,
+      digest_key_identity: keyIdentityBytes(identity.keyIdentity),
+      digest: identity.digest,
+    })));
+    const now = await this.authority.assertTransactionReady(client, ["player-session"], "retention");
+    for (const identity of this.authority.playerSessionKeys.tombstoneCandidates(secret, now)) {
+      const row = {
+        digest_key_version: identity.keyVersion,
+        digest_key_identity: keyIdentityBytes(identity.keyIdentity),
+        digest: identity.digest,
+      };
+      await this.assertPlayerSessionNotTombstoned(client, row, now);
+      const live = await client.query<SessionDigestRow>(
+        `SELECT digest_key_version, digest_key_identity, digest
+           FROM samurai_persistence.player_session_digests
+          WHERE digest_key_version = $1 AND digest_key_identity = $2 AND digest = $3 LIMIT 1`,
+        [row.digest_key_version, row.digest_key_identity, row.digest],
+      );
+      const found = live.rows[0];
+      if (!found) continue;
+      if (allowedCurrent && found.digest_key_version === allowedCurrent.digest_key_version
+        && keyIdentityFromBytes(found.digest_key_identity) === keyIdentityFromBytes(allowedCurrent.digest_key_identity)
+        && constantTimeDigestEqual(found.digest, allowedCurrent.digest)) continue;
+      invalid("PLAYER_SESSION_COLLISION");
+    }
+    return { secret, digest: this.authority.playerSessionKeys.digest(secret, now), now };
+  }
+
   private async assertPlayerSessionNotTombstoned(
     client: SqlClient,
     row: SessionDigestRow,
@@ -1171,7 +1381,29 @@ export class AccountClaimService {
     }
   }
 
-  private async deletePlayerWithWalletProofInternal(input: DeletePlayerWithWalletProofInput): Promise<void> {
+  private playerDeletionCompletionReplayKey(
+    challengeId: string,
+    intentHash: string,
+    challengeHash: string,
+    account: string,
+  ): string {
+    return `player-deletion-complete:${challengeId}:${intentHash}:${challengeHash}:${account}`;
+  }
+
+  private async isPlayerDeletionComplete(client: SqlClient, replayKey: string, now: Date): Promise<boolean> {
+    for (const candidate of this.authority.persistence.tombstoneKeys.replayCandidates("claim-challenge", replayKey, now)) {
+      const result = await client.query<{ readonly found: number }>(
+        `SELECT 1 AS found FROM samurai_persistence.deletion_tombstones
+          WHERE kind = 'claim-challenge' AND digest_key_version = $1
+            AND digest_key_identity = $2 AND tombstone_digest = $3 AND expires_at > $4 LIMIT 1`,
+        [candidate.keyVersion, keyIdentityBytes(candidate.keyIdentity), candidate.digest, now],
+      );
+      if (result.rows[0]) return true;
+    }
+    return false;
+  }
+
+  private async deletePlayerWithWalletProofInternal(input: DeletePlayerWithWalletProofInput): Promise<DeletedPlayerResult> {
     const intent = parsePlayerDeletionIntent(input.deletionIntent);
     if (!UUID_V4_PATTERN.test(input.challengeId)) invalid("PLAYER_DELETION_INVALID");
     const challenge = parseClaimChallenge(input.proof.challenge);
@@ -1181,7 +1413,12 @@ export class AccountClaimService {
     if (challenge.claimIntentHash !== intentHash || challenge.account !== verified.account) {
       invalid("PLAYER_DELETION_INVALID");
     }
-    await this.#runner.run(async (client) => {
+    const completionReplayKey = this.playerDeletionCompletionReplayKey(
+      input.challengeId, intentHash, challengeHash, verified.account,
+    );
+    const alreadyDeleted = await this.#runner.run(async (client) => {
+      const initialNow = await this.authority.assertTransactionReady(client, [], "retention");
+      if (await this.isPlayerDeletionComplete(client, completionReplayKey, initialNow)) return true;
       const resolved = await this.resolveWallet(client, challenge.chainId, verified.account);
       if (!resolved) invalid("PLAYER_DELETION_INVALID");
       const player = await client.query<{ readonly id: string }>(
@@ -1207,15 +1444,39 @@ export class AccountClaimService {
           this.assertChallenge(storedChallenge, "delete", null, intent.deleteClaimId,
             intentHash, challengeHash, challenge, now);
           await this.consumeChallenge(client, storedChallenge, intent.deleteClaimId, now);
+          await this.insertTombstone(client, "claim-challenge", completionReplayKey, now);
         },
       });
+      return false;
     });
+    return { disposition: alreadyDeleted ? "already-deleted" : "deleted" };
   }
 
   async deletePlayerWithWalletProof(input: DeletePlayerWithWalletProofInput): Promise<DeletePlayerPublicResult> {
     try {
-      await this.deletePlayerWithWalletProofInternal(input);
+      return await this.deletePlayerWithWalletProofInternal(input);
     } catch {
+      try {
+        if (!UUID_V4_PATTERN.test(input.challengeId)) invalid("PLAYER_DELETION_INVALID");
+        const intent = parsePlayerDeletionIntent(input.deletionIntent);
+        const challenge = parseClaimChallenge(input.proof.challenge);
+        const verified = verifyAccountProof(input.proof);
+        const intentHash = await hashPlayerDeletionIntent(intent);
+        const challengeHash = await hashClaimChallenge(challenge);
+        if (challenge.claimIntentHash !== intentHash || challenge.account !== verified.account) {
+          invalid("PLAYER_DELETION_INVALID");
+        }
+        const replayKey = this.playerDeletionCompletionReplayKey(
+          input.challengeId, intentHash, challengeHash, verified.account,
+        );
+        const completed = await this.#runner.run(async (client) => {
+          const now = await this.authority.assertTransactionReady(client, [], "retention");
+          return this.isPlayerDeletionComplete(client, replayKey, now);
+        });
+        if (completed) return { disposition: "already-deleted" };
+      } catch {
+        // Only the exact signed deletion-completion tombstone is idempotent.
+      }
       return ACCOUNT_PLAYER_DELETE_PUBLIC_FAILURE;
     }
   }

@@ -42,6 +42,9 @@ importers:
 
   apps/web:
     dependencies:
+      '@samurai-sushi/account-http-runtime':
+        specifier: workspace:*
+        version: link:../../packages/account-http-runtime
       '@samurai-sushi/domain':
         specifier: workspace:*
         version: link:../../packages/domain
@@ -67,9 +70,43 @@ importers:
       '@types/react-dom':
         specifier: 19.1.9
         version: 19.1.9(@types/react@19.1.12)
+      tsx:
+        specifier: 4.20.5
+        version: 4.20.5
       typescript:
         specifier: 5.9.2
         version: 5.9.2
+
+  packages/account-http-runtime:
+    dependencies:
+      '@samurai-sushi/account-proof-verifier':
+        specifier: workspace:*
+        version: link:../account-proof-verifier
+      '@samurai-sushi/persistence':
+        specifier: workspace:*
+        version: link:../persistence
+      next:
+        specifier: 16.2.12
+        version: 16.2.12(@playwright/test@1.62.1)(@types/node@24.3.0)(react-dom@19.2.8(react@19.2.8))(react@19.2.8)
+      pg:
+        specifier: 8.16.3
+        version: 8.16.3
+    devDependencies:
+      '@noble/hashes':
+        specifier: 1.8.0
+        version: 1.8.0
+      '@samurai-sushi/domain':
+        specifier: workspace:*
+        version: link:../domain
+      '@taquito/utils':
+        specifier: 25.0.0
+        version: 25.0.0
+      '@types/node':
+        specifier: 24.3.0
+        version: 24.3.0
+      '@types/pg':
+        specifier: 8.15.5
+        version: 8.15.5
 
   packages/account-proof-verifier:
     dependencies:

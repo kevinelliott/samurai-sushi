@@ -83,10 +83,13 @@ not guarantee availability.
 ### Guest persistence and recovery
 
 ADR 0003 makes PostgreSQL authoritative and forbids offline mutation. Guest
-resume secrets are random 256-bit bearer values in Secure, HttpOnly,
-SameSite=Lax cookies; only keyed digests are stored, and same-origin mutation
-checks are mandatory. Browser storage must not contain resume secrets, wallet
-material, an independent service history, or analytics identity.
+resume, guest-claim, and player-session secrets are distinct random 256-bit
+bearer values in `__Host-` Secure, HttpOnly, SameSite=Strict, Path=/ cookies;
+only keyed digests are stored. The raw server boundary requires an exact
+configured Origin, matching Host, attested route target, and strict bounded JSON
+before any cookie or body authority reaches a handler. Browser storage must not
+contain bearer secrets, wallet material, an independent service history, or
+analytics identity.
 
 Successful wallet proof creates an independent random player-session cookie
 with the same storage and origin protections. Claim atomically creates that
@@ -94,6 +97,19 @@ session and revokes the guest path. Player sessions expire, rotate after
 credential/recovery changes, and can be revoked without changing wallet state.
 Cookie-secret predecessor grace is separate from HMAC verification-key
 retention; compromised digest keys cause bounded mass reauthentication.
+Domain-separated deterministic rotation retries converge after lost or reordered
+responses. Pending delivery activates only through the dedicated exact-generation
+acknowledgement endpoint; exact acknowledgement, selected-session logout, and
+guest deletion retries are idempotent without widening arbitrary failures.
+An exact Origin-protected POST cookie reset clears all three host-only account
+cookies without inspecting or mutating server authority, so a browser-retained
+expired HttpOnly cookie cannot strand a user outside fresh guest or wallet
+recovery flows.
+
+This boundary has source and disposable-PostgreSQL local production-HTTP
+evidence only. Wallet SDK/network integration, browser claim UI, analytics,
+background workers, rate-limit infrastructure, durable TLS/proxy deployment,
+and physical-device proof remain separate security gates.
 
 Portable saves are server-integrity-protected and encrypted locally with a user
 passphrase under a versioned WebCrypto suite. Import, wallet claim, and deletion

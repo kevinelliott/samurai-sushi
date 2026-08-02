@@ -56,6 +56,14 @@ interface ResumeMatchRow extends GuestSessionRow {
   readonly digest_valid_until: Date | null;
 }
 
+export interface RepositoryResumeDigestRow {
+  readonly digest_key_version: number;
+  readonly digest_key_identity: Uint8Array;
+  readonly digest: Uint8Array;
+  readonly slot: "current" | "predecessor";
+  readonly valid_until: Date | null;
+}
+
 function sessionFromRow(row: GuestSessionRow): GuestSessionRecord {
   return {
     id: row.id,
@@ -68,6 +76,44 @@ function sessionFromRow(row: GuestSessionRow): GuestSessionRecord {
 }
 
 export class GuestSessionRepository {
+  private async findResumeMatch(
+    client: SqlClient,
+    candidates: readonly VersionedDigest[],
+    lockParent: boolean,
+  ): Promise<ResumeMatch | null> {
+    if (candidates.length === 0) return null;
+    const clauses: string[] = [];
+    const values: Array<number | Uint8Array> = [];
+    for (const candidate of candidates) {
+      const offset = values.length;
+      values.push(candidate.keyVersion, keyIdentityBytes(candidate.keyIdentity), candidate.digest);
+      clauses.push(`(d.digest_key_version = $${offset + 1} AND d.digest_key_identity = $${offset + 2} AND d.digest = $${offset + 3})`);
+    }
+    const result = await client.query<ResumeMatchRow>(
+      `SELECT s.id, s.consent_version, s.created_at, s.last_seen_at, s.expires_at, s.rotate_after,
+              d.slot, d.digest_key_version, d.digest_key_identity, d.digest, d.valid_until AS digest_valid_until
+         FROM samurai_persistence.guest_resume_digests d
+         JOIN samurai_persistence.guest_sessions s ON s.id = d.guest_session_id
+        WHERE ${clauses.join(" OR ")}
+        ${lockParent ? "FOR UPDATE OF s" : ""}`,
+      values,
+    );
+    const row = result.rows[0];
+    if (!row) return null;
+    return {
+      ...sessionFromRow(row),
+      slot: row.slot,
+      digestKeyVersion: row.digest_key_version,
+      digestKeyIdentity: `sha256:${Buffer.from(row.digest_key_identity).toString("hex")}`,
+      digest: row.digest,
+      digestValidUntil: row.digest_valid_until,
+    };
+  }
+
+  async findResumeMatchUnlocked(client: SqlClient, candidates: readonly VersionedDigest[]): Promise<ResumeMatch | null> {
+    return this.findResumeMatch(client, candidates, false);
+  }
+
   async insert(
     client: SqlClient,
     session: GuestSessionRecord,
@@ -106,33 +152,18 @@ export class GuestSessionRepository {
     client: SqlClient,
     candidates: readonly VersionedDigest[],
   ): Promise<ResumeMatch | null> {
-    if (candidates.length === 0) return null;
-    const clauses: string[] = [];
-    const values: Array<number | Uint8Array> = [];
-    for (const candidate of candidates) {
-      const offset = values.length;
-      values.push(candidate.keyVersion, keyIdentityBytes(candidate.keyIdentity), candidate.digest);
-      clauses.push(`(d.digest_key_version = $${offset + 1} AND d.digest_key_identity = $${offset + 2} AND d.digest = $${offset + 3})`);
-    }
-    const result = await client.query<ResumeMatchRow>(
-      `SELECT s.id, s.consent_version, s.created_at, s.last_seen_at, s.expires_at, s.rotate_after,
-              d.slot, d.digest_key_version, d.digest_key_identity, d.digest, d.valid_until AS digest_valid_until
-         FROM samurai_persistence.guest_resume_digests d
-         JOIN samurai_persistence.guest_sessions s ON s.id = d.guest_session_id
-        WHERE ${clauses.join(" OR ")}
-        FOR UPDATE OF s`,
-      values,
+    return this.findResumeMatch(client, candidates, true);
+  }
+
+  async resumeDigests(client: SqlClient, guestSessionId: string, lock = false): Promise<readonly RepositoryResumeDigestRow[]> {
+    const result = await client.query<RepositoryResumeDigestRow>(
+      `SELECT digest_key_version, digest_key_identity, digest, slot, valid_until
+         FROM samurai_persistence.guest_resume_digests
+        WHERE guest_session_id = $1 ORDER BY slot
+        ${lock ? "FOR UPDATE" : ""}`,
+      [guestSessionId],
     );
-    const row = result.rows[0];
-    if (!row) return null;
-    return {
-      ...sessionFromRow(row),
-      slot: row.slot,
-      digestKeyVersion: row.digest_key_version,
-      digestKeyIdentity: `sha256:${Buffer.from(row.digest_key_identity).toString("hex")}`,
-      digest: row.digest,
-      digestValidUntil: row.digest_valid_until,
-    };
+    return result.rows;
   }
 
   async touch(client: SqlClient, guestSessionId: string, now: Date): Promise<void> {
@@ -179,15 +210,6 @@ export class GuestSessionRepository {
         WHERE id = $1`,
       [guestSessionId, now, rotateAfter],
     );
-  }
-
-  async livePredecessorUntil(client: SqlClient, guestSessionId: string, now: Date): Promise<Date | null> {
-    const result = await client.query<{ readonly valid_until: Date }>(
-      `SELECT valid_until FROM samurai_persistence.guest_resume_digests
-        WHERE guest_session_id = $1 AND slot = 'predecessor' AND valid_until > $2`,
-      [guestSessionId, now],
-    );
-    return result.rows[0]?.valid_until ?? null;
   }
 
   async lockById(client: SqlClient, guestSessionId: string): Promise<GuestSessionRecord | null> {

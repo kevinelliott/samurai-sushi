@@ -8,6 +8,7 @@ import {
   issueCapabilitySecret,
   issueResumeSecret,
   keyIdentityBytes,
+  keyIdentityFromBytes,
   type TombstoneKind,
 } from "./crypto";
 import { GuestResumeError, GuestRotationDeferredError, PersistenceError } from "./errors";
@@ -51,6 +52,7 @@ export interface IssuedGuest<Checkpoint extends Readonly<Record<string, unknown>
 
 export interface ResumedGuest {
   readonly session: GuestSessionRecord;
+  readonly credentialKind: "current" | "predecessor";
   readonly rotatedResumeSecret?: string;
 }
 
@@ -212,7 +214,12 @@ export class GuestSessionService {
       } catch (error) {
         mapDeletedSecretToInvalid(error);
       }
+      const preliminary = await this.repository.findResumeMatchUnlocked(client, candidates);
+      if (!preliminary) throw new GuestResumeError("GUEST_RESUME_INVALID");
+      const digestCandidates = await this.repository.resumeDigests(client, preliminary.id);
+      await this.authority.lockStoredGuestDigestReplayFences(client, digestCandidates);
       const match = await this.repository.findResumeMatchForUpdate(client, candidates);
+      const lockedDigests = match ? await this.repository.resumeDigests(client, match.id, true) : [];
       const now = await this.authority.assertTransactionReady(client);
       try {
         candidates = this.authority.resumeKeys.candidates(secret, now);
@@ -221,7 +228,17 @@ export class GuestSessionService {
         if (error instanceof GuestSecretFormatError) throw new GuestResumeError("GUEST_RESUME_INVALID");
         mapDeletedSecretToInvalid(error);
       }
-      if (!match) throw new GuestResumeError("GUEST_RESUME_INVALID");
+      if (!match || match.id !== preliminary.id || match.digestKeyVersion !== preliminary.digestKeyVersion
+        || match.digestKeyIdentity !== preliminary.digestKeyIdentity
+        || !constantTimeDigestEqual(match.digest, preliminary.digest)) {
+        throw new GuestResumeError("GUEST_RESUME_INVALID");
+      }
+      if (!lockedDigests.some((row) => row.slot === match.slot
+        && row.digest_key_version === match.digestKeyVersion
+        && keyIdentityFromBytes(row.digest_key_identity) === match.digestKeyIdentity
+        && constantTimeDigestEqual(row.digest, match.digest))) {
+        throw new GuestResumeError("GUEST_RESUME_INVALID");
+      }
       const candidate = candidates.find((item) => (
         item.keyVersion === match.digestKeyVersion
         && item.keyIdentity === match.digestKeyIdentity
@@ -235,31 +252,61 @@ export class GuestSessionService {
       }
       if (match.slot === "predecessor") {
         await this.repository.touch(client, match.id, now);
-        return { session: { ...sessionFromMatch(match), lastSeenAt: now } };
+        return { session: { ...sessionFromMatch(match), lastSeenAt: now }, credentialKind: "predecessor" };
       }
       const mustRotate =
         match.digestKeyVersion !== this.authority.resumeKeys.active.version ||
         match.rotateAfter.getTime() <= now.getTime();
       if (!mustRotate) {
         await this.repository.touch(client, match.id, now);
-        return { session: { ...sessionFromMatch(match), lastSeenAt: now } };
+        return { session: { ...sessionFromMatch(match), lastSeenAt: now }, credentialKind: "current" };
       }
-      if (await this.repository.livePredecessorUntil(client, match.id, now)) {
+      if (lockedDigests.some((row) => row.slot === "predecessor"
+        && row.valid_until && row.valid_until.getTime() > now.getTime())) {
         await this.repository.touch(client, match.id, now);
-        return { session: { ...sessionFromMatch(match), lastSeenAt: now } };
+        return { session: { ...sessionFromMatch(match), lastSeenAt: now }, credentialKind: "current" };
       }
-      const rotatedResumeSecret = this.createSecret();
-      const rotateAfter = addMilliseconds(now, this.policy.rotationIntervalMs);
+      let issueNow = await this.authority.assertTransactionReady(client);
+      try {
+        candidates = this.authority.resumeKeys.candidates(secret, issueNow);
+        await this.authority.assertGuestSecretNotTombstoned(client, secret, issueNow);
+      } catch (error) {
+        if (error instanceof GuestSecretFormatError) throw new GuestResumeError("GUEST_RESUME_INVALID");
+        mapDeletedSecretToInvalid(error);
+      }
+      const finalCandidate = candidates.find((item) => item.keyVersion === match.digestKeyVersion
+        && item.keyIdentity === match.digestKeyIdentity);
+      if (!finalCandidate || !constantTimeDigestEqual(finalCandidate.digest, match.digest)
+        || match.expiresAt.getTime() <= issueNow.getTime()) throw new GuestResumeError("GUEST_RESUME_INVALID");
+      const rotatedResumeSecret = this.authority.resumeKeys.deriveRotationSecret(
+        secret, issueNow, match.digestKeyVersion,
+      );
+      await this.authority.lockGuestSecretReplayFence(client, rotatedResumeSecret, issueNow);
+      issueNow = await this.authority.assertTransactionReady(client);
+      try {
+        candidates = this.authority.resumeKeys.candidates(secret, issueNow);
+        await this.authority.assertGuestSecretNotTombstoned(client, secret, issueNow);
+      } catch (error) {
+        if (error instanceof GuestSecretFormatError) throw new GuestResumeError("GUEST_RESUME_INVALID");
+        mapDeletedSecretToInvalid(error);
+      }
+      const postFenceCandidate = candidates.find((item) => item.keyVersion === match.digestKeyVersion
+        && item.keyIdentity === match.digestKeyIdentity);
+      if (!postFenceCandidate || !constantTimeDigestEqual(postFenceCandidate.digest, match.digest)
+        || match.expiresAt.getTime() <= issueNow.getTime()) throw new GuestResumeError("GUEST_RESUME_INVALID");
+      await this.assertDerivedResumeSecretAvailable(client, rotatedResumeSecret, issueNow);
+      const rotateAfter = addMilliseconds(issueNow, this.policy.rotationIntervalMs);
       await this.repository.rotate(
         client,
         match.id,
-        this.authority.resumeKeys.digest(rotatedResumeSecret, now),
-        addMilliseconds(now, this.policy.predecessorGraceMs),
+        this.authority.resumeKeys.digest(rotatedResumeSecret, issueNow),
+        addMilliseconds(issueNow, this.policy.predecessorGraceMs),
         rotateAfter,
-        now,
+        issueNow,
       );
       return {
-        session: { ...sessionFromMatch(match), lastSeenAt: now, rotateAfter },
+        session: { ...sessionFromMatch(match), lastSeenAt: issueNow, rotateAfter },
+        credentialKind: "current",
         rotatedResumeSecret,
       };
     });
@@ -280,8 +327,13 @@ export class GuestSessionService {
         if (error instanceof GuestSecretFormatError) throw new GuestResumeError("GUEST_RESUME_INVALID");
         throw error;
       }
+      const preliminary = await this.repository.findResumeMatchUnlocked(client, candidates);
+      if (!preliminary) throw new GuestResumeError("GUEST_RESUME_INVALID");
+      const digestCandidates = await this.repository.resumeDigests(client, preliminary.id);
+      await this.authority.lockStoredGuestDigestReplayFences(client, digestCandidates);
       const match = await this.repository.findResumeMatchForUpdate(client, candidates);
-      const now = await this.authority.assertTransactionReady(client);
+      const lockedDigests = match ? await this.repository.resumeDigests(client, match.id, true) : [];
+      let now = await this.authority.assertTransactionReady(client);
       try {
         candidates = this.authority.resumeKeys.candidates(secret, now);
         await this.authority.assertGuestSecretNotTombstoned(client, secret, now);
@@ -290,6 +342,12 @@ export class GuestSessionService {
         mapDeletedSecretToInvalid(error);
       }
       if (!match) throw new GuestResumeError("GUEST_RESUME_INVALID");
+      if (!lockedDigests.some((row) => row.slot === match.slot
+        && row.digest_key_version === match.digestKeyVersion
+        && keyIdentityFromBytes(row.digest_key_identity) === match.digestKeyIdentity
+        && constantTimeDigestEqual(row.digest, match.digest))) {
+        throw new GuestResumeError("GUEST_RESUME_INVALID");
+      }
       const candidate = candidates.find((item) => (
         item.keyVersion === match.digestKeyVersion
         && item.keyIdentity === match.digestKeyIdentity
@@ -298,25 +356,58 @@ export class GuestSessionService {
         throw new GuestResumeError("GUEST_RESUME_INVALID");
       }
       if (match.expiresAt.getTime() <= now.getTime()) throw new GuestResumeError("GUEST_RESUME_EXPIRED");
-      const predecessorUntil = match.slot === "predecessor"
-        ? match.digestValidUntil
-        : await this.repository.livePredecessorUntil(client, match.id, now);
-      if (predecessorUntil && predecessorUntil.getTime() > now.getTime()) {
+      if (match.slot === "predecessor" && (!match.digestValidUntil || match.digestValidUntil.getTime() <= now.getTime())) {
+        throw new GuestResumeError("GUEST_RESUME_INVALID");
+      }
+      const predecessorUntil = match.slot === "current"
+        ? lockedDigests.find((row) => row.slot === "predecessor" && row.valid_until && row.valid_until.getTime() > now.getTime())?.valid_until ?? null
+        : match.digestValidUntil;
+      if (match.slot === "current" && predecessorUntil && predecessorUntil.getTime() > now.getTime()) {
         throw new GuestRotationDeferredError(predecessorUntil.getTime());
       }
-      if (match.slot !== "current") throw new GuestResumeError("GUEST_RESUME_INVALID");
-      const rotatedResumeSecret = this.createSecret();
-      const rotateAfter = addMilliseconds(now, this.policy.rotationIntervalMs);
-      await this.repository.rotate(
-        client,
-        match.id,
-        this.authority.resumeKeys.digest(rotatedResumeSecret, now),
-        addMilliseconds(now, this.policy.predecessorGraceMs),
-        rotateAfter,
-        now,
+      const rotatedResumeSecret = this.authority.resumeKeys.deriveRotationSecret(
+        secret, now, match.digestKeyVersion,
       );
+      await this.authority.lockGuestSecretReplayFence(client, rotatedResumeSecret, now);
+      now = await this.authority.assertTransactionReady(client);
+      if (match.expiresAt.getTime() <= now.getTime()) throw new GuestResumeError("GUEST_RESUME_EXPIRED");
+      if (match.slot === "predecessor" && (!match.digestValidUntil || match.digestValidUntil.getTime() <= now.getTime())) {
+        throw new GuestResumeError("GUEST_RESUME_INVALID");
+      }
+      try {
+        candidates = this.authority.resumeKeys.candidates(secret, now);
+        await this.authority.assertGuestSecretNotTombstoned(client, secret, now);
+        await this.authority.assertGuestSecretNotTombstoned(client, rotatedResumeSecret, now);
+      } catch (error) {
+        if (error instanceof GuestSecretFormatError) throw new GuestResumeError("GUEST_RESUME_INVALID");
+        mapDeletedSecretToInvalid(error);
+      }
+      const finalCandidate = candidates.find((item) => item.keyVersion === match.digestKeyVersion
+        && item.keyIdentity === match.digestKeyIdentity);
+      if (!finalCandidate || !constantTimeDigestEqual(finalCandidate.digest, match.digest)) {
+        throw new GuestResumeError("GUEST_RESUME_INVALID");
+      }
+      const rotateAfter = addMilliseconds(now, this.policy.rotationIntervalMs);
+      if (match.slot === "predecessor") {
+        const current = lockedDigests.find((row) => row.slot === "current");
+        if (!current) throw new GuestResumeError("GUEST_RESUME_INVALID");
+        await this.assertDerivedResumeSecretAvailable(client, rotatedResumeSecret, now, current);
+        await this.repository.touch(client, match.id, now);
+      } else {
+        await this.assertDerivedResumeSecretAvailable(client, rotatedResumeSecret, now);
+        await this.repository.rotate(
+          client,
+          match.id,
+          this.authority.resumeKeys.digest(rotatedResumeSecret, now),
+          addMilliseconds(now, this.policy.predecessorGraceMs),
+          rotateAfter,
+          now,
+        );
+      }
       return {
-        session: { ...sessionFromMatch(match), lastSeenAt: now, rotateAfter },
+        session: { ...sessionFromMatch(match), lastSeenAt: now,
+          rotateAfter: match.slot === "predecessor" ? match.rotateAfter : rotateAfter },
+        credentialKind: "current",
         rotatedResumeSecret,
       };
     });
@@ -333,6 +424,10 @@ export class GuestSessionService {
         throw error;
       }
       await this.authority.lockGuestSecretReplayFence(client, secret, initialNow);
+      const replayNow = await this.authority.assertTransactionReady(client);
+      if (await this.isExactGuestDeletionTombstone(client, secret, replayNow)) {
+        return;
+      }
       try {
         await this.authority.assertGuestSecretNotTombstoned(client, secret, initialNow);
       } catch (error) {
@@ -422,7 +517,15 @@ export class GuestSessionService {
       await client.query("DELETE FROM samurai_persistence.claim_challenges WHERE guest_session_id = $1", [match.id]);
       await client.query("DELETE FROM samurai_persistence.guest_claim_capabilities WHERE guest_session_id = $1", [match.id]);
       await client.query("DELETE FROM samurai_persistence.guest_sessions WHERE id = $1", [match.id]);
-      for (const row of digests.rows) await this.insertTombstone(client, "guest-session", this.resumeReplayKey(row), deleteNow, row);
+      for (const row of digests.rows) {
+        await this.insertTombstone(client, "guest-session", this.resumeReplayKey(row), deleteNow, row);
+      }
+      const authenticatedDigest = digests.rows.find((row) => row.digest_key_version === match.digestKeyVersion
+        && keyIdentityFromBytes(row.digest_key_identity) === match.digestKeyIdentity
+        && constantTimeDigestEqual(row.digest, match.digest));
+      if (!authenticatedDigest) throw new GuestResumeError("GUEST_RESUME_INVALID");
+      await this.insertTombstone(client, "guest-session",
+        `guest-delete:${this.resumeReplayKey(authenticatedDigest)}`, deleteNow, authenticatedDigest);
       for (const row of commandKeys.rows) {
         await this.insertTombstone(client, "command", this.commandReplayKey(match.id, row.idempotency_key), deleteNow);
       }
@@ -778,6 +881,51 @@ export class GuestSessionService {
 
   private resumeReplayKey(row: ResumeDigestRow): string {
     return `resume:v${row.digest_key_version}:${Buffer.from(row.digest).toString("base64url")}`;
+  }
+
+  private async assertDerivedResumeSecretAvailable(
+    client: SqlClient,
+    secret: string,
+    now: Date,
+    allowedCurrent?: ResumeDigestRow,
+  ): Promise<void> {
+    await this.authority.assertGuestSecretNotTombstoned(client, secret, now);
+    for (const identity of this.authority.resumeKeys.tombstoneCandidates(secret, now)) {
+      const live = await client.query<ResumeDigestRow>(
+        `SELECT digest_key_version, digest_key_identity, digest
+           FROM samurai_persistence.guest_resume_digests
+          WHERE digest_key_version = $1 AND digest_key_identity = $2 AND digest = $3 LIMIT 1`,
+        [identity.keyVersion, keyIdentityBytes(identity.keyIdentity), identity.digest],
+      );
+      const row = live.rows[0];
+      if (!row) continue;
+      if (allowedCurrent && row.digest_key_version === allowedCurrent.digest_key_version
+        && keyIdentityFromBytes(row.digest_key_identity) === keyIdentityFromBytes(allowedCurrent.digest_key_identity)
+        && constantTimeDigestEqual(row.digest, allowedCurrent.digest)) continue;
+      throw new PersistenceError("GUEST_SECRET_COLLISION", "A derived guest rotation secret collided with live authority.");
+    }
+  }
+
+  private async isExactGuestDeletionTombstone(client: SqlClient, secret: string, now: Date): Promise<boolean> {
+    let identities;
+    try {
+      identities = this.authority.resumeKeys.tombstoneCandidates(secret, now);
+    } catch {
+      return false;
+    }
+    for (const identity of identities) {
+      const replayKey = `guest-delete:resume:v${identity.keyVersion}:${Buffer.from(identity.digest).toString("base64url")}`;
+      for (const candidate of this.authority.tombstoneKeys.replayCandidates("guest-session", replayKey, now)) {
+        const result = await client.query<{ readonly found: number }>(
+          `SELECT 1 AS found FROM samurai_persistence.deletion_tombstones
+            WHERE kind = 'guest-session' AND digest_key_version = $1 AND digest_key_identity = $2
+              AND tombstone_digest = $3 AND expires_at > $4 LIMIT 1`,
+          [candidate.keyVersion, keyIdentityBytes(candidate.keyIdentity), candidate.digest, now],
+        );
+        if (result.rows[0]) return true;
+      }
+    }
+    return false;
   }
 
   private claimCapabilityReplayKey(row: ResumeDigestRow): string {

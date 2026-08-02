@@ -126,6 +126,13 @@ function canonicalBase58(value: unknown, expectedPrefix: PrefixV2, expectedBytes
   return Uint8Array.from(bytes);
 }
 
+/** Node-only startup gate shared by proof verification and server composition. */
+export function assertCanonicalTezosChainId(value: unknown): string {
+  const text = boundedText(value);
+  canonicalBase58(text, PrefixV2.ChainID, 4);
+  return text;
+}
+
 function bytesEqual(left: Uint8Array, right: Uint8Array): boolean {
   if (left.byteLength !== right.byteLength) return false;
   let difference = 0;

@@ -192,11 +192,48 @@ export class PersistenceAuthority {
   }
 
   async lockGuestSecretReplayFence(client: SqlClient, secret: string, now: Date): Promise<void> {
-    const scopes = this.resumeKeys.tombstoneCandidates(secret, now)
-      .map((candidate) => (
-        `guest-resume-replay:v${candidate.keyVersion}:${candidate.keyIdentity}:${Buffer.from(candidate.digest).toString("base64url")}`
-      ))
-      .sort();
+    await this.lockGuestReplayFences(client, { secrets: [secret], stored: [] }, now);
+  }
+
+  async lockGuestReplayFences(
+    client: SqlClient,
+    values: {
+      readonly secrets: readonly string[];
+      readonly stored: readonly {
+        readonly digest_key_version: number;
+        readonly digest_key_identity: Uint8Array;
+        readonly digest: Uint8Array;
+      }[];
+    },
+    now: Date,
+  ): Promise<void> {
+    const scopes = [...new Set([
+      ...values.secrets.flatMap((secret) => this.resumeKeys.tombstoneCandidates(secret, now)
+        .map((candidate) => (
+          `guest-resume-replay:v${candidate.keyVersion}:${candidate.keyIdentity}:${Buffer.from(candidate.digest).toString("base64url")}`
+        ))),
+      ...values.stored.map((row) => (
+        `guest-resume-replay:v${row.digest_key_version}:sha256:${Buffer.from(row.digest_key_identity).toString("hex")}`
+        + `:${Buffer.from(row.digest).toString("base64url")}`
+      )),
+    ])].sort();
+    for (const scope of scopes) {
+      await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [scope]);
+    }
+  }
+
+  async lockStoredGuestDigestReplayFences(
+    client: SqlClient,
+    rows: readonly {
+      readonly digest_key_version: number;
+      readonly digest_key_identity: Uint8Array;
+      readonly digest: Uint8Array;
+    }[],
+  ): Promise<void> {
+    const scopes = [...new Set(rows.map((row) => (
+      `guest-resume-replay:v${row.digest_key_version}:sha256:${Buffer.from(row.digest_key_identity).toString("hex")}`
+      + `:${Buffer.from(row.digest).toString("base64url")}`
+    )))].sort();
     for (const scope of scopes) {
       await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [scope]);
     }
