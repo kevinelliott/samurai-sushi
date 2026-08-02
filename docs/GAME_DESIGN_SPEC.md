@@ -167,3 +167,26 @@ content-pack rules are normative in
 - No random reward controls progression.
 - Foreign assets cannot be consumed until full identity, custody, and
   disposition review is surfaced before signature.
+
+## 11. Implemented first-evening authority
+
+The Phase 1 server authority pins this exact tutorial sequence: open the
+counter; wash, steam, and season rice; serve ceramicist/kappa maki,
+fishmonger/tamago nigiri, and courier/salmon nigiri in order; choose one of two
+mechanically equal first-plate presentations; close the ledger; choose one of
+three mechanically equal restorations; enter `SETTLED`; and add the rice-free
+salmon-sashimi unlock exactly once. Every order carries an authored outcome,
+plate/serve feedback, continuing story flag, and persistent consequence ref.
+
+Wrong or out-of-order actions return a pinned corrective cue while preserving
+the exact checkpoint bytes and revision. Abandonment alone discards outstanding
+orders and cannot settle or unlock content. The pure projector reconstructs the
+current prompt, legal choices, primary command, correction, display refs, and
+complete served-order ledger from the canonical checkpoint plus pinned manifest.
+`committed` and `replayed` dispositions let the later browser suppress duplicate
+serve, feedback, settlement, and unlock ceremony.
+
+These are executable source and local disposable-PostgreSQL facts. Dialogue,
+guest roles, culinary wording, art requirements, and the Moonwake/Shiokaze
+setting remain review-pending and do not support a public cultural approval or
+playability claim.

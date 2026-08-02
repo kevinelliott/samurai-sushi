@@ -2,6 +2,7 @@ import { Pool, type PoolClient, type QueryResult as PgQueryResult } from "pg";
 import {
   AccountClaimAuthority,
   AccountClaimService,
+  EveningServiceAuthority,
   GuestClaimKeyring,
   GuestSessionService,
   HmacKeyring,
@@ -36,6 +37,7 @@ class PgPoolAdapter implements SqlPool {
 export interface AccountRuntimeServices {
   readonly guests: GuestSessionService;
   readonly accounts: AccountClaimService;
+  readonly evening: EveningServiceAuthority;
   close(): Promise<void>;
 }
 
@@ -50,12 +52,14 @@ export async function composeAccountRuntime(config: AccountRuntimeConfig): Promi
     const persistence = new PersistenceAuthority(pool, resumeKeys, tombstoneKeys);
     const authority = new AccountClaimAuthority(pool, persistence, guestClaimKeys, playerSessionKeys);
     await authority.bootstrap();
+    const accounts = new AccountClaimService(pool, authority, {
+      origin: config.canonicalOrigin,
+      chainId: config.chainId,
+    });
     return Object.freeze({
       guests: new GuestSessionService(pool, persistence, { claimKeys: guestClaimKeys }),
-      accounts: new AccountClaimService(pool, authority, {
-        origin: config.canonicalOrigin,
-        chainId: config.chainId,
-      }),
+      accounts,
+      evening: new EveningServiceAuthority(pool, persistence, accounts),
       close: async () => rawPool.end(),
     });
   } catch (error) {

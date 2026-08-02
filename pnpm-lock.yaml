@@ -82,6 +82,12 @@ importers:
       '@samurai-sushi/account-proof-verifier':
         specifier: workspace:*
         version: link:../account-proof-verifier
+      '@samurai-sushi/content':
+        specifier: workspace:*
+        version: link:../content
+      '@samurai-sushi/domain':
+        specifier: workspace:*
+        version: link:../domain
       '@samurai-sushi/persistence':
         specifier: workspace:*
         version: link:../persistence
@@ -95,9 +101,6 @@ importers:
       '@noble/hashes':
         specifier: 1.8.0
         version: 1.8.0
-      '@samurai-sushi/domain':
-        specifier: workspace:*
-        version: link:../domain
       '@taquito/utils':
         specifier: 25.0.0
         version: 25.0.0
@@ -120,7 +123,11 @@ importers:
         specifier: 25.0.0
         version: 25.0.0
 
-  packages/content: {}
+  packages/content:
+    dependencies:
+      '@samurai-sushi/domain':
+        specifier: workspace:*
+        version: link:../domain
 
   packages/domain: {}
 

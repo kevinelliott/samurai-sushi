@@ -11,3 +11,4 @@ export * from "./migrations";
 export * from "./outbox";
 export * from "./portable-recovery";
 export * from "./repositories";
+export * from "./service-authority";

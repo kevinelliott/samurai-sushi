@@ -427,6 +427,13 @@ export interface AuthenticatedPlayerSession {
   readonly rotationRequired: boolean;
 }
 
+export interface LockedPlayerServiceSubject {
+  readonly playerId: string;
+  readonly sessionId: string;
+  readonly credentialKind: "current" | "predecessor";
+  readonly now: Date;
+}
+
 export interface RotatedPlayerSession extends AuthenticatedPlayerSession {
   readonly sessionSecret: string;
 }
@@ -591,7 +598,7 @@ export class AccountClaimService {
       }
 
       const playerId = intent.createPlayer ? this.#issueUuid() : intent.targetPlayerId;
-      const playerRevision = intent.createPlayer ? 0 : intent.playerRevision + 1;
+      const playerRevision = intent.createPlayer ? guestProgress.revision : intent.playerRevision + 1;
       const sessionId = this.#issueUuid();
       const sessionSecret = issuedSession.secret;
       const sessionDigest = issuedSession.digest;
@@ -616,8 +623,8 @@ export class AccountClaimService {
         await client.query(
           `INSERT INTO samurai_persistence.player_progress
             (player_id, revision, content_version, checkpoint_schema_version, checkpoint, created_at, updated_at)
-           VALUES ($1, 0, $2, $3, $4::jsonb, $5, $5)`,
-          [playerId, intent.contentVersion, guestProgress.checkpointSchemaVersion, JSON.stringify(mergedCheckpoint), now],
+           VALUES ($1, $2, $3, $4, $5::jsonb, $6, $6)`,
+          [playerId, playerRevision, intent.contentVersion, guestProgress.checkpointSchemaVersion, JSON.stringify(mergedCheckpoint), now],
         );
       } else {
         await client.query(
@@ -1020,6 +1027,24 @@ export class AccountClaimService {
     } catch {
       return ACCOUNT_PLAYER_SESSION_PUBLIC_FAILURE;
     }
+  }
+
+  /**
+   * Transaction-scoped player authority for server-owned gameplay repositories.
+   * The normative session implementation resolves without a child lock, locks
+   * the player parent first, and admits only acknowledged active sessions.
+   */
+  async lockActivePlayerSessionForService(
+    client: SqlClient,
+    sessionSecret: string,
+  ): Promise<LockedPlayerServiceSubject> {
+    const { session, digest, now } = await this.lockAuthenticatedPlayerSession(client, sessionSecret);
+    return {
+      playerId: session.player_id,
+      sessionId: session.id,
+      credentialKind: digest.slot,
+      now,
+    };
   }
 
   private async rotatePlayerSessionInternal(sessionSecret: string): Promise<RotatedPlayerSession> {

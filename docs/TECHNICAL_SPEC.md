@@ -188,6 +188,24 @@ failure leaves both subjects and all service ownership unchanged.
 
 ## 4. Service commands
 
+The implemented Phase 1 boundary uses the existing guest/player progress,
+command-receipt, domain-event, and outbox tables rather than creating a fourth
+gameplay bearer or a parallel service history. `EveningServiceAuthority`
+resolves one server-held guest or acknowledged active player credential, locks
+the subject parent before subject-scoped idempotency and progress authority,
+looks up exact replay before revision CAS, revalidates PostgreSQL time and key
+authority after its final blocking lock, and commits checkpoint/event/outbox/
+receipt atomically. Claim rewrites the same progress, receipts, events, and
+outbox provenance to the player in the existing transaction; deletion removes
+the same private rows.
+
+The strict POST routes `/api/account/service` and
+`/api/account/service/command` admit the normal guest+claim cookie pair or one
+player cookie, reject guest/player mixtures before body work, and reject all
+client-supplied subject, account, proof, chain, clock, randomness, and key
+fields. Responses are no-store and contain only the canonical checkpoint,
+pinned projection, disposition, and bounded non-secret result fields.
+
 - `StartService`: create one open service from `IDLE`.
 - `AcceptOrder`: validate offered, unexpired, unlocked, capacity available.
 - `PerformStep`: accept only the next required step; duplicate step is
@@ -197,6 +215,12 @@ failure leaves both subjects and all service ownership unchanged.
   progression.
 - `CloseService`: produce a durable ledger and restoration choice.
 - `AbandonService`: close outstanding orders without chain mutation.
+
+The current evidence boundary is pure/unit, migration/catalog attestation,
+disposable PostgreSQL, and locally built production HTTP. Browser service UI,
+animation/assets, wallet SDK/network calls, keepsake contracts, chain workers,
+analytics, rate limiting, durable TLS/proxy deployment, and device/human
+usability proof remain later gates.
 
 ## 5. Wallet/receipt commands
 

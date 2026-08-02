@@ -134,6 +134,30 @@ an independently audited VRF/oracle or commit-reveal design covering domain
 separation, deadlines, anti-withholding, retry/refund, reorg, replay, and
 exactly-once settlement.
 
+### Walletless service authority
+
+Gameplay query and command routes reuse only the existing guest-resume or
+acknowledged player-session cookie. The ordinary guest+claim-capability pair is
+one guest authority; any guest/player combination fails before query/body work.
+Gameplay JSON and canonical bytes exclude subject IDs, wallets, proofs, Tezos
+identifiers, chain/runtime input, timestamps, randomness, bearers, digests, and
+key metadata. No fourth gameplay credential exists.
+
+PostgreSQL scopes idempotency by server-resolved subject, hashes the canonical
+command envelope, and atomically stores checkpoint, event/outbox, receipt, and
+the one-time settlement unlock. Exact retry returns the stored result; changed
+payload and stale or unsafe revisions fail closed. Guest claim transfers the
+same private progress/receipt/event/outbox authority without retaining a second
+guest copy, and guest/player deletion removes it through the existing classified
+inventory. Retained tombstones remain keyed, purpose-separated, content-free,
+and bounded.
+
+The reducer and projector are browser-safe pure modules, but the browser is not
+authoritative: local storage, optimistic mutation, clock, and animation cannot
+settle a service. Production client-chunk scans must exclude persistence, `pg`,
+account-proof verification, claim protocol, Taquito, Noble, Node crypto,
+database/key names, wallet prefixes, and signed-account domains.
+
 ## 3. Threats and mitigations
 
 | Threat | Required mitigation |

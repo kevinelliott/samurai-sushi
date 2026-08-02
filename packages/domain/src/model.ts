@@ -56,6 +56,7 @@ export type PersistenceFailureCode =
   | "REVISION_CONFLICT"
   | "IDEMPOTENCY_PAYLOAD_MISMATCH"
   | "INVALID_COMMAND_SHAPE"
+  | "INVALID_SERVICE_STATE"
   | "DISCONNECTED";
 
 export interface PersistenceFailure {

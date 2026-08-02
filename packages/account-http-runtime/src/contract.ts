@@ -15,6 +15,8 @@ export const ACCOUNT_HTTP_ROUTES = Object.freeze([
   ["player.logout", "/api/account/player/logout"],
   ["deletion.challenge", "/api/account/player/deletion/challenge"],
   ["deletion.submit", "/api/account/player/deletion"],
+  ["service.query", "/api/account/service"],
+  ["service.command", "/api/account/service/command"],
 ] as const);
 
 export type AccountRouteId = typeof ACCOUNT_HTTP_ROUTES[number][0];
@@ -27,5 +29,6 @@ export const RAW_HEADER_GUARD = "x-samurai-raw-header-guard";
 export const PUBLIC_HTTP_FAILURES = Object.freeze({
   request: Object.freeze({ status: 400, body: Object.freeze({ code: "REQUEST_REJECTED", message: "The request could not be processed." }) }),
   guest: Object.freeze({ status: 401, body: Object.freeze({ code: "GUEST_SESSION_REJECTED", message: "The guest session could not be authenticated." }) }),
+  service: Object.freeze({ status: 409, body: Object.freeze({ code: "SERVICE_REQUEST_REJECTED", message: "The saved service could not be updated." }) }),
   runtime: Object.freeze({ status: 503, body: Object.freeze({ code: "SERVICE_UNAVAILABLE", message: "The account service is unavailable." }) }),
 } as const);
