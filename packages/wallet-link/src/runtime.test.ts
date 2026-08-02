@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { createDeterministicWalletRuntime, normalizeWalletRuntime } from "./runtime";
+import { createDeterministicWalletRuntime, normalizeWalletPermissionResult, normalizeWalletRuntime,
+  normalizeWalletRuntimeChange, runtimeDriftPresentation } from "./runtime";
+import { WALLET_REVIEW_COPY } from "./presentation";
 import { INITIAL_WALLET_LINK_SNAPSHOT, reduceWalletLink } from "./state-machine";
 
 const runtime = Object.freeze({ providerId: "deterministic-wallet", chainId: "NetXtJqPyJGB6Pc",
@@ -10,6 +12,14 @@ describe("wallet runtime authority", () => {
     expect(normalizeWalletRuntime(runtime)).toEqual(runtime);
     expect(() => normalizeWalletRuntime({ ...runtime, signer: () => undefined })).toThrow(/unavailable/);
     expect(() => normalizeWalletRuntime({ ...runtime, permissionScopes: ["account", "account"] })).toThrow(/unavailable/);
+    expect(() => normalizeWalletRuntime({ ...runtime, providerId: "unknown-wallet" })).toThrow(/unavailable/);
+    expect(normalizeWalletPermissionResult({ status: "CANCELLED" }).presentation).toBe(WALLET_REVIEW_COPY["wallet.access.cancelled"]);
+    expect(normalizeWalletPermissionResult({ status: "REJECTED" }).presentation).toBe(WALLET_REVIEW_COPY["wallet.access.rejected"]);
+    const disconnected = normalizeWalletRuntimeChange({ status: "DISCONNECTED" });
+    expect(disconnected.status).toBe("DISCONNECTED");
+    if (disconnected.status !== "RUNTIME") expect(disconnected.presentation).toBe(WALLET_REVIEW_COPY["wallet.access.disconnected"]);
+    expect(runtimeDriftPresentation(runtime, { ...runtime, chainId: "NetXsqzbfFenSTS" })).toBe(WALLET_REVIEW_COPY["wallet.access.wrong-network"]);
+    expect(runtimeDriftPresentation(runtime, { ...runtime, account: "tz1aSkwEot3L2kmUvcoxzjMomb9mvBNuzFK6" })).toBe(WALLET_REVIEW_COPY["wallet.access.account-changed"]);
   });
 
   it("generation-fences delayed results and detects same-coordinate changed bytes", () => {
@@ -26,7 +36,7 @@ describe("wallet runtime authority", () => {
 
   it("keeps every forbidden transport tripwire at zero", async () => {
     const fake = createDeterministicWalletRuntime(runtime);
-    await fake.port.requestPermission();
+    await expect(fake.port.requestPermission()).resolves.toMatchObject({ status: "PERMISSIONED", runtime });
     await fake.port.readNormalizedRuntime();
     await fake.port.disconnect();
     expect(fake.tripwires()).toEqual({ permission: 1, read: 1, disconnect: 1, sign: 0, send: 0,

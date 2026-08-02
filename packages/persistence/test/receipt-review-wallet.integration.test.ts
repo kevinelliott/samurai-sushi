@@ -74,7 +74,7 @@ describe("Phase 2C receipt review wallet authority", () => {
   });
   afterAll(async () => raw.end());
 
-  const runtime = { providerId: "deterministic-wallet", chainId: "NetXtJqPyJGB6Pc", account: ACCOUNT, permissionScopes: ["account"] as const };
+  const runtime = { providerId: "deterministic-wallet", chainId: "NetXtJqPyJGB6Pc", account: ACCOUNT, permissionScopes: ["account"] as const } as const;
   const credential = { kind: "player", sessionSecret: "fixture" } as const;
 
   it("keeps permission-only runtime unverified and creates no receipt or credential", async () => {
@@ -97,11 +97,44 @@ describe("Phase 2C receipt review wallet authority", () => {
       runtimeGeneration: 2, sessionRevision: 3, runtime: fixtureRuntime });
     const issued = await review.issueChallenge(credential, { idempotencyKey: "phase2c-proof-challenge-1",
       walletLinkRef: access.walletLinkRef, runtimeGeneration: access.runtimeGeneration, sessionRevision: access.sessionRevision });
+    expect(issued.challengeRef).toMatch(/^wc_[A-Za-z0-9_-]{22}$/);
+    expect(JSON.stringify(issued)).not.toMatch(/[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}/);
+    const driftCases: readonly [string, string][] = [
+      ["player_id", "'player_phase2c_other'"],
+      ["player_session_id", "'77777777-7777-4777-8777-777777777777'::uuid"],
+      ["player_session_delivery_generation", "2"],
+      ["chain_id", "'NetXsqzbfFenSTS'"],
+      ["account", "'tz1aSkwEot3L2kmUvcoxzjMomb9mvBNuzFK6'"],
+      ["provider_id", "'localnet-wallet'"],
+      ["permission_scope_digest", "decode(repeat('ab',32),'hex')"],
+      ["runtime_generation", "3"],
+      ["session_revision", "7"],
+    ];
+    for (const [column, replacement] of driftCases) {
+      await expect(raw.query(`UPDATE samurai_persistence.wallet_link_challenges SET ${column}=${replacement}
+        WHERE public_challenge_ref=$1`, [issued.challengeRef])).rejects.toMatchObject({ code: "23503" });
+    }
+    for (const partial of [
+      "proof_hash=decode(repeat('ab',32),'hex')",
+      "proof_idempotency_key='phase2c-partial-proof-01'",
+      "proof_request_hash=decode(repeat('ab',32),'hex')",
+      "result_hash=decode(repeat('ab',32),'hex')",
+      "public_result='{}'::jsonb",
+      "consumed_at=clock_timestamp()",
+      "revoked_at=clock_timestamp()",
+    ]) {
+      await expect(raw.query(`UPDATE samurai_persistence.wallet_link_challenges SET ${partial}
+        WHERE public_challenge_ref=$1`, [issued.challengeRef])).rejects.toMatchObject({ code: "23514" });
+    }
+    await expect(raw.query(`UPDATE samurai_persistence.wallet_link_challenges SET state='CONSUMED',consumed_at=clock_timestamp()
+      WHERE public_challenge_ref=$1`, [issued.challengeRef])).rejects.toMatchObject({ code: "23514" });
+    await expect(raw.query(`UPDATE samurai_persistence.wallet_link_challenges SET state='REVOKED'
+      WHERE public_challenge_ref=$1`, [issued.challengeRef])).rejects.toMatchObject({ code: "23514" });
     const proof = { challenge: issued.challenge, publicKey: publicKeyText,
       signature: b58Encode(signMessage(null, blake2b(walletLinkSigningBytes(issued.challenge), { dkLen: 32 }), privateKey),
         PrefixV2.Ed25519Signature) };
     const input = { idempotencyKey: "phase2c-proof-consume-001", walletLinkRef: access.walletLinkRef,
-      challengeId: issued.challengeId, proof };
+      challengeRef: issued.challengeRef, proof };
     const linked = await review.consumeProof(credential, input);
     expect(linked).toMatchObject({ state: "ACTIVE_CREDENTIAL_MATCH", credentialMatch: true, account });
     expect(await review.consumeProof(credential, input)).toEqual(linked);
@@ -109,6 +142,11 @@ describe("Phase 2C receipt review wallet authority", () => {
       .rejects.toMatchObject({ code: "IDEMPOTENCY_PAYLOAD_MISMATCH" });
     expect((await raw.query<{ count: string }>("SELECT count(*)::text AS count FROM samurai_persistence.wallet_credentials")).rows[0]?.count)
       .toBe("1");
+    const consumed = (await raw.query<{ challenge_id: string; public_result: unknown; state: string; credential_id: string | null }>(
+      "SELECT challenge_id::text,public_result,state,credential_id::text FROM samurai_persistence.wallet_link_challenges WHERE public_challenge_ref=$1",
+      [issued.challengeRef])).rows[0]!;
+    expect(consumed).toMatchObject({ state: "CONSUMED", credential_id: expect.any(String) });
+    expect(JSON.stringify(consumed.public_result)).not.toContain(consumed.challenge_id);
   });
 
   it("prepares and restores only an exact active credential match and fences stale or expired preflight", async () => {
@@ -131,7 +169,8 @@ describe("Phase 2C receipt review wallet authority", () => {
       expectedProjectionRevision: projection.projectionRevision, reviewDigest })).resolves.toMatchObject({ status: "REVIEW_READY", reviewDigest });
     await expect(review.preflight(credential, { ...input, idempotencyKey: "phase2c-flight-0002", sessionRevision: access.sessionRevision + 1,
       publicIntentRef: projection.intent.intentRef, expectedProjectionRevision: projection.projectionRevision, reviewDigest }))
-      .resolves.toEqual({ schemaVersion: 1, status: "NOT_READY", reason: "WALLET_SESSION_REVISION_STALE" });
+      .resolves.toMatchObject({ schemaVersion: 1, status: "NOT_READY", reason: "WALLET_SESSION_REVISION_STALE",
+        presentation: { reasonRef: "receipt.review.changed" } });
     authorityNow = new Date(projection.intent.expiresAt);
     await expect(review.preflight(credential, { ...input, idempotencyKey: "phase2c-flight-0003", publicIntentRef: projection.intent.intentRef,
       expectedProjectionRevision: projection.projectionRevision, reviewDigest })).resolves.toMatchObject({ status: "NOT_READY", reason: "INTENT_EXPIRED" });
@@ -143,7 +182,8 @@ describe("Phase 2C receipt review wallet authority", () => {
     await expect(review.preflight(credential, { idempotencyKey: "phase2c-flight-0004", walletLinkRef: reconnected.walletLinkRef,
       runtimeGeneration: reconnected.runtimeGeneration, sessionRevision: reconnected.sessionRevision,
       publicIntentRef: projection.intent.intentRef, expectedProjectionRevision: projection.projectionRevision, reviewDigest }))
-      .resolves.toEqual({ schemaVersion: 1, status: "NOT_READY", reason: "PROVIDER_CHANGED" });
+      .resolves.toMatchObject({ schemaVersion: 1, status: "NOT_READY", reason: "PROVIDER_CHANGED",
+        presentation: { reasonRef: "wallet.access.provider-changed" } });
   });
 
   it("rejects illegal credential and runtime state shapes at the SQL boundary", async () => {
@@ -159,6 +199,14 @@ describe("Phase 2C receipt review wallet authority", () => {
     await expect(raw.query("UPDATE samurai_persistence.wallet_runtime_links SET permission_scopes=ARRAY['account','sign'] WHERE public_link_ref=$1", [access.walletLinkRef]))
       .rejects.toMatchObject({ code: "23514" });
     await expect(raw.query("UPDATE samurai_persistence.wallet_runtime_links SET state='DISCONNECTED' WHERE public_link_ref=$1", [access.walletLinkRef]))
+      .rejects.toMatchObject({ code: "23514" });
+    await expect(raw.query("UPDATE samurai_persistence.wallet_runtime_links SET state='PERMISSIONED' WHERE public_link_ref=$1", [access.walletLinkRef]))
+      .rejects.toMatchObject({ code: "23514" });
+    await expect(raw.query("UPDATE samurai_persistence.wallet_runtime_links SET state='LINKED',linked_challenge_id=NULL WHERE public_link_ref=$1", [access.walletLinkRef]))
+      .rejects.toMatchObject({ code: "23514" });
+    await expect(raw.query("UPDATE samurai_persistence.wallet_runtime_links SET terminal_reason='WRONG_NETWORK' WHERE public_link_ref=$1", [access.walletLinkRef]))
+      .rejects.toMatchObject({ code: "23514" });
+    await expect(raw.query("UPDATE samurai_persistence.wallet_runtime_links SET disconnected_at=clock_timestamp() WHERE public_link_ref=$1", [access.walletLinkRef]))
       .rejects.toMatchObject({ code: "23514" });
     await raw.query(`UPDATE samurai_persistence.wallet_runtime_links
       SET runtime_generation=9007199254740991,session_revision=9007199254740991 WHERE public_link_ref=$1`, [access.walletLinkRef]);

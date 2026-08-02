@@ -1,21 +1,35 @@
 const CHAIN_ID = /^Net[1-9A-HJ-NP-Za-km-z]{12}$/;
 const ACCOUNT = /^tz[1-4][1-9A-HJ-NP-Za-km-z]{33}$/;
-const PROVIDER = /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/;
+const PROVIDERS = Object.freeze(["localnet-wallet", "deterministic-wallet"] as const);
 
 export const WALLET_PERMISSION_SCOPES = Object.freeze(["account"] as const);
 export type WalletPermissionScope = typeof WALLET_PERMISSION_SCOPES[number];
 
 export interface NormalizedWalletRuntime {
-  readonly providerId: string;
+  readonly providerId: typeof PROVIDERS[number];
   readonly chainId: string;
   readonly account: string;
   readonly permissionScopes: readonly WalletPermissionScope[];
 }
 
+import { WALLET_REVIEW_COPY, type WalletReviewCopy } from "./presentation";
+
+export type WalletPermissionResult = Readonly<{
+  status: "PERMISSIONED";
+  runtime: NormalizedWalletRuntime;
+  presentation: WalletReviewCopy;
+}> | Readonly<{
+  status: "CANCELLED" | "REJECTED" | "UNAVAILABLE";
+  presentation: WalletReviewCopy;
+}>;
+
+export type WalletRuntimeChange = Readonly<{ status: "RUNTIME"; runtime: NormalizedWalletRuntime }>
+  | Readonly<{ status: "DISCONNECTED" | "PERMISSION_CHANGED" | "UNAVAILABLE"; presentation: WalletReviewCopy }>;
+
 export interface WalletRuntimePort {
-  requestPermission(): Promise<NormalizedWalletRuntime>;
+  requestPermission(): Promise<WalletPermissionResult>;
   readNormalizedRuntime(): Promise<NormalizedWalletRuntime>;
-  subscribeNormalizedRuntimeChanges(listener: (runtime: NormalizedWalletRuntime) => void): () => void;
+  subscribeNormalizedRuntimeChanges(listener: (change: WalletRuntimeChange) => void): () => void;
   disconnect(): Promise<void>;
 }
 
@@ -52,11 +66,45 @@ export function normalizeWalletRuntime(value: unknown): NormalizedWalletRuntime 
   if (!Array.isArray(row.permissionScopes) || row.permissionScopes.length !== 1
     || row.permissionScopes[0] !== "account") invalid();
   return deepFreeze({
-    providerId: text(row.providerId, PROVIDER, 64),
+    providerId: (() => { const provider = text(row.providerId, /^[a-z][a-z0-9-]*$/, 64);
+      if (!PROVIDERS.includes(provider as typeof PROVIDERS[number])) invalid(); return provider as typeof PROVIDERS[number]; })(),
     chainId: text(row.chainId, CHAIN_ID, 15),
     account: text(row.account, ACCOUNT, 36),
     permissionScopes: ["account"] as const,
   });
+}
+
+export function normalizeWalletPermissionResult(value: unknown): WalletPermissionResult {
+  if (value && typeof value === "object" && !Array.isArray(value)
+    && Object.getOwnPropertyNames(value).length === 1 && Object.getOwnPropertyNames(value)[0] === "status") {
+    const status = exactObject(value, ["status"]).status;
+    if (status === "CANCELLED") return Object.freeze({ status, presentation: WALLET_REVIEW_COPY["wallet.access.cancelled"] });
+    if (status === "REJECTED") return Object.freeze({ status, presentation: WALLET_REVIEW_COPY["wallet.access.rejected"] });
+    if (status === "UNAVAILABLE") return Object.freeze({ status, presentation: WALLET_REVIEW_COPY["wallet.access.unavailable"] });
+    invalid();
+  }
+  return Object.freeze({ status: "PERMISSIONED", runtime: normalizeWalletRuntime(value),
+    presentation: WALLET_REVIEW_COPY["wallet.access.connected"] });
+}
+
+export function normalizeWalletRuntimeChange(value: unknown): WalletRuntimeChange {
+  if (value && typeof value === "object" && !Array.isArray(value)
+    && Object.getOwnPropertyNames(value).length === 1 && Object.getOwnPropertyNames(value)[0] === "status") {
+    const status = exactObject(value, ["status"]).status;
+    if (status === "DISCONNECTED") return Object.freeze({ status, presentation: WALLET_REVIEW_COPY["wallet.access.disconnected"] });
+    if (status === "PERMISSION_CHANGED") return Object.freeze({ status, presentation: WALLET_REVIEW_COPY["wallet.access.permission-changed"] });
+    if (status === "UNAVAILABLE") return Object.freeze({ status, presentation: WALLET_REVIEW_COPY["wallet.access.unavailable"] });
+    invalid();
+  }
+  return Object.freeze({ status: "RUNTIME", runtime: normalizeWalletRuntime(value) });
+}
+
+export function runtimeDriftPresentation(expected: NormalizedWalletRuntime, actual: NormalizedWalletRuntime): WalletReviewCopy | null {
+  if (actual.providerId !== expected.providerId) return WALLET_REVIEW_COPY["wallet.access.provider-changed"];
+  if (actual.chainId !== expected.chainId) return WALLET_REVIEW_COPY["wallet.access.wrong-network"];
+  if (actual.account !== expected.account) return WALLET_REVIEW_COPY["wallet.access.account-changed"];
+  if (actual.permissionScopes.length !== 1 || actual.permissionScopes[0] !== "account") return WALLET_REVIEW_COPY["wallet.access.permission-changed"];
+  return null;
 }
 
 /**
@@ -73,9 +121,15 @@ export function createLocalnetWalletRuntimePort(bridge: Readonly<{
   const exact = exactObject(bridge, ["requestPermission", "readRuntime", "subscribe", "disconnect"]);
   for (const value of Object.values(exact)) if (typeof value !== "function") invalid();
   return Object.freeze({
-    requestPermission: async () => normalizeWalletRuntime(await bridge.requestPermission()),
+    requestPermission: async () => {
+      try { return normalizeWalletPermissionResult(await bridge.requestPermission()); }
+      catch { return Object.freeze({ status: "UNAVAILABLE", presentation: WALLET_REVIEW_COPY["wallet.access.unavailable"] }); }
+    },
     readNormalizedRuntime: async () => normalizeWalletRuntime(await bridge.readRuntime()),
-    subscribeNormalizedRuntimeChanges: (listener: (runtime: NormalizedWalletRuntime) => void) => bridge.subscribe((value) => listener(normalizeWalletRuntime(value))),
+    subscribeNormalizedRuntimeChanges: (listener: (change: WalletRuntimeChange) => void) => bridge.subscribe((value) => {
+      try { listener(normalizeWalletRuntimeChange(value)); }
+      catch { listener(Object.freeze({ status: "UNAVAILABLE", presentation: WALLET_REVIEW_COPY["wallet.access.unavailable"] })); }
+    }),
     disconnect: async () => { await bridge.disconnect(); },
   });
 }
@@ -99,17 +153,18 @@ export function createDeterministicWalletRuntime(initial: NormalizedWalletRuntim
   setRuntime: (runtime: NormalizedWalletRuntime) => void;
 }> {
   let current = normalizeWalletRuntime(initial);
-  const listeners = new Set<(runtime: NormalizedWalletRuntime) => void>();
+  const listeners = new Set<(change: WalletRuntimeChange) => void>();
   const counters = { permission: 0, read: 0, disconnect: 0, sign: 0, send: 0, inject: 0,
     broadcast: 0, contract: 0, fee: 0, observe: 0 };
   return Object.freeze({
     port: Object.freeze({
-      requestPermission: async () => { counters.permission += 1; return current; },
+      requestPermission: async () => { counters.permission += 1; return Object.freeze({ status: "PERMISSIONED" as const,
+        runtime: current, presentation: WALLET_REVIEW_COPY["wallet.access.connected"] }); },
       readNormalizedRuntime: async () => { counters.read += 1; return current; },
-      subscribeNormalizedRuntimeChanges: (listener: (runtime: NormalizedWalletRuntime) => void) => { listeners.add(listener); return () => listeners.delete(listener); },
+      subscribeNormalizedRuntimeChanges: (listener: (change: WalletRuntimeChange) => void) => { listeners.add(listener); return () => listeners.delete(listener); },
       disconnect: async () => { counters.disconnect += 1; },
     }),
     tripwires: () => Object.freeze({ ...counters }),
-    setRuntime: (runtime) => { current = normalizeWalletRuntime(runtime); for (const listener of listeners) listener(current); },
+    setRuntime: (runtime) => { current = normalizeWalletRuntime(runtime); for (const listener of listeners) listener(Object.freeze({ status: "RUNTIME", runtime: current })); },
   });
 }

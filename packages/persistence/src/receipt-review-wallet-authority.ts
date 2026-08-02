@@ -7,6 +7,7 @@ import { GENERATED_REGISTERED_RECEIPT_NETWORK_INVENTORY, type BrowserSafeReceipt
 import {
   parseWalletLinkChallenge,
   parseWalletAccessView,
+  notReady,
   RECEIPT_REVIEW_DOORWAY,
   WALLET_REVIEW_COPY,
   type NormalizedWalletRuntime,
@@ -21,6 +22,7 @@ import type { EveningServiceAuthority, ServiceSubjectCredential, SettledServiceT
 
 const NETWORK = GENERATED_REGISTERED_RECEIPT_NETWORK_INVENTORY[0]!;
 const LINK_REF = /^wl_[A-Za-z0-9_-]{22}$/;
+const CHALLENGE_REF = /^wc_[A-Za-z0-9_-]{22}$/;
 const INTENT_REF = /^ri_[A-Za-z0-9_-]{22}$/;
 const IDEMPOTENCY = /^[A-Za-z0-9][A-Za-z0-9._:-]{15,127}$/;
 const DIGEST_HEX = /^[0-9a-f]{64}$/;
@@ -88,6 +90,7 @@ interface CredentialRow {
 
 interface ChallengeRow {
   readonly challenge_id: string;
+  readonly public_challenge_ref: string;
   readonly wallet_link_id: string;
   readonly player_id: string;
   readonly player_session_id: string;
@@ -98,7 +101,9 @@ interface ChallengeRow {
   readonly account: string;
   readonly provider_id: string;
   readonly permission_scope_digest: Uint8Array;
+  readonly issued_runtime_generation: string;
   readonly runtime_generation: string;
+  readonly issued_session_revision: string;
   readonly session_revision: string;
   readonly privacy_policy_version: "receipt-wallet-privacy-v1";
   readonly challenge_hash: Uint8Array;
@@ -129,6 +134,7 @@ function exactIdempotency(value: string): void {
   if (!IDEMPOTENCY.test(value)) throw new PersistenceError("WALLET_RUNTIME_INVALID", "Wallet runtime request is invalid.");
 }
 function publicLinkRef(): string { return `wl_${randomBytes(16).toString("base64url")}`; }
+function publicChallengeRef(): string { return `wc_${randomBytes(16).toString("base64url")}`; }
 function publicView(row: RuntimeRow): WalletAccessView {
   const match = row.credential_id !== null && ["LINKED_EXISTING", "LINKED"].includes(row.state);
   const state = row.state === "DISCONNECTED" ? "DISCONNECTED" : row.state === "REVOKED" ? "REVOKED"
@@ -139,7 +145,7 @@ function publicView(row: RuntimeRow): WalletAccessView {
       : state === "REVOKED" ? WALLET_REVIEW_COPY["wallet.access.unavailable"] : WALLET_REVIEW_COPY["wallet.access.connected"];
   return Object.freeze({ schemaVersion: 1, walletLinkRef: row.public_link_ref, state,
     runtimeGeneration: Number(row.runtime_generation), sessionRevision: Number(row.session_revision),
-    providerId: row.provider_id, chainId: row.chain_id, account: row.account,
+    providerId: row.provider_id as "localnet-wallet" | "deterministic-wallet", chainId: row.chain_id, account: row.account,
     permissionScopes: Object.freeze(["account"] as const), credentialMatch: match,
     reason: state === "ACCOUNT_PROOF_UNAVAILABLE" ? "ACCOUNT_PROOF_UNAVAILABLE"
       : state === "DISCONNECTED" ? "DISCONNECTED" : state === "REVOKED" ? "REVOKED" : null,
@@ -226,8 +232,10 @@ export class ReceiptReviewWalletAuthority {
         throw new PersistenceError("WALLET_RUNTIME_STALE", "Wallet runtime coordinates are stale.");
       }
       const generation = input.runtimeGeneration + 1; const revision = input.sessionRevision + 1;
+      await context.client.query(`UPDATE samurai_persistence.wallet_link_challenges
+        SET runtime_generation=$2,session_revision=$3 WHERE wallet_link_id=$1`, [row.id, generation, revision]);
       const updated = await context.client.query<RuntimeRow>(`UPDATE samurai_persistence.wallet_runtime_links
-        SET state='DISCONNECTED',runtime_generation=$2,session_revision=$3,terminal_reason='PROVIDER_CANCELLED',
+        SET state='DISCONNECTED',runtime_generation=$2,session_revision=$3,terminal_reason='PROVIDER_DISCONNECTED',
             normalized_facts_digest=$4,changed_at=$5,disconnected_at=$5
         WHERE id=$1 RETURNING *`, [row.id, generation, revision, digest(`disconnected:${generation}:${revision}`), context.now]);
       await this.#event(context.client, row.id, revision, "DISCONNECTED", {
@@ -238,7 +246,7 @@ export class ReceiptReviewWalletAuthority {
   }
 
   async issueChallenge(credential: ServiceSubjectCredential, input: Readonly<{ idempotencyKey: string; walletLinkRef: string;
-    runtimeGeneration: number; sessionRevision: number }>): Promise<Readonly<{ challengeId: string; challenge: WalletLinkChallengeV1 }>> {
+    runtimeGeneration: number; sessionRevision: number }>): Promise<Readonly<{ challengeRef: string; challenge: WalletLinkChallengeV1 }>> {
     exactIdempotency(input.idempotencyKey); safeCoordinate(input.runtimeGeneration); safeCoordinate(input.sessionRevision, 1);
     return this.service.runSettledTransaction(credential, input.idempotencyKey, async (context) => {
       this.#requirePlayerContext(context);
@@ -248,7 +256,7 @@ export class ReceiptReviewWalletAuthority {
       if (replay.rows[0]) {
         if (replay.rows[0].wallet_link_id !== link.id || replay.rows[0].player_id !== context.subjectId
           || !same(replay.rows[0].request_hash, digestCanonical(input))) throw new IdempotencyPayloadMismatchError();
-        return { challengeId: replay.rows[0].challenge_id, challenge: this.#challengeFromRow(replay.rows[0], link.public_link_ref) };
+        return { challengeRef: replay.rows[0].public_challenge_ref, challenge: this.#challengeFromRow(replay.rows[0], link.public_link_ref) };
       }
       if (Number(link.runtime_generation) !== input.runtimeGeneration || Number(link.session_revision) !== input.sessionRevision
         || link.state !== "PERMISSIONED" || link.credential_id !== null) throw new PersistenceError("WALLET_RUNTIME_STALE", "Wallet runtime cannot issue this proof challenge.");
@@ -257,30 +265,31 @@ export class ReceiptReviewWalletAuthority {
         domain: "samurai-sushi:receipt-wallet-link:v1", schemaVersion: 1, purpose: "RECEIPT_WALLET_LINK",
         canonicalOrigin: this.policy.canonicalOrigin, publicLinkRef: link.public_link_ref, chainId: link.chain_id,
         account: link.account, providerId: link.provider_id, permissionScopeDigest: hex(digest("account")),
-        runtimeGeneration: input.runtimeGeneration, sessionRevision: input.sessionRevision,
+        runtimeGeneration: input.runtimeGeneration, sessionRevision: input.sessionRevision + 1,
         privacyPolicyVersion: "receipt-wallet-privacy-v1", nonce, issuedAt: context.now.toISOString(),
         expiresAt: new Date(context.now.getTime() + CHALLENGE_LIFETIME_MS).toISOString(),
       });
-      const challengeId = randomUUID(); const challengeHash = digestCanonical(challenge);
+      const challengeId = randomUUID(); const challengeRef = publicChallengeRef(); const challengeHash = digestCanonical(challenge);
       await context.client.query(`INSERT INTO samurai_persistence.wallet_link_challenges
-        (challenge_id,wallet_link_id,player_id,player_session_id,player_session_delivery_generation,purpose,canonical_origin,
-         chain_id,account,provider_id,permission_scope_digest,runtime_generation,session_revision,privacy_policy_version,
+        (challenge_id,public_challenge_ref,wallet_link_id,player_id,player_session_id,player_session_delivery_generation,purpose,canonical_origin,
+         chain_id,account,provider_id,permission_scope_digest,issued_runtime_generation,runtime_generation,issued_session_revision,session_revision,privacy_policy_version,
          nonce_digest,challenge_hash,public_challenge,request_hash,idempotency_key,state,issued_at,expires_at)
-        VALUES ($1,$2,$3,$4,$5,'RECEIPT_WALLET_LINK',$6,$7,$8,$9,$10,$11,$12,'receipt-wallet-privacy-v1',$13,$14,$15,$16,$17,'ISSUED',$18,$19)`,
-      [challengeId, link.id, context.subjectId, context.playerSessionId, context.playerSessionDeliveryGeneration,
+        VALUES ($1,$2,$3,$4,$5,$6,'RECEIPT_WALLET_LINK',$7,$8,$9,$10,$11,$12,$12,$13,$13,'receipt-wallet-privacy-v1',$14,$15,$16,$17,$18,'ISSUED',$19,$20)`,
+      [challengeId, challengeRef, link.id, context.subjectId, context.playerSessionId, context.playerSessionDeliveryGeneration,
         this.policy.canonicalOrigin, link.chain_id, link.account, link.provider_id, digest("account"), input.runtimeGeneration,
-        input.sessionRevision, digest(nonce), challengeHash, canonicalJson(challenge), digestCanonical(input), input.idempotencyKey, context.now,
+        input.sessionRevision + 1, digest(nonce), challengeHash, canonicalJson(challenge), digestCanonical(input), input.idempotencyKey, context.now,
         new Date(context.now.getTime() + CHALLENGE_LIFETIME_MS)]);
-      await context.client.query(`UPDATE samurai_persistence.wallet_runtime_links SET state='CHALLENGE_ISSUED',
-        session_revision=session_revision+1,changed_at=$2 WHERE id=$1`, [link.id, context.now]);
+      await context.client.query(`UPDATE samurai_persistence.wallet_runtime_links SET state='CHALLENGE_ISSUED',linked_challenge_id=$3,
+        terminal_reason=NULL,session_revision=session_revision+1,changed_at=$2 WHERE id=$1`, [link.id, context.now, challengeId]);
       await this.#event(context.client, link.id, input.sessionRevision + 1, "CHALLENGE_ISSUED", {}, context.now);
-      return Object.freeze({ challengeId, challenge });
+      return Object.freeze({ challengeRef, challenge });
     });
   }
 
   async consumeProof(credential: ServiceSubjectCredential, input: Readonly<{ idempotencyKey: string; walletLinkRef: string;
-    challengeId: string; proof: AccountProofInput }>): Promise<WalletAccessView> {
+    challengeRef: string; proof: AccountProofInput }>): Promise<WalletAccessView> {
     exactIdempotency(input.idempotencyKey);
+    if (!CHALLENGE_REF.test(input.challengeRef)) throw new PersistenceError("WALLET_PROOF_REJECTED", "Wallet proof could not be accepted.");
     const verified = verifyWalletLinkProof(input.proof);
     const parsed = parseWalletLinkChallenge(input.proof.challenge);
     const proofHash = digestCanonical(input.proof);
@@ -289,7 +298,7 @@ export class ReceiptReviewWalletAuthority {
       this.#requirePlayerContext(context);
       const link = await this.#lockRuntime(context.client, context.subjectId, input.walletLinkRef);
       const found = await context.client.query<ChallengeRow>(`SELECT * FROM samurai_persistence.wallet_link_challenges
-        WHERE challenge_id=$1 AND wallet_link_id=$2 AND player_id=$3 FOR UPDATE`, [input.challengeId, link.id, context.subjectId]);
+        WHERE public_challenge_ref=$1 AND wallet_link_id=$2 AND player_id=$3 FOR UPDATE`, [input.challengeRef, link.id, context.subjectId]);
       const challenge = found.rows[0];
       if (challenge?.state === "CONSUMED") {
         if (challenge.proof_idempotency_key !== input.idempotencyKey || !challenge.proof_hash
@@ -304,14 +313,17 @@ export class ReceiptReviewWalletAuthority {
         || verified.account !== link.account || parsed.publicLinkRef !== link.public_link_ref
         || !same(challenge.challenge_hash, digestCanonical(parsed)) || parsed.canonicalOrigin !== this.policy.canonicalOrigin
         || parsed.chainId !== link.chain_id || parsed.account !== link.account || parsed.providerId !== link.provider_id
+        || challenge.chain_id !== link.chain_id || challenge.account !== link.account || challenge.provider_id !== link.provider_id
         || challenge.player_session_id !== context.playerSessionId
         || Number(challenge.player_session_delivery_generation) !== context.playerSessionDeliveryGeneration
         || challenge.purpose !== "RECEIPT_WALLET_LINK" || challenge.privacy_policy_version !== "receipt-wallet-privacy-v1"
         || !same(challenge.permission_scope_digest, digest("account"))
-        || parsed.runtimeGeneration !== Number(challenge.runtime_generation)
-        || parsed.sessionRevision !== Number(challenge.session_revision)
+        || parsed.runtimeGeneration !== Number(challenge.issued_runtime_generation)
+        || Number(challenge.runtime_generation) !== Number(link.runtime_generation)
+        || parsed.sessionRevision !== Number(challenge.issued_session_revision)
+        || Number(challenge.session_revision) !== Number(link.session_revision)
         || Number(link.runtime_generation) !== parsed.runtimeGeneration
-        || Number(link.session_revision) !== parsed.sessionRevision + 1
+        || Number(link.session_revision) !== parsed.sessionRevision
         || link.state !== "CHALLENGE_ISSUED") throw new PersistenceError("WALLET_PROOF_REJECTED", "Wallet proof could not be accepted.");
       const active = await context.client.query<CredentialRow>(`SELECT * FROM samurai_persistence.wallet_credentials
         WHERE chain_id=$1 AND account=$2 AND state='active' FOR UPDATE`, [link.chain_id, link.account]);
@@ -331,14 +343,14 @@ export class ReceiptReviewWalletAuthority {
         sessionRevision: revision, account: link.account, chainId: link.chain_id };
       const projected = publicView({ ...link, credential_id: credentialRow.credential_id, state: "LINKED",
         terminal_reason: null, session_revision: String(revision), normalized_facts_digest: digestCanonical(resultSeed) });
-      await context.client.query(`UPDATE samurai_persistence.wallet_link_challenges SET state='CONSUMED',proof_hash=$2,
-        proof_idempotency_key=$3,proof_request_hash=$4,result_hash=$5,public_result=$6::jsonb,consumed_at=$7 WHERE challenge_id=$1`,
-      [challenge.challenge_id, proofHash, input.idempotencyKey, proofRequestHash, digestCanonical(projected),
-        canonicalJson(projected), authorityNow]);
+      await context.client.query(`UPDATE samurai_persistence.wallet_link_challenges SET state='CONSUMED',credential_id=$2,session_revision=$9,proof_hash=$3,
+        proof_idempotency_key=$4,proof_request_hash=$5,result_hash=$6,public_result=$7::jsonb,consumed_at=$8 WHERE challenge_id=$1`,
+      [challenge.challenge_id, credentialRow.credential_id, proofHash, input.idempotencyKey, proofRequestHash, digestCanonical(projected),
+        canonicalJson(projected), authorityNow, revision]);
       const updated = await context.client.query<RuntimeRow>(`UPDATE samurai_persistence.wallet_runtime_links
-        SET credential_id=$2,state='LINKED',terminal_reason=NULL,session_revision=$3,changed_at=$4,
+        SET credential_id=$2,state='LINKED',linked_challenge_id=$6,terminal_reason=NULL,session_revision=$3,changed_at=$4,
             normalized_facts_digest=$5 WHERE id=$1 RETURNING *`,
-      [link.id, credentialRow.credential_id, revision, authorityNow, digestCanonical(resultSeed)]);
+      [link.id, credentialRow.credential_id, revision, authorityNow, digestCanonical(resultSeed), challenge.challenge_id]);
       await this.#event(context.client, link.id, revision, "PROOF_CONSUMED", {}, authorityNow);
       return publicView(updated.rows[0]!);
     });
@@ -427,26 +439,27 @@ export class ReceiptReviewWalletAuthority {
           JOIN samurai_persistence.receipt_intents i ON i.id=p.receipt_intent_id
           WHERE i.public_intent_ref=$1 AND p.player_id=$2 FOR UPDATE OF p,i`, [input.publicIntentRef, context.subjectId]);
         const authorityNow = await this.#finalAuthorityNow(context.client);
-        if (!preparation.rows[0]) return Object.freeze({ schemaVersion: 1, status: "NOT_READY", reason: "NOT_FOUND" });
+        if (!preparation.rows[0]) return notReady("NOT_FOUND");
         if (preparation.rows[0].wallet_link_id !== link.id) {
-          return Object.freeze({ schemaVersion: 1, status: "NOT_READY", reason: "PROVIDER_CHANGED" });
+          return notReady("PROVIDER_CHANGED");
         }
-        if (projection.projectionRevision !== input.expectedProjectionRevision) return Object.freeze({ schemaVersion: 1, status: "NOT_READY", reason: "PROJECTION_STALE" });
+        if (projection.projectionRevision !== input.expectedProjectionRevision) return notReady("PROJECTION_STALE");
         if (!DIGEST_HEX.test(input.reviewDigest) || input.reviewDigest !== hex(digestCanonical(projection))) {
-          return Object.freeze({ schemaVersion: 1, status: "NOT_READY", reason: "REVIEW_FACTS_MISMATCH" });
+          return notReady("REVIEW_FACTS_MISMATCH");
         }
-        if (authorityNow.getTime() >= new Date(projection.intent.expiresAt).getTime()) return Object.freeze({ schemaVersion: 1, status: "NOT_READY", reason: "INTENT_EXPIRED" });
+        if (authorityNow.getTime() >= new Date(projection.intent.expiresAt).getTime()) return notReady("INTENT_EXPIRED");
         const facts = projection.reviewFacts;
-        if (facts.owner !== link.account || facts.source !== link.account) return Object.freeze({ schemaVersion: 1, status: "NOT_READY", reason: "WALLET_ACCOUNT_CHANGED" });
-        if (facts.network.chainId !== link.chain_id) return Object.freeze({ schemaVersion: 1, status: "NOT_READY", reason: "WRONG_NETWORK" });
+        if (facts.owner !== link.account || facts.source !== link.account) return notReady("WALLET_ACCOUNT_CHANGED");
+        if (facts.network.chainId !== link.chain_id) return notReady("WRONG_NETWORK");
         if (facts.network.deploymentManifestHash !== RECEIPT_AUTHORITY_MANIFEST_HASH || facts.destination !== this.policy.destination
           || facts.entrypoint !== "submit_receipt" || facts.attachedMutez !== "0") {
-          return Object.freeze({ schemaVersion: 1, status: "NOT_READY", reason: "POLICY_MISMATCH" });
+          return notReady("POLICY_MISMATCH");
         }
         return Object.freeze({ schemaVersion: 1, status: "REVIEW_READY", intentRef: projection.intent.intentRef,
           projectionRevision: projection.projectionRevision, walletLinkRef: link.public_link_ref,
           runtimeGeneration: Number(link.runtime_generation), sessionRevision: Number(link.session_revision),
-          reviewDigest: input.reviewDigest, expiresAt: projection.intent.expiresAt });
+          reviewDigest: input.reviewDigest, expiresAt: projection.intent.expiresAt,
+          presentation: WALLET_REVIEW_COPY["receipt.preflight.ready"] });
       });
     } catch (error) {
       const code = error && typeof error === "object" ? String((error as { readonly code?: unknown }).code ?? "") : "";
@@ -456,7 +469,7 @@ export class ReceiptReviewWalletAuthority {
         WALLET_LINK_REVOKED: "WALLET_LINK_REVOKED", WALLET_LINK_REQUIRED: "WALLET_LINK_REQUIRED",
       };
       const reason = mapped[code] ?? (code.includes("AUTH") ? "AUTHENTICATION_REQUIRED" : code.includes("NOT_FOUND") ? "NOT_FOUND" : "WALLET_LINK_REQUIRED");
-      return Object.freeze({ schemaVersion: 1, status: "NOT_READY", reason }) as ReceiptReviewPreflightResult;
+      return notReady(reason);
     }
   }
 

@@ -150,7 +150,9 @@ function walletRuntime(value: unknown): Parameters<ReceiptReviewWalletAuthority[
   if (!Array.isArray(row.permissionScopes) || row.permissionScopes.length !== 1 || row.permissionScopes[0] !== "account") {
     throw new StrictJsonError();
   }
-  return { providerId: text(row.providerId), chainId: text(row.chainId), account: text(row.account), permissionScopes: ["account"] };
+  const providerId = text(row.providerId);
+  if (providerId !== "localnet-wallet" && providerId !== "deterministic-wallet") throw new StrictJsonError();
+  return { providerId, chainId: text(row.chainId), account: text(row.account), permissionScopes: ["account"] };
 }
 
 function claimTransportIntent(value: unknown, capability: string): Readonly<Record<string, unknown>> {
@@ -470,10 +472,10 @@ export async function handleAccountHttpRequest(
       }
       case "wallet.link.proof": {
         if (!services.receiptReview) return failure(operation, logger, PUBLIC_HTTP_FAILURES.runtime);
-        const input = strictObject(body, ["idempotencyKey", "walletLinkRef", "challengeId", "proof"]);
+        const input = strictObject(body, ["idempotencyKey", "walletLinkRef", "challengeRef", "proof"]);
         payload = await services.receiptReview.consumeProof(serviceCredential(cookies), {
           idempotencyKey: text(input.idempotencyKey), walletLinkRef: text(input.walletLinkRef),
-          challengeId: text(input.challengeId), proof: proof(input.proof) as unknown as Parameters<ReceiptReviewWalletAuthority["consumeProof"]>[1]["proof"],
+          challengeRef: text(input.challengeRef), proof: proof(input.proof) as unknown as Parameters<ReceiptReviewWalletAuthority["consumeProof"]>[1]["proof"],
         }) as unknown as Readonly<Record<string, unknown>>;
         break;
       }

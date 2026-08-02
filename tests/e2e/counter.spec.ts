@@ -1,4 +1,4 @@
-import { expect, test, type Page, type Route } from "@playwright/test";
+import { expect, test, type Locator, type Page, type Route } from "@playwright/test";
 import {
   buildBrowserEveningServiceView,
   compiledFirstEveningService,
@@ -45,6 +45,8 @@ interface RouteFixture {
   readonly setIdentity: (identity: "guest" | "player") => void;
   readonly holdNextQuery: () => { readonly release: () => void; readonly started: Promise<void> };
   readonly holdNextCommand: () => { readonly release: () => void; readonly started: Promise<void> };
+  readonly holdNextReview: (path: string) => { readonly release: () => void; readonly started: Promise<void> };
+  readonly setPreflightReason: (reason: string | null) => void;
   readonly checkpoint: () => EveningServiceCheckpoint;
 }
 
@@ -81,6 +83,8 @@ function serviceFixture(initial = createInitialEveningServiceCheckpoint(), activ
   let currentWalletAccess: Record<string, unknown> | null = null;
   let heldQuery: { readonly started: () => void; readonly wait: Promise<void>; readonly release: () => void } | null = null;
   let heldCommand: { readonly started: () => void; readonly wait: Promise<void>; readonly release: () => void } | null = null;
+  const heldReviews = new Map<string, { readonly started: () => void; readonly wait: Promise<void>; readonly release: () => void }>();
+  let preflightReason: string | null = null;
   const receipts = new Map<string, { readonly body: string; readonly checkpoint: EveningServiceCheckpoint; readonly cue: string | null }>();
   const bodies: string[] = [];
   const requests: string[] = [];
@@ -89,6 +93,8 @@ function serviceFixture(initial = createInitialEveningServiceCheckpoint(), activ
   const handle = async (route: Route) => {
     const path = new URL(route.request().url()).pathname;
     requests.push(path);
+    const heldReview = heldReviews.get(path);
+    if (heldReview) { heldReviews.delete(path); heldReview.started(); await heldReview.wait; }
     if (path === "/api/account/cookies/reset") return json(route, 200, { reset: true });
     if (path === "/api/account/guest/issue") {
       checkpoint = createInitialEveningServiceCheckpoint();
@@ -98,7 +104,8 @@ function serviceFixture(initial = createInitialEveningServiceCheckpoint(), activ
     }
     if (path === "/api/account/receipt/review/restore") return json(route, 200, { schemaVersion: 1, doorway: {
       schemaVersion: 1, network: { profile: "localnet", chainId: "NetXtJqPyJGB6Pc",
-        networkLabelRef: "network.localnet-rehearsal", label: "Localnet rehearsal" },
+        networkLabelRef: "network.localnet-rehearsal", label: "Localnet rehearsal",
+        manifestVerificationRef: "manifest.registered-verified", manifestVerification: "Registered manifest verified" },
       effect: "This optional review can prepare one non-transferable service receipt for the displayed account. It does not change your saved service, unlock anything, or create a financial asset.",
       access: "Connecting asks the wallet for account access on the required network. This phase does not request a signature, estimate a fee, call a contract, or send an operation.",
       actionLabel: "Connect wallet for Localnet rehearsal",
@@ -118,10 +125,21 @@ function serviceFixture(initial = createInitialEveningServiceCheckpoint(), activ
     }
     if (activeReview && path === "/api/account/receipt/review/preflight") {
       const request = JSON.parse(route.request().postData() ?? "{}") as Record<string, unknown>;
+      if (preflightReason) {
+        const presentation = preflightReason === "INTENT_EXPIRED" ? WALLET_REVIEW_COPY["receipt.review.expired"]
+          : preflightReason === "WALLET_ACCOUNT_CHANGED" ? WALLET_REVIEW_COPY["wallet.access.account-changed"]
+            : preflightReason === "WRONG_NETWORK" ? WALLET_REVIEW_COPY["wallet.access.wrong-network"]
+              : preflightReason === "WALLET_SCOPE_MISSING" ? WALLET_REVIEW_COPY["wallet.access.permission-changed"]
+                : preflightReason === "PROVIDER_CHANGED" ? WALLET_REVIEW_COPY["wallet.access.provider-changed"]
+                  : preflightReason === "PROJECTION_STALE" ? WALLET_REVIEW_COPY["receipt.review.changed"]
+                    : WALLET_REVIEW_COPY["receipt.preflight.mismatch"];
+        return json(route, 200, { schemaVersion: 1, status: "NOT_READY", reason: preflightReason, presentation });
+      }
       return json(route, 200, { schemaVersion: 1, status: "REVIEW_READY", intentRef: request.publicIntentRef,
         projectionRevision: request.expectedProjectionRevision, walletLinkRef: request.walletLinkRef,
         runtimeGeneration: request.runtimeGeneration, sessionRevision: request.sessionRevision,
-        reviewDigest: request.reviewDigest, expiresAt: "2026-08-03T12:15:00.000Z" });
+        reviewDigest: request.reviewDigest, expiresAt: "2026-08-03T12:15:00.000Z",
+        presentation: WALLET_REVIEW_COPY["receipt.preflight.ready"] });
     }
     if (activeReview && path === "/api/account/wallet/link/disconnect") {
       currentWalletAccess = null;
@@ -213,6 +231,13 @@ function serviceFixture(initial = createInitialEveningServiceCheckpoint(), activ
       heldCommand = { started, wait, release };
       return { release, started: startedPromise };
     },
+    holdNextReview: (path) => {
+      let release!: () => void; let started!: () => void;
+      const wait = new Promise<void>((resolve) => { release = resolve; });
+      const startedPromise = new Promise<void>((resolve) => { started = resolve; });
+      heldReviews.set(path, { started, wait, release }); return { release, started: startedPromise };
+    },
+    setPreflightReason: (reason) => { preflightReason = reason; },
     checkpoint: () => checkpoint,
   };
 }
@@ -317,10 +342,12 @@ test("projection-only first service completes with exact commands and one-shot c
   expect(diagnostics.join("\n")).not.toMatch(/hostile|cookie|subject|checkpoint|signature|proof|database|digest|hmac/iu);
 });
 
-test("settled optional review keeps gameplay primary and renders exact access and review stages", async ({ page }, testInfo) => {
+test("@receipt-review settled optional review keeps gameplay primary and renders exact access and review stages", async ({ page }, testInfo) => {
   const settled = (compiledFirstEveningService.goldenReplay.at(-1) as {
     readonly response: { readonly checkpoint: EveningServiceCheckpoint } }).response.checkpoint;
   const fixture = serviceFixture(settled, true);
+  const activate = async (locator: Locator) => { if (testInfo.project.name === "review-zoom-200") { await locator.focus(); await locator.press("Enter"); }
+    else await locator.click(); };
   await fixture.install(page);
   await page.addInitScript(() => {
     const runtime = { providerId: "deterministic-wallet", chainId: "NetXtJqPyJGB6Pc",
@@ -335,6 +362,7 @@ test("settled optional review keeps gameplay primary and renders exact access an
     } });
   });
   await page.goto("/");
+  const zoomSession = testInfo.project.name === "review-zoom-200" ? await page.context().newCDPSession(page) : null;
   await expect(page.getByRole("button", { name: "Keep playing" })).toHaveClass(/primary-action/);
   const invoker = page.getByRole("button", { name: "Review optional keepsake" });
   await invoker.click();
@@ -345,31 +373,154 @@ test("settled optional review keeps gameplay primary and renders exact access an
     dialog: document.querySelector("dialog")?.scrollWidth ?? 0, dialogClient: document.querySelector("dialog")?.clientWidth ?? 0 }));
   expect(dimensions.body).toBeLessThanOrEqual(dimensions.viewport);
   expect(dimensions.dialog).toBeLessThanOrEqual(dimensions.dialogClient);
+  if (zoomSession) await zoomSession.send("Emulation.setPageScaleFactor", { pageScaleFactor: 2 });
   await page.screenshot({ path: `.scratch/phase2c-review/access-${testInfo.project.name}.png`, fullPage: false });
-  await page.getByRole("button", { name: "Connect wallet for Localnet rehearsal" }).click();
+  if (zoomSession) await zoomSession.send("Emulation.setPageScaleFactor", { pageScaleFactor: 1 });
+  await activate(page.getByRole("button", { name: "Connect wallet for Localnet rehearsal" }));
   await expect(page.getByRole("heading", { name: "Wallet connected for review" })).toBeFocused();
   await expect(page.getByText("Nothing has been sent.", { exact: false })).toBeVisible();
   await expect(page.getByText("Exact active credential match", { exact: true })).toBeVisible();
   await expect(page.getByText("0 mutez attached", { exact: true })).toBeVisible();
   await expect(page.getByText("Not estimated in this phase.", { exact: false })).toBeVisible();
+  if (zoomSession) await zoomSession.send("Emulation.setPageScaleFactor", { pageScaleFactor: 2 });
   await page.screenshot({ path: `.scratch/phase2c-review/review-${testInfo.project.name}.png`, fullPage: false });
-  await page.getByRole("button", { name: "Check review readiness" }).click();
+  if (zoomSession) await zoomSession.send("Emulation.setPageScaleFactor", { pageScaleFactor: 1 });
+  await activate(page.getByRole("button", { name: "Check review readiness" }));
   await expect(page.getByRole("heading", { name: "Review ready" })).toBeFocused();
   await expect(page.getByText("Exact current facts match.", { exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: /sign|send|submit|continue/i })).toHaveCount(0);
   const tripwires = await page.evaluate(() => (window as unknown as { __walletTripwires: Record<string, number> }).__walletTripwires);
   expect(tripwires).toEqual({ permission: 1, read: 1, disconnect: 0, sign: 0, send: 0, inject: 0, broadcast: 0, contract: 0, fee: 0, observe: 0 });
-  await page.getByRole("button", { name: "Close review" }).first().click();
+  await activate(page.getByRole("button", { name: "Close review" }).first());
   await expect(invoker).toBeFocused();
   expect(fixture.requests.filter((path) => path === "/api/account/receipt/review/prepare")).toHaveLength(1);
   expect(fixture.requests.filter((path) => path === "/api/account/receipt/review/preflight")).toHaveLength(1);
   await page.reload();
-  await page.getByRole("button", { name: "Review optional keepsake" }).click();
+  await activate(page.getByRole("button", { name: "Review optional keepsake" }));
   await expect(page.getByText("Wallet disconnected. The receipt details remain read-only.", { exact: true })).toBeVisible();
-  await page.getByRole("button", { name: "Reconnect matching wallet" }).click();
+  await activate(page.getByRole("button", { name: "Reconnect matching wallet" }));
   await expect(page.getByRole("heading", { name: "Wallet connected for review" })).toBeFocused();
   await expect(page.getByText("Exact active credential match", { exact: true })).toBeVisible();
   expect(fixture.requests.filter((path) => path === "/api/account/wallet/link/disconnect")).toHaveLength(1);
+});
+
+test("@receipt-review distinct access, drift, preflight, keyboard, announcement, and retirement states stay fail closed", async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== "desktop", "the complete outcome and controlled-race matrix is exercised once");
+  const settled = (compiledFirstEveningService.goldenReplay.at(-1) as {
+    readonly response: { readonly checkpoint: EveningServiceCheckpoint } }).response.checkpoint;
+  const fixture = serviceFixture(settled, true); await fixture.install(page);
+  await page.addInitScript(() => {
+    const expected = { providerId: "deterministic-wallet", chainId: "NetXtJqPyJGB6Pc",
+      account: "tz1aSkwEot3L2kmUvcoxzjMomb9mvBNuzFK6", permissionScopes: ["account"] };
+    const state = { mode: "PERMISSIONED", runtime: expected, listeners: [] as ((value: unknown) => void)[],
+      permissionResolver: null as null | ((value: unknown) => void), holdDigest: false,
+      digestStarted: 0, digestResolver: null as null | (() => void), holdClipboard: false,
+      clipboardStarted: 0, clipboardResolver: null as null | (() => void) };
+    const counters = { permission: 0, read: 0, disconnect: 0, sign: 0, send: 0, inject: 0, broadcast: 0, contract: 0, fee: 0, observe: 0 };
+    Object.defineProperty(window, "__walletTest", { value: state }); Object.defineProperty(window, "__walletTripwires", { value: counters });
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText: async () => {
+      if (state.holdClipboard) { state.clipboardStarted += 1; await new Promise<void>((resolve) => { state.clipboardResolver = resolve; }); }
+    } } });
+    Object.defineProperty(window, "samuraiLocalnetWallet", { value: {
+      requestPermission: async () => { counters.permission += 1; if (state.mode === "DEFER") return new Promise((resolve) => { state.permissionResolver = resolve; });
+        return state.mode === "PERMISSIONED" ? state.runtime : { status: state.mode }; },
+      readRuntime: async () => { counters.read += 1; return state.runtime; },
+      subscribe: (listener: (value: unknown) => void) => { state.listeners.push(listener); return () => { state.listeners = state.listeners.filter((item) => item !== listener); }; },
+      disconnect: async () => { counters.disconnect += 1; },
+    } });
+    const digest = SubtleCrypto.prototype.digest;
+    Object.defineProperty(SubtleCrypto.prototype, "digest", { configurable: true, value: async function (...args: Parameters<SubtleCrypto["digest"]>) {
+      if (state.holdDigest) { state.digestStarted += 1; await new Promise<void>((resolve) => { state.digestResolver = resolve; }); }
+      return digest.apply(this, args);
+    } });
+  });
+  const setMode = (mode: string, runtime?: Record<string, unknown>) => page.evaluate(({ mode: next, runtime: facts }) => {
+    const state = (window as unknown as { __walletTest: { mode: string; runtime: unknown } }).__walletTest; state.mode = next; if (facts) state.runtime = facts;
+  }, { mode, runtime });
+  const openReview = async () => { await page.getByRole("button", { name: "Review optional keepsake" }).click();
+    await expect(page.getByRole("heading", { name: "Review optional service keepsake" })).toBeFocused(); };
+  await page.goto("/");
+  for (const [mode, heading] of [["CANCELLED", "Wallet access cancelled"], ["REJECTED", "Wallet access declined"]] as const) {
+    await setMode(mode); await openReview(); await page.getByRole("button", { name: /connect wallet|try connecting/i }).click();
+    await expect(page.getByRole("heading", { name: heading })).toBeFocused(); await page.getByRole("button", { name: "Not now" }).click();
+  }
+  await setMode("PERMISSIONED", { providerId: "deterministic-wallet", chainId: "NetXsqzbfFenSTS",
+    account: "tz1aSkwEot3L2kmUvcoxzjMomb9mvBNuzFK6", permissionScopes: ["account"] });
+  await openReview(); await page.getByRole("button", { name: /connect wallet/i }).click();
+  await expect(page.getByRole("heading", { name: "Wallet network does not match" })).toBeFocused();
+  expect(fixture.requests.filter((path) => path === "/api/account/wallet/runtime/sync")).toHaveLength(0);
+  await page.getByRole("button", { name: "Not now" }).click();
+
+  const expected = { providerId: "deterministic-wallet", chainId: "NetXtJqPyJGB6Pc",
+    account: "tz1aSkwEot3L2kmUvcoxzjMomb9mvBNuzFK6", permissionScopes: ["account"] };
+  await setMode("PERMISSIONED", expected); await openReview(); await page.getByRole("button", { name: /connect wallet/i }).click();
+  await expect(page.getByRole("heading", { name: "Wallet connected for review" })).toBeFocused();
+  await page.evaluate(() => { (window as unknown as { __walletTest: { holdClipboard: boolean } }).__walletTest.holdClipboard = true; });
+  await page.getByRole("button", { name: "Copy full chain id" }).first().click();
+  await expect.poll(() => page.evaluate(() => (window as unknown as { __walletTest: { clipboardStarted: number } }).__walletTest.clipboardStarted)).toBe(1);
+  await page.getByRole("button", { name: "Close review" }).first().click(); await openReview();
+  await expect(page.getByText("Wallet disconnected. The receipt details remain read-only.", { exact: true })).toBeVisible();
+  await page.evaluate(() => { const state = (window as unknown as { __walletTest: {
+    holdClipboard: boolean; clipboardResolver: null | (() => void);
+  } }).__walletTest; state.holdClipboard = false; state.clipboardResolver?.(); state.clipboardResolver = null; });
+  await expect(page.getByRole("dialog").locator('[aria-live="polite"]')).not.toContainText("Chain ID copied.");
+  await page.getByRole("button", { name: "Reconnect matching wallet" }).click();
+  await expect(page.getByRole("heading", { name: "Wallet connected for review" })).toBeFocused();
+  await page.getByRole("button", { name: "Copy full chain id" }).first().click();
+  await expect(page.getByRole("dialog").locator('[aria-live="polite"]')).toContainText("Chain ID copied.");
+  const emit = (value: unknown) => page.evaluate((next) => { for (const listener of (window as unknown as { __walletTest: { listeners: ((item: unknown) => void)[] } }).__walletTest.listeners) listener(next); }, value);
+  await emit({ ...expected, account: "tz1VSUr8wwNhLAzempoch5d6hLRiTh8Cjcjb" });
+  await expect(page.getByRole("heading", { name: "Wallet account changed" })).toBeFocused();
+  await page.getByRole("button", { name: "Reconnect matching wallet" }).click();
+  await expect(page.getByRole("heading", { name: "Wallet connected for review" })).toBeFocused();
+  await page.evaluate(() => { (window as unknown as { __walletTest: { holdDigest: boolean } }).__walletTest.holdDigest = true; });
+  await page.getByRole("button", { name: /check review readiness/i }).click();
+  await expect.poll(() => page.evaluate(() => (window as unknown as { __walletTest: { digestStarted: number } }).__walletTest.digestStarted)).toBe(1);
+  await page.getByRole("button", { name: "Close review" }).first().click();
+  await page.evaluate(() => { const state = (window as unknown as { __walletTest: { holdDigest: boolean; digestResolver: null | (() => void) } }).__walletTest;
+    state.holdDigest = false; state.digestResolver?.(); state.digestResolver = null; });
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+  await openReview(); await page.getByRole("button", { name: "Reconnect matching wallet" }).click();
+  await expect(page.getByRole("heading", { name: "Wallet connected for review" })).toBeFocused();
+  const heldPreflight = fixture.holdNextReview("/api/account/receipt/review/preflight");
+  await page.getByRole("button", { name: /check review readiness/i }).click(); await heldPreflight.started;
+  await page.getByRole("button", { name: "Close review" }).first().click(); heldPreflight.release(); await expect(page.getByRole("dialog")).toHaveCount(0);
+  await openReview(); await page.getByRole("button", { name: "Reconnect matching wallet" }).click();
+  await expect(page.getByRole("heading", { name: "Wallet connected for review" })).toBeFocused();
+  await emit({ status: "PERMISSION_CHANGED" }); await expect(page.getByRole("heading", { name: "Wallet permission changed" })).toBeFocused();
+  await page.getByRole("button", { name: "Reconnect wallet" }).click();
+  await expect(page.getByRole("heading", { name: "Wallet connected for review" })).toBeFocused();
+  await emit({ ...expected, providerId: "localnet-wallet" }); await expect(page.getByRole("heading", { name: "Wallet provider changed" })).toBeFocused();
+  await page.getByRole("button", { name: "Reconnect matching wallet" }).click();
+  await expect(page.getByRole("heading", { name: "Wallet connected for review" })).toBeFocused();
+  await emit({ status: "DISCONNECTED" }); await expect(page.getByRole("heading", { name: "Wallet disconnected" })).toBeFocused();
+  await page.getByRole("button", { name: "Reconnect matching wallet" }).click();
+  await expect(page.getByRole("heading", { name: "Wallet connected for review" })).toBeFocused();
+  for (const [reason, heading] of [["PROJECTION_STALE", "Receipt details changed"], ["INTENT_EXPIRED", "Receipt review expired"],
+    ["WALLET_ACCOUNT_CHANGED", "Wallet account changed"], ["WRONG_NETWORK", "Wallet network does not match"],
+    ["WALLET_SCOPE_MISSING", "Wallet permission changed"], ["PROVIDER_CHANGED", "Wallet provider changed"]] as const) {
+    fixture.setPreflightReason(reason); await page.getByRole("button", { name: /check review readiness|check again/i }).click();
+    await expect(page.getByRole("heading", { name: heading })).toBeFocused();
+  }
+  fixture.setPreflightReason(null); await page.getByRole("button", { name: /check again|check review readiness/i }).click();
+  await expect(page.getByRole("heading", { name: "Review ready" })).toBeFocused();
+
+  const closeButton = page.getByRole("button", { name: "Close review" }).first(); await closeButton.focus(); await page.keyboard.press("Shift+Tab");
+  await expect(page.getByRole("button", { name: "Close review" }).last()).toBeFocused(); await page.keyboard.press("Tab"); await expect(closeButton).toBeFocused();
+  await page.keyboard.press("Escape"); await expect(page.getByRole("button", { name: "Review optional keepsake" })).toBeFocused();
+
+  await setMode("DEFER"); await openReview(); await page.getByRole("button", { name: /connect wallet|reconnect matching/i }).click();
+  await expect.poll(() => page.evaluate(() => (window as unknown as { __walletTripwires: { permission: number } }).__walletTripwires.permission)).toBeGreaterThan(0);
+  await page.getByRole("button", { name: "Close review" }).first().click();
+  await page.evaluate((runtime) => { const state = (window as unknown as { __walletTest: { permissionResolver: null | ((value: unknown) => void) } }).__walletTest;
+    state.permissionResolver?.(runtime); state.permissionResolver = null; }, expected);
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+  const beforeSync = fixture.requests.filter((path) => path === "/api/account/wallet/runtime/sync").length;
+  await expect.poll(() => fixture.requests.filter((path) => path === "/api/account/wallet/runtime/sync").length).toBe(beforeSync);
+  const heldRestore = fixture.holdNextReview("/api/account/receipt/review/restore"); await openReview(); await heldRestore.started;
+  await page.getByRole("button", { name: "Close review" }).first().click(); heldRestore.release(); await expect(page.getByRole("dialog")).toHaveCount(0);
+  expect(await page.evaluate(() => (window as unknown as { __walletTripwires: Record<string, number> }).__walletTripwires))
+    .toMatchObject({ sign: 0, send: 0, inject: 0, broadcast: 0, contract: 0, fee: 0, observe: 0 });
 });
 
 test("lost response requeries then retries the byte-identical envelope without ceremony duplication", async ({ page }, testInfo) => {

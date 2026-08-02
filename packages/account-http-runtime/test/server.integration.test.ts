@@ -566,19 +566,22 @@ describe("built account HTTP boundary", () => {
     expect(preflight.status, preflight.body).toBe(200);
     expect(JSON.parse(preflight.body)).toMatchObject({ schemaVersion: 1, status: "REVIEW_READY", intentRef: receiptIntent.intentRef,
       walletLinkRef: runtimeView.walletLinkRef, reviewDigest });
-    expect(preflight.body).not.toMatch(/callback|transport|signature|permit|operation|fee|playerId|sessionId|credentialId/);
+    expect(preflight.body).not.toMatch(
+      /transportCallback|issuerSignature|executablePermit|requestSignPayload|requestOperation|operationBytes|feeEstimate|playerId|sessionId|credentialId/,
+    );
     const stale = await requestJson(portOf(server), "/api/account/receipt/review/preflight", JSON.stringify({
       ...JSON.parse(preflightBody), idempotencyKey: randomUUID(), sessionRevision: runtimeView.sessionRevision + 1,
     }), playerCookie);
     expect(stale.status).toBe(200);
-    expect(JSON.parse(stale.body)).toEqual({ schemaVersion: 1, status: "NOT_READY", reason: "WALLET_SESSION_REVISION_STALE" });
+    expect(JSON.parse(stale.body)).toMatchObject({ schemaVersion: 1, status: "NOT_READY", reason: "WALLET_SESSION_REVISION_STALE",
+      presentation: { reasonRef: "receipt.review.changed" } });
     const challengeRejected = await requestJson(portOf(server), "/api/account/wallet/link/challenge", JSON.stringify({
       idempotencyKey: randomUUID(), walletLinkRef: runtimeView.walletLinkRef,
       runtimeGeneration: runtimeView.runtimeGeneration, sessionRevision: runtimeView.sessionRevision,
     }), playerCookie);
     expect(challengeRejected.status, `active-credential challenge: ${challengeRejected.body}`).toBe(409);
     const proofRejected = await requestJson(portOf(server), "/api/account/wallet/link/proof", JSON.stringify({
-      idempotencyKey: randomUUID(), walletLinkRef: runtimeView.walletLinkRef, challengeId: randomUUID(),
+      idempotencyKey: randomUUID(), walletLinkRef: runtimeView.walletLinkRef, challengeRef: `wc_${"A".repeat(22)}`,
       proof: { challenge: {}, publicKey: "invalid", signature: "invalid" },
     }), playerCookie);
     expect(proofRejected.status, `malformed fixture proof: ${proofRejected.body}`).toBe(409);

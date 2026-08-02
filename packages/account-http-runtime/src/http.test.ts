@@ -348,7 +348,7 @@ describe("account HTTP boundary", () => {
       "wallet.runtime.sync": JSON.stringify({ idempotencyKey: id, runtimeGeneration: 1, sessionRevision: 1,
         runtime: { providerId: "deterministic-wallet", chainId: "NetXtJqPyJGB6Pc", account: "tz1VSUr8wwNhLAzempoch5d6hLRiTh8Cjcjb", permissionScopes: ["account"] } }),
       "wallet.link.challenge": JSON.stringify({ idempotencyKey: id, walletLinkRef: "wl_AAAAAAAAAAAAAAAAAAAAAA", runtimeGeneration: 1, sessionRevision: 1 }),
-      "wallet.link.proof": JSON.stringify({ idempotencyKey: id, walletLinkRef: "wl_AAAAAAAAAAAAAAAAAAAAAA", challengeId: id,
+      "wallet.link.proof": JSON.stringify({ idempotencyKey: id, walletLinkRef: "wl_AAAAAAAAAAAAAAAAAAAAAA", challengeRef: "wc_AAAAAAAAAAAAAAAAAAAAAA",
         proof: { challenge: {}, publicKey: "key", signature: "signature" } }),
       "wallet.link.disconnect": JSON.stringify({ idempotencyKey: id, walletLinkRef: "wl_AAAAAAAAAAAAAAAAAAAAAA", runtimeGeneration: 1, sessionRevision: 1 }),
       "receipt.review.preflight": JSON.stringify({ idempotencyKey: id, walletLinkRef: "wl_AAAAAAAAAAAAAAAAAAAAAA", runtimeGeneration: 1,

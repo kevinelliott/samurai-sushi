@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { parseReceiptReviewPreflightResult } from "./preflight";
+import { notReady, parseReceiptReviewPreflightResult, RECEIPT_PREFLIGHT_REASONS } from "./preflight";
 import { parseReceiptReviewDoorway, parseWalletAccessView, RECEIPT_REVIEW_DOORWAY, WALLET_REVIEW_COPY } from "./presentation";
 
 describe("wallet review browser boundary", () => {
@@ -24,11 +24,12 @@ describe("wallet review browser boundary", () => {
   });
 
   it("strictly accepts only the data-only preflight union", () => {
-    expect(parseReceiptReviewPreflightResult({ schemaVersion: 1, status: "NOT_READY", reason: "INTENT_EXPIRED" }))
-      .toEqual({ schemaVersion: 1, status: "NOT_READY", reason: "INTENT_EXPIRED" });
+    expect(parseReceiptReviewPreflightResult(notReady("INTENT_EXPIRED"))).toEqual(notReady("INTENT_EXPIRED"));
+    for (const reason of RECEIPT_PREFLIGHT_REASONS) expect(parseReceiptReviewPreflightResult(notReady(reason))).toEqual(notReady(reason));
     expect(parseReceiptReviewPreflightResult({ schemaVersion: 1, status: "REVIEW_READY",
       intentRef: "ri_AAAAAAAAAAAAAAAAAAAAAA", projectionRevision: "1", walletLinkRef: "wl_AAAAAAAAAAAAAAAAAAAAAA",
-      runtimeGeneration: 1, sessionRevision: 2, reviewDigest: "a".repeat(64), expiresAt: "2026-08-02T12:15:00.000Z" }))
+      runtimeGeneration: 1, sessionRevision: 2, reviewDigest: "a".repeat(64), expiresAt: "2026-08-02T12:15:00.000Z",
+      presentation: WALLET_REVIEW_COPY["receipt.preflight.ready"] }))
       .toMatchObject({ status: "REVIEW_READY", projectionRevision: "1" });
     expect(() => parseReceiptReviewPreflightResult({ schemaVersion: 1, status: "REVIEW_READY",
       intentRef: "internal-id", projectionRevision: "01", walletLinkRef: "wl_AAAAAAAAAAAAAAAAAAAAAA",

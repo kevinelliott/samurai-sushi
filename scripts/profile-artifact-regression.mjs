@@ -108,6 +108,23 @@ async function assertNoReceiptPrivateInputsInBrowserArtifacts() {
     "SAMURAI_SUSHI_SERVICE_COMMITMENT_V1",
     "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20",
     "edsk2gM2LioC6Yfk",
+    "challenge_id",
+    "player_session_id",
+    "credential_id",
+    "wallet_link_id",
+    "proof_hash",
+    "proof_request_hash",
+    "rawProviderPayload",
+    "rawProviderError",
+    "providerErrorText",
+    "requestSignPayload",
+    "requestOperation",
+    "sendOperations",
+    "injectOperation",
+    "broadcastOperation",
+    "buildContractCall",
+    "estimateNetworkFee",
+    "ObserveOperation",
   ]) {
     assert.doesNotMatch(output, new RegExp(marker, "u"));
   }

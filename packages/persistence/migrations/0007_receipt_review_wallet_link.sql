@@ -34,6 +34,7 @@ CREATE TABLE samurai_persistence.wallet_runtime_links (
   player_session_id uuid NOT NULL,
   player_session_delivery_generation bigint NOT NULL CHECK (player_session_delivery_generation > 0),
   credential_id uuid,
+  linked_challenge_id uuid,
   chain_id text NOT NULL CHECK (chain_id ~ '^Net[1-9A-HJ-NP-Za-km-z]{12}$'),
   account text NOT NULL CHECK (account ~ '^tz[1-4][1-9A-HJ-NP-Za-km-z]{33}$'),
   provider_id text NOT NULL CHECK (provider_id IN ('localnet-wallet','deterministic-wallet')),
@@ -47,7 +48,8 @@ CREATE TABLE samurai_persistence.wallet_runtime_links (
   )),
   terminal_reason text CHECK (terminal_reason IS NULL OR terminal_reason IN (
     'ACCOUNT_PROOF_UNAVAILABLE','PROVIDER_REJECTED','PROVIDER_CANCELLED','WRONG_NETWORK','ACCOUNT_CHANGED',
-    'PERMISSION_CHANGED','PROVIDER_CHANGED','RUNTIME_CONTRADICTION','SESSION_REVOKED','CREDENTIAL_REVOKED'
+    'PERMISSION_CHANGED','PROVIDER_CHANGED','RUNTIME_CONTRADICTION','CHALLENGE_EXPIRED','PROVIDER_DISCONNECTED',
+    'SESSION_REVOKED','CREDENTIAL_REVOKED'
   )),
   normalized_facts_digest bytea NOT NULL CHECK (octet_length(normalized_facts_digest) = 32),
   idempotency_key text NOT NULL UNIQUE CHECK (length(idempotency_key) BETWEEN 16 AND 128),
@@ -61,8 +63,33 @@ CREATE TABLE samurai_persistence.wallet_runtime_links (
   CHECK (public_link_ref ~ '^wl_[A-Za-z0-9_-]{22}$'),
   CHECK (permission_scopes = ARRAY['account']::text[]),
   CHECK (changed_at >= created_at),
-  CHECK ((state = 'DISCONNECTED') = (disconnected_at IS NOT NULL)),
-  CHECK ((state = 'REVOKED') = (revoked_at IS NOT NULL)),
+  CHECK (
+    (state IN ('UNLINKED','CONNECTING') AND credential_id IS NULL AND linked_challenge_id IS NULL AND terminal_reason IS NULL
+      AND disconnected_at IS NULL AND revoked_at IS NULL)
+    OR (state = 'PERMISSIONED' AND credential_id IS NULL AND linked_challenge_id IS NULL
+      AND terminal_reason = 'ACCOUNT_PROOF_UNAVAILABLE' AND disconnected_at IS NULL AND revoked_at IS NULL)
+    OR (state = 'LINKED_EXISTING' AND credential_id IS NOT NULL AND linked_challenge_id IS NULL
+      AND terminal_reason IS NULL AND disconnected_at IS NULL AND revoked_at IS NULL)
+    OR (state IN ('CHALLENGE_ISSUED','PROOF_PENDING') AND credential_id IS NULL AND linked_challenge_id IS NOT NULL
+      AND terminal_reason IS NULL AND disconnected_at IS NULL AND revoked_at IS NULL)
+    OR (state = 'LINKED' AND credential_id IS NOT NULL AND linked_challenge_id IS NOT NULL
+      AND terminal_reason IS NULL AND disconnected_at IS NULL AND revoked_at IS NULL)
+    OR (state = 'REJECTED' AND credential_id IS NULL AND linked_challenge_id IS NULL AND terminal_reason = 'PROVIDER_REJECTED'
+      AND disconnected_at IS NULL AND revoked_at IS NULL)
+    OR (state = 'CANCELLED' AND credential_id IS NULL AND linked_challenge_id IS NULL AND terminal_reason = 'PROVIDER_CANCELLED'
+      AND disconnected_at IS NULL AND revoked_at IS NULL)
+    OR (state = 'EXPIRED' AND credential_id IS NULL AND linked_challenge_id IS NOT NULL AND terminal_reason = 'CHALLENGE_EXPIRED'
+      AND disconnected_at IS NULL AND revoked_at IS NULL)
+    OR (state = 'STALE' AND terminal_reason IN ('WRONG_NETWORK','ACCOUNT_CHANGED','PERMISSION_CHANGED','PROVIDER_CHANGED','RUNTIME_CONTRADICTION')
+      AND ((credential_id IS NULL AND linked_challenge_id IS NULL) OR credential_id IS NOT NULL)
+      AND disconnected_at IS NULL AND revoked_at IS NULL)
+    OR (state = 'DISCONNECTED' AND terminal_reason = 'PROVIDER_DISCONNECTED'
+      AND ((credential_id IS NULL AND linked_challenge_id IS NULL) OR credential_id IS NOT NULL)
+      AND disconnected_at IS NOT NULL AND revoked_at IS NULL)
+    OR (state = 'REVOKED' AND terminal_reason IN ('SESSION_REVOKED','CREDENTIAL_REVOKED')
+      AND ((credential_id IS NULL AND linked_challenge_id IS NULL) OR credential_id IS NOT NULL)
+      AND disconnected_at IS NULL AND revoked_at IS NOT NULL)
+  ),
   CHECK (disconnected_at IS NULL OR disconnected_at = changed_at),
   CHECK (revoked_at IS NULL OR revoked_at = changed_at),
   FOREIGN KEY (player_id, player_session_id, player_session_delivery_generation)
@@ -78,10 +105,14 @@ CREATE UNIQUE INDEX wallet_runtime_links_current_subject
 CREATE INDEX wallet_runtime_links_session
   ON samurai_persistence.wallet_runtime_links (player_session_id, runtime_generation, session_revision);
 
-ALTER TABLE samurai_persistence.wallet_runtime_links ADD UNIQUE (id, player_id);
+ALTER TABLE samurai_persistence.wallet_runtime_links
+  ADD UNIQUE (id, player_id),
+  ADD UNIQUE (id, player_id, player_session_id, player_session_delivery_generation, chain_id, account, provider_id,
+    permission_scope_digest, runtime_generation, session_revision);
 
 CREATE TABLE samurai_persistence.wallet_link_challenges (
   challenge_id uuid PRIMARY KEY,
+  public_challenge_ref text NOT NULL UNIQUE,
   wallet_link_id uuid NOT NULL REFERENCES samurai_persistence.wallet_runtime_links(id) ON DELETE CASCADE,
   player_id text NOT NULL REFERENCES samurai_persistence.players(id) ON DELETE CASCADE,
   player_session_id uuid NOT NULL,
@@ -93,7 +124,9 @@ CREATE TABLE samurai_persistence.wallet_link_challenges (
   account text NOT NULL,
   provider_id text NOT NULL,
   permission_scope_digest bytea NOT NULL CHECK (octet_length(permission_scope_digest) = 32),
+  issued_runtime_generation bigint NOT NULL CHECK (issued_runtime_generation BETWEEN 0 AND 9007199254740991),
   runtime_generation bigint NOT NULL CHECK (runtime_generation BETWEEN 0 AND 9007199254740991),
+  issued_session_revision bigint NOT NULL CHECK (issued_session_revision BETWEEN 0 AND 9007199254740991),
   session_revision bigint NOT NULL CHECK (session_revision BETWEEN 0 AND 9007199254740991),
   privacy_policy_version text NOT NULL CHECK (privacy_policy_version = 'receipt-wallet-privacy-v1'),
   nonce_digest bytea NOT NULL UNIQUE CHECK (octet_length(nonce_digest) = 32),
@@ -112,20 +145,36 @@ CREATE TABLE samurai_persistence.wallet_link_challenges (
   consumed_at timestamptz CHECK (consumed_at IS NULL OR isfinite(consumed_at)),
   revoked_at timestamptz CHECK (revoked_at IS NULL OR isfinite(revoked_at)),
   CHECK (challenge_id::text ~ '^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'),
+  CHECK (public_challenge_ref ~ '^wc_[A-Za-z0-9_-]{22}$'),
   CHECK (expires_at = issued_at + interval '5 minutes'),
-  CHECK ((state = 'CONSUMED') = (consumed_at IS NOT NULL)),
-  CHECK ((state = 'REVOKED') = (revoked_at IS NOT NULL)),
-  CHECK ((state = 'CONSUMED') = (proof_hash IS NOT NULL AND proof_idempotency_key IS NOT NULL
-    AND proof_request_hash IS NOT NULL AND result_hash IS NOT NULL AND public_result IS NOT NULL)),
+  CHECK (
+    (state IN ('ISSUED','EXPIRED') AND credential_id IS NULL AND proof_hash IS NULL AND proof_idempotency_key IS NULL
+      AND proof_request_hash IS NULL AND result_hash IS NULL AND public_result IS NULL AND consumed_at IS NULL AND revoked_at IS NULL)
+    OR (state = 'REVOKED' AND credential_id IS NULL AND proof_hash IS NULL AND proof_idempotency_key IS NULL
+      AND proof_request_hash IS NULL AND result_hash IS NULL AND public_result IS NULL AND consumed_at IS NULL AND revoked_at IS NOT NULL)
+    OR (state = 'CONSUMED' AND credential_id IS NOT NULL AND proof_hash IS NOT NULL AND proof_idempotency_key IS NOT NULL
+      AND proof_request_hash IS NOT NULL AND result_hash IS NOT NULL AND public_result IS NOT NULL
+      AND consumed_at IS NOT NULL AND revoked_at IS NULL)
+  ),
   CHECK (consumed_at IS NULL OR (consumed_at >= issued_at AND consumed_at < expires_at)),
   CHECK (revoked_at IS NULL OR revoked_at >= issued_at),
   FOREIGN KEY (player_id, player_session_id, player_session_delivery_generation)
     REFERENCES samurai_persistence.player_sessions (player_id, id, delivery_generation) ON UPDATE CASCADE ON DELETE CASCADE,
   FOREIGN KEY (credential_id, player_id, chain_id, account)
     REFERENCES samurai_persistence.wallet_credentials (credential_id, player_id, chain_id, account) ON DELETE RESTRICT,
-  FOREIGN KEY (wallet_link_id, player_id)
-    REFERENCES samurai_persistence.wallet_runtime_links (id, player_id) ON DELETE CASCADE
+  FOREIGN KEY (wallet_link_id, player_id, player_session_id, player_session_delivery_generation, chain_id, account, provider_id,
+    permission_scope_digest, runtime_generation, session_revision)
+    REFERENCES samurai_persistence.wallet_runtime_links (id, player_id, player_session_id, player_session_delivery_generation,
+      chain_id, account, provider_id, permission_scope_digest, runtime_generation, session_revision)
+    ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED
 );
+
+ALTER TABLE samurai_persistence.wallet_link_challenges ADD UNIQUE (challenge_id, wallet_link_id);
+
+ALTER TABLE samurai_persistence.wallet_runtime_links
+  ADD FOREIGN KEY (linked_challenge_id, id)
+    REFERENCES samurai_persistence.wallet_link_challenges (challenge_id, wallet_link_id)
+    ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED;
 
 CREATE INDEX wallet_link_challenges_expiry
   ON samurai_persistence.wallet_link_challenges (expires_at, challenge_id) WHERE state = 'ISSUED';
@@ -139,6 +188,11 @@ BEGIN
     UPDATE samurai_persistence.wallet_link_challenges
        SET state='REVOKED', revoked_at=authority_now
      WHERE player_session_id=OLD.id AND state='ISSUED';
+    UPDATE samurai_persistence.wallet_link_challenges c
+       SET runtime_generation=CASE WHEN c.runtime_generation < 9007199254740991 THEN c.runtime_generation+1 ELSE c.runtime_generation END,
+           session_revision=CASE WHEN c.session_revision < 9007199254740991 THEN c.session_revision+1 ELSE c.session_revision END
+      FROM samurai_persistence.wallet_runtime_links l
+     WHERE c.wallet_link_id=l.id AND l.player_session_id=OLD.id;
     UPDATE samurai_persistence.wallet_runtime_links
        SET state='REVOKED', terminal_reason='SESSION_REVOKED',
            runtime_generation=CASE WHEN runtime_generation < 9007199254740991 THEN runtime_generation+1 ELSE runtime_generation END,
