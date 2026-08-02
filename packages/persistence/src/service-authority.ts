@@ -71,7 +71,15 @@ export interface EveningServiceAuthorityOptions {
 export const mergeFirstEveningCheckpointForClaim: NonNullable<AccountClaimServiceOptions["mergeCheckpoint"]> = (guest, player, intent) => {
   if (guest.contentVersion !== FIRST_EVENING_CONTENT_VERSION) return guest.checkpoint;
   const committedRevision = intent.createPlayer ? guest.revision : intent.playerRevision + 1;
-  const playerCheckpoint = player?.content_version === FIRST_EVENING_CONTENT_VERSION ? player.checkpoint : null;
+  let playerCheckpoint: EveningServiceCheckpoint | null = null;
+  if (player?.content_version === FIRST_EVENING_CONTENT_VERSION) {
+    const playerRevision = Number(player.revision);
+    const decodedPlayerCheckpoint = decodeEveningServiceCheckpoint(player.checkpoint);
+    if (!Number.isSafeInteger(playerRevision) || playerRevision < 0 || decodedPlayerCheckpoint.revision !== playerRevision) {
+      throw new PersistenceError("SERVICE_REVISION_INVALID", "The target player checkpoint revision does not match canonical progress.");
+    }
+    playerCheckpoint = decodedPlayerCheckpoint;
+  }
   return rebaseEveningServiceCheckpointForClaim(guest.checkpoint, playerCheckpoint, committedRevision) as Readonly<Record<string, unknown>>;
 };
 

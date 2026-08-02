@@ -7047,6 +7047,119 @@ describe("PostgreSQL persistence spine", () => {
     expect((await state()).rows[0]).toEqual(before);
   });
 
+  it("rejects a claim against a migrated player checkpoint with outer and inner revision drift", async () => {
+    const wallet = stage3Wallet();
+    const playerId = "historical-drift-player-0001";
+    const historicalClient = await rawPool.connect();
+    try {
+      await historicalClient.query("BEGIN");
+      await historicalClient.query(
+        "ALTER TABLE samurai_persistence.player_progress DROP CONSTRAINT player_progress_service_revision_check",
+      );
+      await historicalClient.query(
+        "INSERT INTO samurai_persistence.players (id,created_at,updated_at) VALUES ($1,clock_timestamp(),clock_timestamp())",
+        [playerId],
+      );
+      await historicalClient.query(
+        `INSERT INTO samurai_persistence.wallet_credentials
+          (credential_id,player_id,chain_id,account,public_key,scheme,linked_claim_id,linked_at)
+         VALUES ($1,$2,'NetXdQprcVkpaWU',$3,$4,'tz1',$5,clock_timestamp())`,
+        [randomUUID(), playerId, wallet.account, wallet.publicKey, randomUUID()],
+      );
+      await historicalClient.query(
+        `INSERT INTO samurai_persistence.player_progress
+          (player_id,revision,content_version,checkpoint_schema_version,checkpoint,created_at,updated_at)
+         VALUES ($1,2,$2,1,$3::jsonb,clock_timestamp(),clock_timestamp())`,
+        [playerId, FIRST_EVENING_CONTENT_VERSION, JSON.stringify(createInitialEveningServiceCheckpoint())],
+      );
+      await historicalClient.query(`
+        ALTER TABLE samurai_persistence.player_progress
+          ADD CONSTRAINT player_progress_service_revision_check CHECK (
+            content_version <> 'phase-1-evening-service-v1'
+            OR (jsonb_typeof(checkpoint -> 'revision') = 'number'
+              AND checkpoint ->> 'revision' ~ '^(0|[1-9][0-9]{0,15})$'
+              AND (checkpoint ->> 'revision')::numeric = revision)
+          ) NOT VALID
+      `);
+      await historicalClient.query("COMMIT");
+    } catch (error) {
+      await historicalClient.query("ROLLBACK");
+      throw error;
+    } finally {
+      historicalClient.release();
+    }
+
+    const constraint = await rawPool.query<{ readonly validated: boolean }>(
+      "SELECT convalidated AS validated FROM pg_constraint WHERE conname='player_progress_service_revision_check'",
+    );
+    expect(constraint.rows[0]).toEqual({ validated: false });
+
+    const claimCapability = randomBytes(32).toString("base64url");
+    const guest = await new GuestSessionService(pool, authority, {
+      claimKeys: guestClaimKeys, issueClaimCapability: () => claimCapability,
+    }).issue({
+      consentVersion: "service-v1", contentVersion: "bootstrap-v1", checkpointSchemaVersion: 1, checkpoint: { bootstrap: true },
+    });
+    await new EveningServiceAuthority(pool, authority, stage3Service()).execute(
+      { kind: "guest", resumeSecret: guest.resumeSecret },
+      { idempotencyKey: randomUUID(), expectedRevision: 0, commandName: "service.start", payload: {} },
+    );
+    const intent = {
+      claimId: randomUUID(), guestClaimCommitment: claimCapability, createPlayer: false,
+      targetPlayerId: playerId, guestRevision: 1, playerRevision: 2,
+      idempotencyKey: randomUUID(), contentVersion: FIRST_EVENING_CONTENT_VERSION, cosmeticSelections: {},
+    } as const;
+    const claimService = stage3Service();
+    const challenge = await claimService.issueClaimChallenge({ resumeSecret: guest.resumeSecret, intent, account: wallet.account });
+    if ("code" in challenge) throw new Error(`Historical-drift challenge failed: ${challenge.code}`);
+    const proof = {
+      challenge: challenge.challenge,
+      publicKey: wallet.publicKey,
+      signature: b58Encode(
+        signMessage(null, blake2b(walletSigningBytes(challenge.challenge), { dkLen: 32 }), wallet.privateKey),
+        PrefixV2.Ed25519Signature,
+      ),
+    };
+    const state = async () => (await rawPool.query<{
+      readonly player: string | null; readonly player_progress: string | null; readonly wallets: string;
+      readonly guest: string | null; readonly guest_progress: string | null; readonly guest_digests: string;
+      readonly claim_capability: string | null; readonly challenge: string | null; readonly player_sessions: string;
+      readonly player_session_digests: string; readonly merges: string; readonly receipts: string;
+      readonly events: string; readonly outbox: string;
+    }>(`
+      SELECT
+        (SELECT to_jsonb(p)::text FROM samurai_persistence.players p WHERE p.id=$1) AS player,
+        (SELECT to_jsonb(p)::text FROM samurai_persistence.player_progress p WHERE p.player_id=$1) AS player_progress,
+        COALESCE((SELECT jsonb_agg(to_jsonb(w) ORDER BY w.credential_id) FROM samurai_persistence.wallet_credentials w
+          WHERE w.player_id=$1),'[]'::jsonb)::text AS wallets,
+        (SELECT to_jsonb(g)::text FROM samurai_persistence.guest_sessions g WHERE g.id=$2) AS guest,
+        (SELECT to_jsonb(g)::text FROM samurai_persistence.guest_progress g WHERE g.guest_session_id=$2) AS guest_progress,
+        COALESCE((SELECT jsonb_agg(to_jsonb(d) ORDER BY d.slot) FROM samurai_persistence.guest_resume_digests d
+          WHERE d.guest_session_id=$2),'[]'::jsonb)::text AS guest_digests,
+        (SELECT to_jsonb(c)::text FROM samurai_persistence.guest_claim_capabilities c WHERE c.guest_session_id=$2) AS claim_capability,
+        (SELECT to_jsonb(c)::text FROM samurai_persistence.claim_challenges c WHERE c.challenge_id=$3) AS challenge,
+        COALESCE((SELECT jsonb_agg(to_jsonb(s) ORDER BY s.id) FROM samurai_persistence.player_sessions s
+          WHERE s.player_id=$1),'[]'::jsonb)::text AS player_sessions,
+        COALESCE((SELECT jsonb_agg(to_jsonb(d) ORDER BY d.player_session_id,d.slot)
+          FROM samurai_persistence.player_session_digests d JOIN samurai_persistence.player_sessions s
+            ON s.id=d.player_session_id WHERE s.player_id=$1),'[]'::jsonb)::text AS player_session_digests,
+        COALESCE((SELECT jsonb_agg(to_jsonb(m) ORDER BY m.claim_id) FROM samurai_persistence.progress_merges m
+          WHERE m.player_id=$1 OR m.target_player_id=$1),'[]'::jsonb)::text AS merges,
+        COALESCE((SELECT jsonb_agg(to_jsonb(r) ORDER BY r.subject_kind,r.subject_id,r.idempotency_key)
+          FROM samurai_persistence.command_receipts r
+          WHERE (r.guest_session_id=$2 OR r.player_id=$1)),'[]'::jsonb)::text AS receipts,
+        COALESCE((SELECT jsonb_agg(to_jsonb(e) ORDER BY e.event_id) FROM samurai_persistence.domain_events e
+          WHERE (e.guest_session_id=$2 OR e.player_id=$1)),'[]'::jsonb)::text AS events,
+        COALESCE((SELECT jsonb_agg(to_jsonb(o) ORDER BY o.event_id)
+          FROM samurai_persistence.outbox_deliveries o JOIN samurai_persistence.domain_events e USING(event_id)
+          WHERE (e.guest_session_id=$2 OR e.player_id=$1)),'[]'::jsonb)::text AS outbox
+    `, [playerId, guest.session.id, challenge.challengeId])).rows[0];
+    const before = await state();
+    expect(await claimService.claimGuest({ resumeSecret: guest.resumeSecret, intent, challengeId: challenge.challengeId, proof }))
+      .toEqual(ACCOUNT_CLAIM_PUBLIC_FAILURE);
+    expect(await state()).toEqual(before);
+  });
+
   it("continues the identical service checkpoint through claim and admits only the acknowledged player session", async () => {
     const wallet = stage3Wallet();
     const claimCapability = randomBytes(32).toString("base64url");
