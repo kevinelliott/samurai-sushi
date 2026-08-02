@@ -1,5 +1,4 @@
 import { createHash } from "node:crypto";
-import { execFileSync } from "node:child_process";
 import { readFileSync, statSync } from "node:fs";
 import { resolve } from "node:path";
 import { canonicalJson } from "../packages/domain/src/index";
@@ -9,6 +8,7 @@ import {
   sha256CanonicalJson,
 } from "../packages/receipt-authority/src/deployment-manifest";
 import { LOCALNET_RECEIPT_SOURCE_BINDING } from "../packages/receipt-authority/src/generated/localnet-source-binding";
+import { assertNoReceiptWebContamination } from "./receipt-web-source-scan";
 
 const root = resolve(process.cwd());
 const manifestPath = "contracts/receipt/build/deployment-manifest.json";
@@ -77,15 +77,7 @@ if (LOCALNET_RECEIPT_SOURCE_BINDING.contractAddress !== null || LOCALNET_RECEIPT
 }
 
 const webPaths = ["apps/web/app", "apps/web/public"];
-for (const webPath of webPaths) {
-  const listing = execFileSync("rg", ["--files", webPath], { cwd: root, encoding: "utf8" });
-  for (const file of listing.trim().split("\n").filter(Boolean)) {
-    const source = read(file).toString("utf8");
-    if (/receipt-authority|SAMURAI_SUSHI_RECEIPT_V1|edsk2gM2LioC6Yfk/.test(source)) {
-      throw new Error(`Receipt authority or fixture secret crossed into the web source at ${file}.`);
-    }
-  }
-}
+assertNoReceiptWebContamination(root, webPaths);
 
 console.log(
   JSON.stringify({
