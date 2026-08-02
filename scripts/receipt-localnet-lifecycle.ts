@@ -1,20 +1,32 @@
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { readFileSync, writeFileSync } from "node:fs";
-import { basename, relative, resolve } from "node:path";
+import { basename, resolve } from "node:path";
 import { blake2b } from "@noble/hashes/blake2b";
 import { ed25519 } from "@noble/curves/ed25519";
 import { b58Encode, PrefixV2 } from "@taquito/utils";
 import { canonicalJson } from "../packages/domain/src/index";
-import { RECEIPT_AUTHORITY_MANIFEST_HASH } from "../packages/receipt-authority/src/deployment-manifest";
-import { LOCALNET_RECEIPT_SOURCE_BINDING } from "../packages/receipt-authority/src/generated/localnet-source-binding";
+import {
+  RECEIPT_AUTHORITY_MANIFEST,
+  RECEIPT_AUTHORITY_MANIFEST_HASH,
+  RECEIPT_CANDIDATE_MANIFEST_PATH,
+  parseGeneratedReceiptSourceBindingModule,
+  parseSourceCandidateDeploymentManifest,
+  sha256CanonicalJson,
+} from "../packages/receipt-authority/src/deployment-manifest";
+import { admitSettledReceiptPermit, issueSettledReceiptPermit } from "../packages/receipt-authority/src/server";
+import {
+  FIXTURE_SETTLED_COMMITMENT_NONCE,
+  deterministicSettledCheckpointFixture,
+} from "../packages/receipt-authority/src/test-fixture";
 import { receiptPermitMichelsonArgument } from "../packages/receipt-authority/src/michelson-argument";
-import { hashReceiptPayload } from "../packages/receipt-authority/src/michelson-pack";
-import { parseReceiptPayload, type ReceiptPermitV1 } from "../packages/receipt-authority/src/model";
+import type { ReceiptAdmissionContext } from "../packages/receipt-authority/src/model";
+import { writeExclusiveExternalEvidenceFile } from "./exclusive-evidence-file";
+import { withExactCandidateAdmission } from "./receipt-localnet-admission";
+import { readRepositoryFile } from "./repository-file";
 
 const root = resolve(process.cwd());
 const runtimeRoot = resolve(root, "../project-crypt-tezos-localnet");
-const expectedRuntimeCommit = "1d6726650146cbcce292fa7a69f9c227c5465bde";
+const expectedRuntimeCommit = "5edf9cb43af21c06e805eefdcdc0af1291bb789e";
 const expectedChainId = "NetXtJqPyJGB6Pc";
 const alice = "tz1VSUr8wwNhLAzempoch5d6hLRiTh8Cjcjb";
 const issuerSecret = Buffer.from("0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20", "hex");
@@ -48,8 +60,8 @@ function client(args: readonly string[]): string {
   return requireSuccess(resolve(runtimeRoot, "scripts/localnet"), ["client", ...args], runtimeRoot);
 }
 
-function sha256(value: string): string {
-  return createHash("sha256").update(value, "utf8").digest("hex");
+function sha256(value: Uint8Array | string): string {
+  return createHash("sha256").update(value).digest("hex");
 }
 
 function sign(payloadHash: string): string {
@@ -103,10 +115,15 @@ async function includedOperation(hash: string): Promise<{ readonly level: number
 
 const candidateCommit = process.env.SAMURAI_RECEIPT_CANDIDATE_COMMIT ?? "";
 if (!/^[a-f0-9]{40}$/.test(candidateCommit)) throw new Error("SAMURAI_RECEIPT_CANDIDATE_COMMIT must be the exact full candidate commit.");
+const rawCandidateManifest = readRepositoryFile(root, RECEIPT_CANDIDATE_MANIFEST_PATH);
+const candidateManifest = parseSourceCandidateDeploymentManifest(JSON.parse(rawCandidateManifest.toString("utf8")));
+const bindingBytes = readRepositoryFile(root, candidateManifest.generatedBindingPath);
+if (sha256(bindingBytes) !== candidateManifest.generatedBindingSha256) throw new Error("Receipt source binding bytes drifted before readiness.");
+const sourceBinding = parseGeneratedReceiptSourceBindingModule(bindingBytes.toString("utf8"));
 if (
-  LOCALNET_RECEIPT_SOURCE_BINDING.deploymentClaim !== "source-only-not-originated"
-  || LOCALNET_RECEIPT_SOURCE_BINDING.contractAddress !== null
-  || LOCALNET_RECEIPT_SOURCE_BINDING.originationOperation !== null
+  sourceBinding.deploymentClaim !== "source-only-not-originated"
+  || sourceBinding.contractAddress !== null
+  || sourceBinding.originationOperation !== null
 ) {
   throw new Error("Receipt source binding contains an impermissible pre-readiness deployment claim.");
 }
@@ -115,25 +132,35 @@ if (head !== candidateCommit) throw new Error(`Candidate commit mismatch: expect
 if (requireSuccess("git", ["status", "--porcelain"]) !== "") throw new Error("Receipt Localnet lifecycle requires a clean candidate worktree.");
 if (requireSuccess("git", ["rev-parse", "HEAD"], runtimeRoot) !== expectedRuntimeCommit) throw new Error("Shared runtime commit drifted.");
 if (requireSuccess("git", ["status", "--porcelain"], runtimeRoot) !== "") throw new Error("Shared runtime worktree is dirty.");
-
-const ready = JSON.parse(requireSuccess("node", ["scripts/consumers.mjs", "ready", "samurai-sushi"], runtimeRoot)) as {
-  namespace?: { generation?: unknown; manifests?: { fresh?: unknown; stale?: unknown } };
-};
-const generation = ready.namespace?.generation;
-const freshManifests = ready.namespace?.manifests?.fresh;
-const staleManifests = ready.namespace?.manifests?.stale;
-if (
-  !Number.isSafeInteger(generation)
-  || !Number.isSafeInteger(freshManifests)
-  || (freshManifests as number) < 1
-  || staleManifests !== 0
-) {
-  throw new Error("Samurai consumer readiness did not return exclusively fresh current-generation manifest evidence.");
-}
 const requestedGeneration = Number(process.env.SAMURAI_RECEIPT_LOCALNET_GENERATION);
-if (!Number.isSafeInteger(requestedGeneration) || requestedGeneration !== generation) {
-  throw new Error(`Localnet generation mismatch: readiness returned ${String(generation)}.`);
-}
+if (!Number.isSafeInteger(requestedGeneration)) throw new Error("SAMURAI_RECEIPT_LOCALNET_GENERATION must be the exact generation.");
+const expectedIdentityId = process.env.SAMURAI_RECEIPT_LOCALNET_IDENTITY_ID ?? "";
+const expectedManifestId = process.env.SAMURAI_RECEIPT_MANIFEST_ID ?? "";
+if (!expectedIdentityId || !expectedManifestId) throw new Error("Exact Localnet identity and manifest IDs are required.");
+const expectedApprovedRef = "refs/remotes/origin/feat/localnet-receipt-authority";
+const expectedBlobOid = requireSuccess("git", ["rev-parse", `${candidateCommit}:${RECEIPT_CANDIDATE_MANIFEST_PATH}`]);
+const exactReadiness = withExactCandidateAdmission(
+  {
+    candidateCommit,
+    candidateManifestPath: RECEIPT_CANDIDATE_MANIFEST_PATH,
+    candidateManifestBytes: rawCandidateManifest,
+    candidateManifest,
+    expectedChainId,
+    expectedGeneration: requestedGeneration,
+    expectedIdentityId,
+    expectedManifestId,
+    expectedApprovedRef,
+    expectedBlobOid,
+  },
+  () => command(
+    "node",
+    ["scripts/consumers.mjs", "ready-commit", "samurai-sushi", candidateCommit, RECEIPT_CANDIDATE_MANIFEST_PATH],
+    runtimeRoot,
+  ),
+  (readiness) => readiness,
+);
+const generation = exactReadiness.generation;
+const localManifestSha256 = exactReadiness.candidateManifestSha256;
 
 const health = JSON.parse(requireSuccess(resolve(runtimeRoot, "scripts/localnet"), ["health"], runtimeRoot)) as {
   chain_id?: unknown;
@@ -149,8 +176,12 @@ const container = requireSuccess("docker", [...composeArgs, "ps", "-q", "tezos"]
 if (!/^[a-f0-9]{12,64}$/.test(container)) throw new Error("Localnet container identity is malformed.");
 const alias = `samurai_receipt_g${generation}_l${health.level}`;
 const containerArtifact = `/tmp/${alias}.tz`;
-requireSuccess("docker", ["cp", resolve(root, "contracts/receipt/build/samurai_sushi_receipt_v1.tz"), `${container}:${containerArtifact}`]);
-const initialStorage = readFileSync(resolve(root, "contracts/receipt/build/samurai_sushi_receipt_v1.storage.tz"), "utf8").trim();
+const localArtifact = readRepositoryFile(root, candidateManifest.artifact.path);
+if (sha256(localArtifact) !== candidateManifest.artifact.sha256) throw new Error("Receipt artifact bytes drifted after exact readiness.");
+const localStorage = readRepositoryFile(root, candidateManifest.artifact.storagePath);
+if (sha256(localStorage) !== candidateManifest.artifact.storageSha256) throw new Error("Receipt storage bytes drifted after exact readiness.");
+requireSuccess("docker", ["cp", resolve(root, candidateManifest.artifact.path), `${container}:${containerArtifact}`]);
+const initialStorage = localStorage.toString("utf8").trim();
 const originationOutput = client([
   "--wait", "2", "originate", "contract", alias, "transferring", "0", "from", "alice", "running", containerArtifact,
   "--init", initialStorage, "--burn-cap", "6",
@@ -160,28 +191,51 @@ const originationOperation = operationHash(originationOutput, "Origination");
 
 const issuedAt = Math.floor(Date.parse(health.timestamp) / 1000);
 if (!Number.isSafeInteger(issuedAt)) throw new Error("Localnet health timestamp is invalid.");
-const serviceCommitment = sha256(`SAMURAI_SUSHI_LOCALNET_SERVICE_V1\n${candidateCommit}\n${generation}\n${address}`);
 const nonce = sha256(`SAMURAI_SUSHI_LOCALNET_NONCE_V1\n${candidateCommit}\n${generation}\n${address}`);
-const payload = parseReceiptPayload({
-  domain: "SAMURAI_SUSHI_RECEIPT_V1",
-  schemaVersion: 1,
+const settledCheckpoint = deterministicSettledCheckpointFixture();
+const permit = issueSettledReceiptPermit({
+  checkpoint: settledCheckpoint,
+  commitmentNonce: FIXTURE_SETTLED_COMMITMENT_NONCE,
   chainId: expectedChainId,
   owner: alice,
-  source: alice,
   destination: address,
-  entrypoint: "submit_receipt",
-  attachedMutez: "0",
-  serviceCommitment,
-  contentVersion: "phase-1-evening-service-v1",
   nonce,
   issuedAt: issuedAt.toString(),
   expiry: (issuedAt + 900).toString(),
   deploymentManifestHash: RECEIPT_AUTHORITY_MANIFEST_HASH,
   issuerKeyId: "localnet-issuer-2026-01",
   issuerPolicyVersion: "1",
-});
-const payloadHash = hashReceiptPayload(payload);
-const permit: ReceiptPermitV1 = { payload, payloadHash, signature: sign(payloadHash) };
+}, sign);
+const policy = RECEIPT_AUTHORITY_MANIFEST.issuerPolicies[0]!;
+const admission: ReceiptAdmissionContext = {
+  now: issuedAt.toString(),
+  sender: alice,
+  chainId: expectedChainId,
+  destination: address,
+  entrypoint: "submit_receipt",
+  attachedMutez: "0",
+  deploymentManifestHash: RECEIPT_AUTHORITY_MANIFEST_HASH,
+  contentVersion: RECEIPT_AUTHORITY_MANIFEST.contentVersion,
+  paused: false,
+  issuerPolicies: new Map([[policy.keyId, policy]]),
+  usedNonces: new Set(),
+  usedOwnerCommitments: new Set(),
+};
+const preSubmissionReceipt = admitSettledReceiptPermit(
+  permit,
+  admission,
+  settledCheckpoint,
+  FIXTURE_SETTLED_COMMITMENT_NONCE,
+);
+const { payload, payloadHash } = permit;
+if (
+  preSubmissionReceipt.payloadHash !== payloadHash
+  || preSubmissionReceipt.serviceCommitment !== payload.serviceCommitment
+  || preSubmissionReceipt.contentVersion !== payload.contentVersion
+) {
+  throw new Error("Server settled-service pre-submission authority drifted.");
+}
+const serviceCommitment = payload.serviceCommitment;
 const argument = receiptPermitMichelsonArgument(permit);
 const invocationArgs = [
   "--wait", "2", "transfer", "0", "from", "alice", "to", address, "--entrypoint", "submit_receipt", "--arg", argument,
@@ -222,9 +276,15 @@ const evidence = {
   evidenceKind: "samurai-sushi-localnet-receipt-lifecycle-v1",
   sourceCandidate: {
     commit: candidateCommit,
-    candidateManifestHash: LOCALNET_RECEIPT_SOURCE_BINDING.candidateManifestHash,
+    manifestId: exactReadiness.manifestId,
+    candidateManifestHash: sha256CanonicalJson(candidateManifest),
+    candidateManifestSha256: localManifestSha256,
+    candidateManifestPath: RECEIPT_CANDIDATE_MANIFEST_PATH,
+    approvedRef: exactReadiness.approvedRef,
+    approvedRefTip: exactReadiness.approvedRefTip,
+    blobOid: exactReadiness.blobOid,
     authorityManifestHash: RECEIPT_AUTHORITY_MANIFEST_HASH,
-    artifactSha256: LOCALNET_RECEIPT_SOURCE_BINDING.artifactSha256,
+    artifactSha256: sourceBinding.artifactSha256,
   },
   runtime: { commit: expectedRuntimeCommit, generation, chainId: expectedChainId },
   deployment: { address, originationOperation, acceptedOperation, acceptedLevel: inclusion.level },
@@ -240,6 +300,5 @@ const evidence = {
 const outputPath = resolve(
   process.env.SAMURAI_RECEIPT_EVIDENCE_PATH ?? `/private/tmp/samurai-sushi-receipt-${candidateCommit.slice(0, 12)}-g${generation}.json`,
 );
-if (!relative(root, outputPath).startsWith("..")) throw new Error("Localnet runtime evidence must remain outside the source candidate worktree.");
-writeFileSync(outputPath, `${JSON.stringify(evidence, null, 2)}\n`, { mode: 0o600 });
+writeExclusiveExternalEvidenceFile(root, outputPath, `${JSON.stringify(evidence, null, 2)}\n`);
 console.log(JSON.stringify({ ...evidence, evidencePath: outputPath, evidenceSha256: sha256(canonicalJson(evidence)), file: basename(outputPath) }));

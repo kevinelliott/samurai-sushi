@@ -1,36 +1,50 @@
 import { createHash } from "node:crypto";
-import { readFileSync, statSync } from "node:fs";
 import { resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 import { canonicalJson } from "../packages/domain/src/index";
 import {
   FORBIDDEN_CONTRACT_SURFACE,
+  RECEIPT_AUTHORITY_MANIFEST,
+  RECEIPT_AUTHORITY_MANIFEST_HASH,
+  RECEIPT_CANDIDATE_MANIFEST_PATH,
+  parseGeneratedReceiptSourceBindingModule,
+  parseReceiptAuthorityManifest,
   parseSourceCandidateDeploymentManifest,
   sha256CanonicalJson,
 } from "../packages/receipt-authority/src/deployment-manifest";
-import { LOCALNET_RECEIPT_SOURCE_BINDING } from "../packages/receipt-authority/src/generated/localnet-source-binding";
 import { assertNoReceiptWebContamination } from "./receipt-web-source-scan";
-
-const root = resolve(process.cwd());
-const manifestPath = "contracts/receipt/build/deployment-manifest.json";
-
-function read(path: string): Buffer {
-  const absolute = resolve(root, path);
-  if (!absolute.startsWith(`${root}/`) || !statSync(absolute).isFile()) throw new Error(`${path} is not a regular repository file.`);
-  return readFileSync(absolute);
-}
+import { readRepositoryFile } from "./repository-file";
 
 function sha256(bytes: Uint8Array | string): string {
   return createHash("sha256").update(bytes).digest("hex");
 }
 
-const rawManifest = read(manifestPath);
+export function verifyReceiptAuthority(rootInput = process.cwd()): Record<string, unknown> {
+const root = resolve(rootInput);
+function read(path: string): Buffer {
+  return readRepositoryFile(root, path);
+}
+
+const rawManifest = read(RECEIPT_CANDIDATE_MANIFEST_PATH);
 const manifest = parseSourceCandidateDeploymentManifest(JSON.parse(rawManifest.toString("utf8")));
+const rawAuthorityManifest = read(manifest.authorityManifestPath);
+if (sha256(rawAuthorityManifest) !== manifest.authorityManifestSha256) throw new Error("Receipt authority manifest byte hash drifted.");
+const authorityManifest = parseReceiptAuthorityManifest(JSON.parse(rawAuthorityManifest.toString("utf8")));
+if (
+  canonicalJson(authorityManifest) !== canonicalJson(RECEIPT_AUTHORITY_MANIFEST)
+  || sha256CanonicalJson(authorityManifest) !== RECEIPT_AUTHORITY_MANIFEST_HASH
+  || manifest.authorityManifestHash !== RECEIPT_AUTHORITY_MANIFEST_HASH
+) {
+  throw new Error("Receipt authority manifest policy drifted.");
+}
+
 if (sha256(read(manifest.source.path)) !== manifest.source.sha256) throw new Error("Receipt contract source hash drifted.");
 if (sha256(read(manifest.artifact.path)) !== manifest.artifact.sha256) throw new Error("Receipt contract artifact hash drifted.");
 if (sha256(read(manifest.artifact.storagePath)) !== manifest.artifact.storageSha256) throw new Error("Receipt initial storage hash drifted.");
+const rawMicheline = read(manifest.artifact.michelinePath);
+if (sha256(rawMicheline) !== manifest.artifact.michelineSha256) throw new Error("Receipt Micheline artifact hash drifted.");
 
-const artifactJsonPath = manifest.artifact.path.replace(/\.tz$/, ".json");
-const script = JSON.parse(read(artifactJsonPath).toString("utf8")) as unknown;
+const script = JSON.parse(rawMicheline.toString("utf8")) as unknown;
 if (!Array.isArray(script)) throw new Error("Receipt contract artifact is not a Micheline script.");
 const parameter = script.find(
   (node): node is { prim: "parameter"; args: [unknown] } =>
@@ -62,33 +76,47 @@ for (const forbidden of FORBIDDEN_CONTRACT_SURFACE) {
   if (entrypoints.has(forbidden)) throw new Error(`Receipt contract exposes forbidden ${forbidden} entrypoint.`);
 }
 
-const manifestHash = sha256CanonicalJson(manifest);
+const bindingBytes = read(manifest.generatedBindingPath);
+if (sha256(bindingBytes) !== manifest.generatedBindingSha256) throw new Error("Generated receipt source binding byte hash drifted.");
+const binding = parseGeneratedReceiptSourceBindingModule(bindingBytes.toString("utf8"));
 if (
-  LOCALNET_RECEIPT_SOURCE_BINDING.candidateManifestPath !== manifestPath
-  || LOCALNET_RECEIPT_SOURCE_BINDING.candidateManifestHash !== manifestHash
-  || LOCALNET_RECEIPT_SOURCE_BINDING.authorityManifestHash !== manifest.authorityManifestHash
-  || LOCALNET_RECEIPT_SOURCE_BINDING.artifactSha256 !== manifest.artifact.sha256
-  || LOCALNET_RECEIPT_SOURCE_BINDING.parameterSchemaSha256 !== manifest.artifact.parameterSchemaSha256
+  binding.candidateManifestPath !== RECEIPT_CANDIDATE_MANIFEST_PATH
+  || binding.authorityManifestPath !== manifest.authorityManifestPath
+  || binding.authorityManifestHash !== manifest.authorityManifestHash
+  || binding.authorityManifestSha256 !== manifest.authorityManifestSha256
+  || binding.chainId !== manifest.chainId
+  || binding.contentVersion !== manifest.contentVersion
+  || binding.smartPySourcePath !== manifest.source.path
+  || binding.smartPySourceSha256 !== manifest.source.sha256
+  || binding.michelsonArtifactPath !== manifest.artifact.path
+  || binding.artifactSha256 !== manifest.artifact.sha256
+  || binding.michelineArtifactPath !== manifest.artifact.michelinePath
+  || binding.michelineSha256 !== manifest.artifact.michelineSha256
+  || binding.storagePath !== manifest.artifact.storagePath
+  || binding.storageSha256 !== manifest.artifact.storageSha256
+  || binding.parameterSchemaSha256 !== manifest.artifact.parameterSchemaSha256
 ) {
-  throw new Error("Generated receipt source binding drifted from the candidate manifest.");
-}
-if (LOCALNET_RECEIPT_SOURCE_BINDING.contractAddress !== null || LOCALNET_RECEIPT_SOURCE_BINDING.originationOperation !== null) {
-  throw new Error("Source-only receipt binding cannot make an address or origination claim.");
+  throw new Error("Generated receipt source binding drifted from the candidate artifact graph.");
 }
 
-const webPaths = ["apps/web/app", "apps/web/public"];
-assertNoReceiptWebContamination(root, webPaths);
+assertNoReceiptWebContamination(root, ["apps/web/app", "apps/web/public"]);
 
-console.log(
-  JSON.stringify({
-    manifestPath,
-    manifestSha256: manifestHash,
-    authorityManifestSha256: manifest.authorityManifestHash,
-    artifactSha256: manifest.artifact.sha256,
-    storageSha256: manifest.artifact.storageSha256,
-    parameterSchemaSha256: manifest.artifact.parameterSchemaSha256,
-    entrypoints: [...entrypoints].sort(),
-    deploymentClaim: manifest.deploymentClaim,
-    canonicalManifestBytes: Buffer.byteLength(canonicalJson(manifest)),
-  }),
-);
+return {
+  manifestPath: RECEIPT_CANDIDATE_MANIFEST_PATH,
+  candidateManifestHash: sha256CanonicalJson(manifest),
+  candidateManifestSha256: sha256(rawManifest),
+  authorityManifestHash: manifest.authorityManifestHash,
+  authorityManifestSha256: manifest.authorityManifestSha256,
+  generatedBindingSha256: manifest.generatedBindingSha256,
+  artifactSha256: manifest.artifact.sha256,
+  storageSha256: manifest.artifact.storageSha256,
+  parameterSchemaSha256: manifest.artifact.parameterSchemaSha256,
+  entrypoints: [...entrypoints].sort(),
+  deploymentClaim: manifest.deploymentClaim,
+  canonicalManifestBytes: Buffer.byteLength(canonicalJson(manifest)),
+};
+}
+
+if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
+  console.log(JSON.stringify(verifyReceiptAuthority()));
+}

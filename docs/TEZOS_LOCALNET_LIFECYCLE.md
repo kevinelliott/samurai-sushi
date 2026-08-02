@@ -85,10 +85,13 @@ Reset or generation drift makes all earlier addresses and manifests stale
 before any new address-bearing command.
 
 The application adapter is registered as integrated in shared runtime revision
-`1d6726650146cbcce292fa7a69f9c227c5465bde`. Before any address-bearing command,
-run `npm run consumers:ready -- samurai-sushi` from that exact clean runtime
-checkout; it must pass against the live loopback chain and current generation.
-Historical mutable manifests and a working-tree copy cannot satisfy this gate.
+`5edf9cb43af21c06e805eefdcdc0af1291bb789e`. Before any address-bearing command,
+run `node scripts/consumers.mjs ready-commit samurai-sushi <full-40-hex-commit>
+contracts/receipt/build/deployment-manifest.json` from that exact clean runtime
+checkout. The returned identity, generation, manifest ID, approved ref and tip,
+blob, bytes, digest, payload identity, and parsed manifest must all match the
+frozen candidate. Historical mutable manifests, aggregate readiness, a
+predecessor commit, and a working-tree copy cannot satisfy this gate.
 
 ## Daily development
 

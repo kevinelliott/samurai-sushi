@@ -1,7 +1,7 @@
 /* global fetch, process, setTimeout */
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { readFile } from "node:fs/promises";
+import { readdir, readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 
 const projectRoot = resolve(import.meta.dirname, "..");
@@ -86,7 +86,36 @@ async function startAndAssert(profile, port) {
   }
 }
 
+async function assertNoReceiptPrivateInputsInBrowserArtifacts() {
+  const staticRoot = resolve(projectRoot, "apps/web/.next/static");
+  const appRoot = resolve(projectRoot, "apps/web/.next/server/app");
+  const staticFiles = (await readdir(staticRoot, { recursive: true }))
+    .filter((file) => /\.(?:js|map)$/u.test(file));
+  const appFiles = (await readdir(appRoot, { recursive: true }))
+    .filter((file) => /\.(?:html|rsc|txt)$/u.test(file));
+  const output = (await Promise.all([
+    ...staticFiles.map((file) => readFile(resolve(staticRoot, file), "utf8")),
+    ...appFiles.map((file) => readFile(resolve(appRoot, file), "utf8")),
+  ])).join("\n");
+  for (const marker of [
+    "@samurai-sushi/receipt-authority/server",
+    "issueSettledReceiptPermit",
+    "admitSettledReceiptPermit",
+    "deriveSettledServiceReceiptFacts",
+    "FIXTURE_SETTLED_COMMITMENT_NONCE",
+    "deterministicSettledCheckpointFixture",
+    "commitmentNonce",
+    "SAMURAI_SUSHI_SERVICE_COMMITMENT_V1",
+    "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20",
+    "edsk2gM2LioC6Yfk",
+  ]) {
+    assert.doesNotMatch(output, new RegExp(marker, "u"));
+  }
+}
+
 await run(["build:raw"], profiles.localnet);
+await assertNoReceiptPrivateInputsInBrowserArtifacts();
 await startAndAssert(profiles.shadownet, 3111);
 await run(["build:raw"], profiles.shadownet);
+await assertNoReceiptPrivateInputsInBrowserArtifacts();
 await startAndAssert(profiles.localnet, 3112);

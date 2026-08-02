@@ -2,6 +2,7 @@
   "chainId": "NetXtJqPyJGB6Pc",
   "confirmationThreshold": 2,
   "consumer": "samurai-sushi",
+  "contentVersion": "phase-1-evening-service-v1",
   "contractName": "SAMURAI_SUSHI_RECEIPT_V1",
   "entrypoint": "submit_receipt",
   "finalityPolicy": "localnet-two-confirmation-rehearsal-v1",

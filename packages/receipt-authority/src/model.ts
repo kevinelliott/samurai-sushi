@@ -6,6 +6,7 @@ import {
   PrefixV2,
   verifySignature,
 } from "@taquito/utils";
+import { FIRST_EVENING_CONTENT_VERSION } from "@samurai-sushi/domain/evening-service";
 import { hashReceiptPayload } from "./michelson-pack";
 
 export const RECEIPT_DOMAIN = "SAMURAI_SUSHI_RECEIPT_V1" as const;
@@ -97,6 +98,7 @@ export interface ReceiptAdmissionContext {
   readonly entrypoint: typeof RECEIPT_ENTRYPOINT;
   readonly attachedMutez: "0";
   readonly deploymentManifestHash: string;
+  readonly contentVersion: typeof FIRST_EVENING_CONTENT_VERSION;
   readonly paused: boolean;
   readonly issuerPolicies: ReadonlyMap<string, IssuerKeyPolicyV1>;
   readonly usedNonces: ReadonlySet<string>;
@@ -307,6 +309,7 @@ export function admitReceiptPermit(input: unknown, context: ReceiptAdmissionCont
   const expectedChain = canonicalChainId(context.chainId, "receipt admission chain ID");
   const expectedDestination = canonicalAddress(context.destination, "receipt admission destination", true);
   const expectedManifest = canonicalHex32(context.deploymentManifestHash, "receipt admission deployment manifest hash");
+  const expectedContentVersion = canonicalIdentifier(context.contentVersion, "receipt admission content version");
   if (context.entrypoint !== RECEIPT_ENTRYPOINT || context.attachedMutez !== "0") invalid("receipt admission dispatch is malformed.");
   if (context.paused) reject("receipt authority is paused.");
   if (payload.owner !== sender || payload.source !== sender) reject("receipt sender does not match owner/source.");
@@ -315,6 +318,9 @@ export function admitReceiptPermit(input: unknown, context: ReceiptAdmissionCont
   }
   if (payload.attachedMutez !== context.attachedMutez || payload.deploymentManifestHash !== expectedManifest) {
     reject("receipt dispatch policy does not match authority.");
+  }
+  if (payload.contentVersion !== expectedContentVersion || expectedContentVersion !== FIRST_EVENING_CONTENT_VERSION) {
+    reject("receipt content version does not match authority.");
   }
   const policy = context.issuerPolicies.get(payload.issuerKeyId);
   if (!policy) reject("receipt issuer policy is unavailable.");

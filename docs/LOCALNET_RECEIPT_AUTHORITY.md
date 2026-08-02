@@ -32,8 +32,9 @@ mutable metadata, economic, referral, random, or DER entrypoint.
 
 ## Private commitment boundary
 
-The server derives `serviceCommitment` only after an exact `SETTLED` first
-service:
+The server-only issuance boundary decodes one exact `SETTLED` first-service
+checkpoint and derives both `contentVersion` and `serviceCommitment`; callers
+cannot supply either public field independently:
 
 ```text
 BLAKE2b-256(
@@ -48,6 +49,12 @@ guest/player identity, orders, choices, dialogue, score, wallet proof, browser
 state, accessibility settings, and persistence identifiers remain offchain and
 must not enter contract storage, events, public metadata, DOM, logs, browser
 storage, bundles, HTML, or RSC output.
+
+The contract cannot reconstruct this private checkpoint and does not claim to.
+It enforces the immutable allowed content version and verifies the issuer's
+signature over the opaque commitment. Checkpoint-to-commitment provenance is
+therefore an issuer-boundary guarantee, while the public chain proves only
+acceptance under that displayed policy.
 
 ## Signed payload and policy
 
@@ -85,19 +92,22 @@ one-of-one, rare, exclusive, or an edition size.
 ## Manifest and evidence layers
 
 `contracts/receipt/authority-manifest.json` is the immutable authority identity
-used by contract storage and signed permits. It pins chain/profile, privileged
+used by contract storage and signed permits. It pins chain/profile, the exact
+allowed content version, privileged
 addresses, issuer-policy registry, entrypoint, lifetime/skew, confirmation
 threshold, and finality policy. The payload separately signs the exact contract
 destination, avoiding any hidden address substitution.
 
 `contracts/receipt/build/deployment-manifest.json` is a source-candidate
-envelope. It pins the authority identity plus exact source, Michelson artifact,
-initial storage, parameter schema, public fact sets, and forbidden surface. It
+envelope. It pins the authority identity plus exact canonical paths and byte
+digests for the authority manifest, generated binding, source, Michelson and
+Micheline artifacts, initial storage, parameter schema, public fact sets, and forbidden surface. It
 states `source-only-not-originated` and therefore contains no address or
 operation claim. The generated source binding also holds `null` for both.
 
-After the exact pushed commit is registered and current-generation readiness
-passes, the Localnet lifecycle may create a separate runtime deployment binding
+After the exact pushed commit is registered and shared `ready-commit` proves
+that exact current-generation manifest envelope and Git blob, the Localnet
+lifecycle may create a separate runtime deployment binding
 that records the registered candidate commit/manifest, generation, address,
 origination operation, and verified invocation. Later checkout drift or a new
 generation cannot make old evidence current.

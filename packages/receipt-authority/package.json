@@ -8,8 +8,12 @@
   },
   "exports": {
     ".": "./src/index.ts",
-    "./commitment": "./src/commitment.ts",
     "./deployment-manifest": "./src/deployment-manifest.ts",
+    "./server": {
+      "types": "./src/server.ts",
+      "browser": "./src/browser-rejected.ts",
+      "default": "./src/server.ts"
+    },
     "./generated/localnet-source-binding": "./src/generated/localnet-source-binding.ts",
     "./michelson-pack": "./src/michelson-pack.ts",
     "./michelson-argument": "./src/michelson-argument.ts",

@@ -29,13 +29,32 @@ function concat(...parts: readonly Uint8Array[]): Uint8Array {
  * the settled checkpoint and server nonce remain private persistence material.
  */
 export function deriveSettledServiceCommitment(checkpointInput: unknown, serverNonce: unknown): string {
+  return deriveSettledServiceReceiptFacts(checkpointInput, serverNonce).serviceCommitment;
+}
+
+export interface SettledServiceReceiptFacts {
+  readonly contentVersion: typeof FIRST_EVENING_CONTENT_VERSION;
+  readonly serviceCommitment: string;
+}
+
+/**
+ * Server-only fact derivation. The checkpoint is decoded once so the public
+ * content version and opaque commitment cannot be supplied independently.
+ */
+export function deriveSettledServiceReceiptFacts(
+  checkpointInput: unknown,
+  serverNonce: unknown,
+): SettledServiceReceiptFacts {
   const checkpoint = decodeEveningServiceCheckpoint(checkpointInput);
   if (checkpoint.phase !== "SETTLED" || checkpoint.contentVersion !== FIRST_EVENING_CONTENT_VERSION) {
-    throw new Error("A receipt commitment requires the exact settled first-service checkpoint.");
+    throw new Error("Receipt issuance requires the exact settled first-service checkpoint.");
   }
   const digest = blake2b(
     concat(SERVICE_COMMITMENT_DOMAIN, nonceBytes(serverNonce), canonicalEveningServiceBytes(checkpoint)),
     { dkLen: 32 },
   );
-  return Buffer.from(digest).toString("hex");
+  return Object.freeze({
+    contentVersion: checkpoint.contentVersion,
+    serviceCommitment: Buffer.from(digest).toString("hex"),
+  });
 }

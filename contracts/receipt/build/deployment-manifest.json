@@ -8,20 +8,25 @@
   "deploymentClaim": "source-only-not-originated",
   "contractName": "SAMURAI_SUSHI_RECEIPT_V1",
   "entrypoint": "submit_receipt",
+  "contentVersion": "phase-1-evening-service-v1",
   "authorityManifestPath": "contracts/receipt/authority-manifest.json",
-  "authorityManifestHash": "9fa3874f00d4cce18de80d579c5be8f8ae970b33257c33ed15c2e2cd80937833",
+  "authorityManifestHash": "3d6e4cf1e3ee898a6c6106e790f909f73d4e12c01d073a7f0e3c59011c4daa79",
+  "authorityManifestSha256": "efe151144684f67b7aa2a65b25911e196ee62ef44740fbbdc36968e5ebd5963f",
   "source": {
     "path": "contracts/receipt/samurai_sushi_receipt.py",
-    "sha256": "3a655720e630dcf649bfb5f9e628139b08857571a87632bb77195b3fffab9c2c"
+    "sha256": "efa25a1201c0d7b1931205e537dd8b8d53ede898e4c30c5b373979f52184e138"
   },
   "artifact": {
     "path": "contracts/receipt/build/samurai_sushi_receipt_v1.tz",
-    "sha256": "5bd83cf693db3511ac3a321aa36c75d6e456275140ac3215b3ec217f6752d034",
+    "sha256": "b0b01036122cc9f40dc2196be2cb5434a57181969524d0a76236e45dccf56c6b",
     "storagePath": "contracts/receipt/build/samurai_sushi_receipt_v1.storage.tz",
-    "storageSha256": "b9a3626ccf13a8cb0d3534935364df9ade3fb689b128ee0ce8fd54af656d8fcb",
+    "storageSha256": "03111195a77a8db318c44c70ca34bc60dba74ea4c7b85df33ff1be7e7469d6ad",
+    "michelinePath": "contracts/receipt/build/samurai_sushi_receipt_v1.json",
+    "michelineSha256": "2537fef4eac1d343194e45ba37fc8982e508929f5e2d5d9edb26a040c3170492",
     "parameterSchemaSha256": "de3bca12d4d4280baec0652361aedd7b463840d9738ed334148a42a5d22ef22f"
   },
   "generatedBindingPath": "packages/receipt-authority/src/generated/localnet-source-binding.ts",
+  "generatedBindingSha256": "af61e2f5b2ea13e2ea13c213089e317da0fa34b068e9c6962f665c381b86d4d1",
   "confirmationThreshold": 2,
   "finalityPolicy": "localnet-two-confirmation-rehearsal-v1",
   "publicStorageKeys": [

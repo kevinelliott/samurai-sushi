@@ -6,6 +6,7 @@ import {
   FORBIDDEN_CONTRACT_SURFACE,
   RECEIPT_AUTHORITY_MANIFEST,
   RECEIPT_AUTHORITY_MANIFEST_HASH,
+  parseLocalnetReceiptSourceBinding,
   parseReceiptAuthorityManifest,
   parseSourceCandidateDeploymentManifest,
   sha256CanonicalJson,
@@ -14,9 +15,9 @@ import {
 describe("receipt authority deployment manifests", () => {
   it("pins the exact Localnet policy identity and source-only generated binding", () => {
     expect(parseReceiptAuthorityManifest(authorityInput)).toStrictEqual(RECEIPT_AUTHORITY_MANIFEST);
-    expect(RECEIPT_AUTHORITY_MANIFEST_HASH).toBe("9fa3874f00d4cce18de80d579c5be8f8ae970b33257c33ed15c2e2cd80937833");
+    expect(RECEIPT_AUTHORITY_MANIFEST_HASH).toBe("3d6e4cf1e3ee898a6c6106e790f909f73d4e12c01d073a7f0e3c59011c4daa79");
     const candidate = parseSourceCandidateDeploymentManifest(candidateInput);
-    expect(sha256CanonicalJson(candidate)).toBe(LOCALNET_RECEIPT_SOURCE_BINDING.candidateManifestHash);
+    expect(sha256CanonicalJson(candidate)).toBe("f6d7281593a71905c5fec82efc10377b47af509632fc2564dcc2de1578ad1c38");
     expect(candidate.deploymentClaim).toBe("source-only-not-originated");
     expect(LOCALNET_RECEIPT_SOURCE_BINDING).toMatchObject({ contractAddress: null, originationOperation: null });
     expect(candidate.forbiddenContractSurface).toEqual(FORBIDDEN_CONTRACT_SURFACE);
@@ -29,10 +30,18 @@ describe("receipt authority deployment manifests", () => {
       ["foreign profile", { ...candidateInput, profile: "shadownet" }],
       ["deployment claim", { ...candidateInput, deploymentClaim: "originated" }],
       ["manifest hash", { ...candidateInput, authorityManifestHash: "00".repeat(32) }],
+      ["manifest byte hash", { ...candidateInput, authorityManifestSha256: "x".repeat(64) }],
+      ["authority manifest safe wrong path", { ...candidateInput, authorityManifestPath: "docs/LOCALNET_RECEIPT_AUTHORITY.md" }],
       ["source traversal", { ...candidateInput, source: { ...candidateInput.source, path: "../foreign.py" } }],
+      ["source safe wrong path", { ...candidateInput, source: { ...candidateInput.source, path: "README.md" } }],
       ["source hash", { ...candidateInput, source: { ...candidateInput.source, sha256: "x".repeat(64) } }],
+      ["Michelson safe wrong path", { ...candidateInput, artifact: { ...candidateInput.artifact, path: "README.md" } }],
       ["artifact hash", { ...candidateInput, artifact: { ...candidateInput.artifact, sha256: "AA".repeat(32) } }],
+      ["Micheline safe wrong path", { ...candidateInput, artifact: { ...candidateInput.artifact, michelinePath: "package.json" } }],
+      ["storage safe wrong path", { ...candidateInput, artifact: { ...candidateInput.artifact, storagePath: "README.md" } }],
       ["schema hash", { ...candidateInput, artifact: { ...candidateInput.artifact, parameterSchemaSha256: "z".repeat(64) } }],
+      ["binding safe wrong path", { ...candidateInput, generatedBindingPath: "README.md" }],
+      ["binding hash", { ...candidateInput, generatedBindingSha256: "x".repeat(64) }],
       ["entrypoint", { ...candidateInput, entrypoint: "transfer" }],
       ["finality", { ...candidateInput, finalityPolicy: "submitted-is-final" }],
       ["confirmations", { ...candidateInput, confirmationThreshold: 0 }],
@@ -44,9 +53,25 @@ describe("receipt authority deployment manifests", () => {
     for (const [label, mutation] of mutations) expect(() => parseSourceCandidateDeploymentManifest(mutation), label).toThrow();
   });
 
+  it("rejects every wrong-but-safe path in the generated binding graph", () => {
+    expect(parseLocalnetReceiptSourceBinding(LOCALNET_RECEIPT_SOURCE_BINDING)).toEqual(LOCALNET_RECEIPT_SOURCE_BINDING);
+    const mutations: readonly [string, Record<string, unknown>][] = [
+      ["candidate", { candidateManifestPath: "README.md" }],
+      ["authority", { authorityManifestPath: "README.md" }],
+      ["source", { smartPySourcePath: "README.md" }],
+      ["Michelson", { michelsonArtifactPath: "README.md" }],
+      ["Micheline", { michelineArtifactPath: "package.json" }],
+      ["storage", { storagePath: "README.md" }],
+    ];
+    for (const [label, mutation] of mutations) {
+      expect(() => parseLocalnetReceiptSourceBinding({ ...LOCALNET_RECEIPT_SOURCE_BINDING, ...mutation }), label).toThrow(/path/);
+    }
+  });
+
   it("rejects Localnet authority drift in chain, roles, lifetime, skew, confirmations, finality, and issuer policy shape", () => {
     const mutations: readonly [string, unknown][] = [
       ["chain", { ...authorityInput, chainId: "NetXdQprcVkpaWU" }],
+      ["content version", { ...authorityInput, contentVersion: "phase-1-evening-service-v999" }],
       ["administrator", { ...authorityInput, sourceAdministrator: "tz1aSkwEot3L2kmUvcoxzjMomb9mvBNuzFK6" }],
       ["pause controller", { ...authorityInput, pauseController: "tz1aSkwEot3L2kmUvcoxzjMomb9mvBNuzFK6" }],
       ["lifetime", { ...authorityInput, maximumPermitLifetimeSeconds: 901 }],

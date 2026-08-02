@@ -176,6 +176,7 @@ def receipt_v1():
             administrator,
             pause_controller,
             chain_id,
+            content_version,
             deployment_manifest_hash,
             issuer_policies,
             maximum_permit_lifetime_seconds,
@@ -185,6 +186,7 @@ def receipt_v1():
             self.data.pause_controller = pause_controller
             self.data.paused = False
             self.data.chain_id = chain_id
+            self.data.content_version = content_version
             self.data.deployment_manifest_hash = deployment_manifest_hash
             self.data.maximum_permit_lifetime_seconds = maximum_permit_lifetime_seconds
             self.data.max_clock_skew_seconds = max_clock_skew_seconds
@@ -217,6 +219,9 @@ def receipt_v1():
             assert payload.destination == sp.self_address, "RECEIPT_DESTINATION"
             assert payload.entrypoint == "submit_receipt", "RECEIPT_ENTRYPOINT"
             assert payload.attached_mutez == sp.mutez(0), "RECEIPT_PAYLOAD_MUTEZ"
+            assert (
+                payload.content_version == self.data.content_version
+            ), "RECEIPT_CONTENT_VERSION"
             assert (
                 payload.deployment_manifest_hash
                 == self.data.deployment_manifest_hash
@@ -309,6 +314,7 @@ def receipt_contract():
         administrator=sp.address(AUTHORITY_MANIFEST["sourceAdministrator"]),
         pause_controller=sp.address(AUTHORITY_MANIFEST["pauseController"]),
         chain_id=sp.chain_id_cst("0xd3166e11"),
+        content_version=AUTHORITY_MANIFEST["contentVersion"],
         deployment_manifest_hash=sp.bytes("0x" + AUTHORITY_MANIFEST_HASH),
         issuer_policies=sp.big_map({policy["keyId"]: authority_policy()}),
         maximum_permit_lifetime_seconds=sp.nat(
@@ -496,7 +502,6 @@ def reject_hostile_receipt_inputs_without_records_or_events():
         ("RECEIPT_ENTRYPOINT", {"entrypoint": "transfer"}),
         ("RECEIPT_PAYLOAD_MUTEZ", {"attached_mutez": sp.mutez(1)}),
         ("RECEIPT_PAYLOAD_HASH", {"service_commitment": sp.bytes("0x" + "33" * 32)}),
-        ("RECEIPT_PAYLOAD_HASH", {"content_version": "phase-1-evening-service-v2"}),
         ("RECEIPT_PAYLOAD_HASH", {"nonce": sp.bytes("0x" + "44" * 32)}),
         ("RECEIPT_PAYLOAD_HASH", {"issued_at": sp.timestamp(1770000001)}),
         ("RECEIPT_PAYLOAD_HASH", {"expiry": sp.timestamp(1770000899)}),
@@ -522,6 +527,21 @@ def reject_hostile_receipt_inputs_without_records_or_events():
             _valid=False,
             _exception=exception,
         )
+
+    freshly_signed_wrong_version = fixture_permit(
+        fixture_payload(
+            contract.address,
+            content_version="phase-1-evening-service-v999",
+        )
+    )
+    contract.submit_receipt(
+        freshly_signed_wrong_version,
+        _sender=alice,
+        _now=sp.timestamp(1770000000),
+        _chain_id=sp.chain_id_cst("0xd3166e11"),
+        _valid=False,
+        _exception="RECEIPT_CONTENT_VERSION",
+    )
 
     bad_hash = sp.cast(
         sp.record(
@@ -671,6 +691,7 @@ def enforce_half_open_time_and_privilege_boundaries():
             administrator=alice,
             pause_controller=alice,
             chain_id=sp.chain_id_cst("0xd3166e11"),
+            content_version=AUTHORITY_MANIFEST["contentVersion"],
             deployment_manifest_hash=sp.bytes("0x" + AUTHORITY_MANIFEST_HASH),
             issuer_policies=sp.big_map({key_id: selected_policy}),
             maximum_permit_lifetime_seconds=sp.nat(900),
