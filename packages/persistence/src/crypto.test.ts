@@ -104,6 +104,19 @@ describe("purpose-separated account capabilities", () => {
       [key("player-session", 1, 8, true)],
     )).toThrow(/identities must be unique/u);
   });
+
+  it("pins deterministic, canonical, purpose-separated guest and player rotation credentials", () => {
+    const source = Buffer.alloc(32, 31).toString("base64url");
+    const guest = new HmacKeyring(key("resume", 2, 2));
+    const player = new PlayerSessionKeyring(key("player-session", 7, 7));
+    const guestReplacement = guest.deriveRotationSecret(source, NOW, 2);
+    const playerReplacement = player.deriveRotationSecret(source, NOW, 7);
+    expect(guestReplacement).toBe("UrGfWzhm57ez3qn9NaYek4iIvEAWIpPPqVGWG1N7nvo");
+    expect(playerReplacement).toBe("S0F1jzrj1dHdrKy3Mh6nSVjBW7kQ3UxNTgpjZxdCJZY");
+    expect(guest.deriveRotationSecret(source, NOW, 2)).toBe(guestReplacement);
+    expect(player.deriveRotationSecret(source, NOW, 7)).toBe(playerReplacement);
+    expect(guestReplacement).not.toBe(playerReplacement);
+  });
 });
 
 describe("portable-save integrity keys", () => {

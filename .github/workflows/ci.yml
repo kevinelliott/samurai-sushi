@@ -52,3 +52,5 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm --filter @samurai-sushi/persistence test:integration
+      - run: pnpm --filter @samurai-sushi/web build
+      - run: pnpm --filter @samurai-sushi/account-http-runtime test:integration

@@ -6,6 +6,8 @@ const KEY_IDENTITY_DOMAIN = "samurai-sushi:hmac-key-identity:v1\n";
 const PORTABLE_SAVE_INTEGRITY_DOMAIN = "samurai-sushi:portable-save-integrity:v1\n";
 const GUEST_CLAIM_CAPABILITY_DOMAIN = "samurai-sushi:guest-claim-capability:v1\n";
 const PLAYER_SESSION_DOMAIN = "samurai-sushi:player-session:v1\n";
+const GUEST_ROTATION_SECRET_DOMAIN = "samurai-sushi:guest-rotation-secret:v1\n";
+const PLAYER_ROTATION_SECRET_DOMAIN = "samurai-sushi:player-rotation-secret:v1\n";
 const KEY_IDENTITY_PATTERN = /^sha256:[0-9a-f]{64}$/;
 
 export type HmacKeyPurpose =
@@ -153,6 +155,15 @@ export class HmacKeyring {
       keyIdentity: record.metadata.keyIdentity,
       digest: createHmac("sha256", record.bytes).update(decodeResumeSecret(secret)).digest(),
     };
+  }
+
+  deriveRotationSecret(secret: string, now: Date, keyVersion: number): string {
+    const record = this.#records.get(keyVersion);
+    if (!record || !usable(record, now)) throw new KeyLifecycleError("KEY_VERSION_UNAVAILABLE", keyVersion);
+    return createHmac("sha256", record.bytes)
+      .update(GUEST_ROTATION_SECRET_DOMAIN, "utf8")
+      .update(decodeResumeSecret(secret))
+      .digest("base64url");
   }
 
   candidates(secret: string, now: Date): readonly VersionedDigest[] {
@@ -341,6 +352,15 @@ abstract class PurposeSeparatedCapabilityKeyring {
     return this.#digest(record, bytes);
   }
 
+  protected deriveSecret(secret: string, now: Date, keyVersion: number, domain: string): string {
+    const record = this.#records.get(keyVersion);
+    if (!record || !usable(record, now)) throw new KeyLifecycleError("KEY_VERSION_UNAVAILABLE", keyVersion);
+    return createHmac("sha256", record.bytes)
+      .update(domain, "utf8")
+      .update(decodeCapabilitySecret(secret))
+      .digest("base64url");
+  }
+
   candidates(secret: string, now: Date): readonly VersionedDigest[] {
     const bytes = decodeCapabilitySecret(secret);
     return [...this.#records.values()]
@@ -390,6 +410,10 @@ export class GuestClaimKeyring extends PurposeSeparatedCapabilityKeyring {
 export class PlayerSessionKeyring extends PurposeSeparatedCapabilityKeyring {
   constructor(active: VersionedHmacKey, verificationOnly: readonly VersionedHmacKey[] = []) {
     super(active, verificationOnly, "player-session", PLAYER_SESSION_DOMAIN);
+  }
+
+  deriveRotationSecret(secret: string, now: Date, keyVersion: number): string {
+    return this.deriveSecret(secret, now, keyVersion, PLAYER_ROTATION_SECRET_DOMAIN);
   }
 }
 

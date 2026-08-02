@@ -2201,8 +2201,16 @@ describe("PostgreSQL persistence spine", () => {
       checkpoint: { step: 0 },
     });
     const rotated = await sessionService.rotate(issued.resumeSecret);
-    await expect(sessionService.resume(issued.resumeSecret)).resolves.not.toHaveProperty("rotatedResumeSecret");
-    await expect(sessionService.resume(issued.resumeSecret)).resolves.not.toHaveProperty("rotatedResumeSecret");
+    const lostResponseRetries = await Promise.all([
+      sessionService.rotate(issued.resumeSecret),
+      sessionService.rotate(issued.resumeSecret),
+    ]);
+    expect(lostResponseRetries.map((item) => item.rotatedResumeSecret)).toEqual([
+      rotated.rotatedResumeSecret,
+      rotated.rotatedResumeSecret,
+    ]);
+    await expect(sessionService.resume(issued.resumeSecret)).resolves.toMatchObject({ credentialKind: "predecessor" });
+    await expect(sessionService.resume(rotated.rotatedResumeSecret)).resolves.toMatchObject({ credentialKind: "current" });
     await rawPool.query("UPDATE samurai_persistence.guest_sessions SET rotate_after = clock_timestamp() WHERE id = $1", [issued.session.id]);
     await expect(sessionService.resume(rotated.rotatedResumeSecret)).resolves.not.toHaveProperty("rotatedResumeSecret");
     await expect(sessionService.rotate(rotated.rotatedResumeSecret)).rejects.toBeInstanceOf(GuestRotationDeferredError);
@@ -2216,6 +2224,176 @@ describe("PostgreSQL persistence spine", () => {
       [issued.session.id],
     );
     await expect(sessionService.rotate(rotated.rotatedResumeSecret)).resolves.toHaveProperty("rotatedResumeSecret");
+  });
+
+  it("serializes automatic and explicit guest rotation at the stored-digest fence in both winners", async () => {
+    for (const winner of ["automatic", "explicit"] as const) {
+      await rawPool.query("TRUNCATE samurai_persistence.guest_sessions CASCADE");
+      await rawPool.query("DELETE FROM samurai_persistence.deletion_tombstones");
+      const issued = await sessionService.issue({
+        consentVersion: "privacy-v1",
+        contentVersion: "content-v1",
+        checkpointSchemaVersion: 1,
+        checkpoint: { step: 0 },
+      });
+      await rawPool.query(
+        "UPDATE samurai_persistence.guest_sessions SET rotate_after=clock_timestamp() WHERE id=$1",
+        [issued.session.id],
+      );
+      const blocker = await rawPool.connect();
+      await blocker.query("BEGIN");
+      await blocker.query(
+        "SELECT id FROM samurai_persistence.guest_sessions WHERE id=$1 FOR UPDATE",
+        [issued.session.id],
+      );
+      const firstAttempted = deferred<number>();
+      const firstAcquired = deferred<number>();
+      const firstPool = new ObservedQueryLockPool(
+        pool,
+        (text) => text.includes("FOR UPDATE OF s"),
+        firstAttempted,
+        firstAcquired,
+      );
+      const secondPool = new ObservedReplayFencePool(pool, deferred<number>(), deferred<number>());
+      const launch = (servicePool: SqlPool, operation: "automatic" | "explicit") => {
+        const service = new GuestSessionService(servicePool, authority);
+        return operation === "automatic" ? service.resume(issued.resumeSecret) : service.rotate(issued.resumeSecret);
+      };
+      const first = launch(firstPool, winner);
+      await firstAttempted.promise;
+      const secondOperation = winner === "automatic" ? "explicit" : "automatic";
+      const second = launch(secondPool, secondOperation);
+      const secondPid = await secondPool.attempted.promise;
+      await expectLockWait(rawPool, secondPid);
+      await blocker.query("COMMIT");
+      blocker.release();
+      await firstAcquired.promise;
+      const [firstResult, secondResult] = await Promise.all([first, second]);
+      await secondPool.acquired.promise;
+      if (!("rotatedResumeSecret" in firstResult)) throw new Error("Winning guest rotation returned no credential.");
+      if (secondOperation === "explicit") {
+        expect(secondResult).toMatchObject({ rotatedResumeSecret: firstResult.rotatedResumeSecret });
+      } else {
+        expect(secondResult).toMatchObject({ credentialKind: "predecessor" });
+        expect(secondResult).not.toHaveProperty("rotatedResumeSecret");
+      }
+      await expect(sessionService.resume(firstResult.rotatedResumeSecret)).resolves.toMatchObject({
+        credentialKind: "current",
+      });
+      const state = await rawPool.query<{ readonly slots: string[] }>(
+        `SELECT array_agg(slot ORDER BY slot)::text[] AS slots
+           FROM samurai_persistence.guest_resume_digests
+          WHERE guest_session_id=$1`,
+        [issued.session.id],
+      );
+      expect(state.rows[0]?.slots).toEqual(["current", "predecessor"]);
+    }
+  });
+
+  it("serializes guest rotation with explicit deletion and portable import in both winners", async () => {
+    for (const winner of ["rotate", "delete"] as const) {
+      await rawPool.query("TRUNCATE samurai_persistence.guest_sessions CASCADE");
+      await rawPool.query("DELETE FROM samurai_persistence.deletion_tombstones");
+      const issued = await sessionService.issue({
+        consentVersion: "privacy-v1", contentVersion: "content-v1", checkpointSchemaVersion: 1, checkpoint: { step: 0 },
+      });
+      const blocker = await rawPool.connect();
+      await blocker.query("BEGIN");
+      await blocker.query("SELECT id FROM samurai_persistence.guest_sessions WHERE id=$1 FOR UPDATE", [issued.session.id]);
+      const firstAttempted = deferred<number>(); const firstAcquired = deferred<number>();
+      const firstPool = new ObservedQueryLockPool(
+        pool, (text) => text.includes("FOR UPDATE OF s"), firstAttempted, firstAcquired,
+      );
+      const secondPool = new ObservedReplayFencePool(pool, deferred<number>(), deferred<number>());
+      const first = winner === "rotate"
+        ? new GuestSessionService(firstPool, authority).rotate(issued.resumeSecret)
+        : new GuestSessionService(firstPool, authority).delete(issued.resumeSecret);
+      await firstAttempted.promise;
+      const second = winner === "rotate"
+        ? new GuestSessionService(secondPool, authority).delete(issued.resumeSecret)
+        : new GuestSessionService(secondPool, authority).rotate(issued.resumeSecret);
+      await expectLockWait(rawPool, await secondPool.attempted.promise);
+      await blocker.query("COMMIT"); blocker.release();
+      await firstAcquired.promise;
+      const results = await Promise.allSettled([first, second]);
+      await secondPool.acquired.promise;
+      expect(results[0]?.status).toBe("fulfilled");
+      expect(results[1]?.status).toBe(winner === "rotate" ? "fulfilled" : "rejected");
+      expect((await rawPool.query<CountRow>(
+        "SELECT count(*)::text AS count FROM samurai_persistence.guest_sessions WHERE id=$1", [issued.session.id],
+      )).rows[0]?.count).toBe("0");
+      await expect(sessionService.delete(issued.resumeSecret)).resolves.toBeUndefined();
+    }
+
+    for (const winner of ["rotate", "import"] as const) {
+      await rawPool.query("TRUNCATE samurai_persistence.guest_sessions CASCADE");
+      await rawPool.query("DELETE FROM samurai_persistence.deletion_tombstones");
+      const issued = await sessionService.issue({
+        consentVersion: "privacy-v1", contentVersion: "content-v1", checkpointSchemaVersion: 1, checkpoint: { step: 0 },
+      });
+      const envelope = await recovery.createExport({
+        resumeSecret: issued.resumeSecret, expectedRevision: 0, validityMs: 24 * 60 * 60 * 1_000,
+      });
+      const fresh = issueResumeSecret();
+      const blocker = await rawPool.connect();
+      await blocker.query("BEGIN");
+      await blocker.query("SELECT id FROM samurai_persistence.guest_sessions WHERE id=$1 FOR UPDATE", [issued.session.id]);
+      const firstAttempted = deferred<number>(); const firstAcquired = deferred<number>();
+      const secondAttempted = deferred<number>(); const secondAcquired = deferred<number>();
+      const releaseFirst = deferred<void>();
+      const firstPool = new ObservedQueryLockPool(
+        pool,
+        (text) => text.includes("FOR UPDATE OF s")
+          || text.includes("FROM samurai_persistence.guest_sessions WHERE id = $1 FOR UPDATE"),
+        firstAttempted,
+        firstAcquired,
+        releaseFirst.promise,
+      );
+      const secondPool = new ObservedQueryLockPool(
+        pool,
+        (text) => text.includes("FOR UPDATE OF s")
+          || text.includes("FROM samurai_persistence.guest_sessions WHERE id = $1 FOR UPDATE"),
+        secondAttempted,
+        secondAcquired,
+      );
+      const importing = (servicePool: SqlPool) => {
+        let calls = 0;
+        return new PortableRecoveryService(
+          servicePool,
+          authority,
+          recoveryAuthority,
+          { async describe() { return recoveryContent; } },
+          { issueResumeSecret: () => calls++ === 0 ? issued.resumeSecret : fresh },
+        ).import({ importId: randomUUID(), envelope });
+      };
+      const first = winner === "rotate"
+        ? new GuestSessionService(firstPool, authority).rotate(issued.resumeSecret)
+        : importing(firstPool);
+      await firstAttempted.promise;
+      await blocker.query("COMMIT"); blocker.release();
+      await firstAcquired.promise;
+      const second = winner === "rotate"
+        ? importing(secondPool)
+        : new GuestSessionService(secondPool, authority).rotate(issued.resumeSecret);
+      await expectLockWait(rawPool, await secondAttempted.promise);
+      releaseFirst.resolve();
+      const results = await Promise.allSettled([first, second]);
+      await secondAcquired.promise;
+      expect(results[0]?.status).toBe("fulfilled");
+      expect(results[1]?.status).toBe(winner === "rotate" ? "fulfilled" : "rejected");
+      const importResult = results.find((result) => result.status === "fulfilled"
+        && "disposition" in result.value) as PromiseFulfilledResult<Awaited<ReturnType<typeof importing>>> | undefined;
+      expect(importResult?.value.disposition).toBe("committed");
+      await expect(sessionService.resume(fresh)).resolves.toMatchObject({ session: { id: issued.session.id } });
+      const state = await rawPool.query<{ readonly guests: string; readonly digests: string; readonly imports: string }>(
+        `SELECT
+          (SELECT count(*)::text FROM samurai_persistence.guest_sessions WHERE id=$1) AS guests,
+          (SELECT count(*)::text FROM samurai_persistence.guest_resume_digests WHERE guest_session_id=$1) AS digests,
+          (SELECT count(*)::text FROM samurai_persistence.recovery_imports WHERE guest_session_id=$1) AS imports`,
+        [issued.session.id],
+      );
+      expect(state.rows[0]).toEqual({ guests: "1", digests: "1", imports: "1" });
+    }
   });
 
   it("requires rotation at the database boundary and for a retired-key current credential before receipt access", async () => {
@@ -2344,7 +2522,7 @@ describe("PostgreSQL persistence spine", () => {
     );
     expect(tombstones.rows).toEqual([
       { kind: "command", count: "1" },
-      { kind: "guest-session", count: "2" },
+      { kind: "guest-session", count: "3" },
     ]);
 
     const missingTombstoneKeys = new TombstoneKeyring(hmacKey("tombstone", 4, 4));
@@ -2612,7 +2790,7 @@ describe("PostgreSQL persistence spine", () => {
     const tombstones = await rawPool.query<CountRow>(
       "SELECT count(*)::text AS count FROM samurai_persistence.deletion_tombstones",
     );
-    expect(tombstones.rows[0]?.count).toBe("2");
+    expect(tombstones.rows[0]?.count).toBe("3");
     const columns = await rawPool.query<{ column_name: string }>(
       `SELECT column_name FROM information_schema.columns
         WHERE table_schema = 'samurai_persistence' AND table_name = 'deletion_tombstones'`,
@@ -2960,7 +3138,7 @@ describe("PostgreSQL persistence spine", () => {
       (SELECT count(*)::text FROM samurai_persistence.deletion_tombstones WHERE kind = 'save-import') AS import_tombstones`);
     expect(state.rows[0]).toEqual({
       guests: "0", digests: "0", exports: "0", imports: "0",
-      guest_tombstones: "1", command_tombstones: "0", export_tombstones: "1", import_tombstones: "0",
+      guest_tombstones: "2", command_tombstones: "0", export_tombstones: "1", import_tombstones: "0",
     });
   });
 
@@ -3281,7 +3459,8 @@ describe("PostgreSQL persistence spine", () => {
         (SELECT count(*)::text FROM samurai_persistence.deletion_tombstones WHERE kind = 'save-import') AS import_tombstones`);
       expect(state.rows[0], mode).toEqual({
         guests: "0", digests: "0", commands: "0", exports: "0", imports: "0",
-        guest_tombstones: "2", command_tombstones: "1", export_tombstones: "3", import_tombstones: "1",
+        guest_tombstones: mode === "explicit" ? "3" : "2",
+        command_tombstones: "1", export_tombstones: "3", import_tombstones: "1",
       });
     }
   });
@@ -4562,6 +4741,27 @@ describe("PostgreSQL persistence spine", () => {
     const rotated = await lifecycle.rotatePlayerSession(recovered.sessionSecret);
     if ("code" in rotated) throw new Error("Current player session failed rotation.");
     expect(rotated).toMatchObject({ credentialKind: "current", rotationRequired: false });
+    const convergedRetries = await Promise.all([
+      lifecycle.rotatePlayerSession(recovered.sessionSecret),
+      lifecycle.rotatePlayerSession(recovered.sessionSecret),
+    ]);
+    for (const retry of convergedRetries) {
+      if ("code" in retry) throw new Error("Pending rotation retry did not converge.");
+      expect(retry.sessionSecret).toBe(rotated.sessionSecret);
+      expect(retry.deliveryGeneration).toBe(rotated.deliveryGeneration);
+    }
+    await expect(lifecycle.authenticatePlayerSession(recovered.sessionSecret)).resolves.toEqual(
+      ACCOUNT_PLAYER_SESSION_PUBLIC_FAILURE,
+    );
+    await expect(lifecycle.acknowledgeClaimDeliveryExact(
+      rotated.playerId, rotated.claimId, rotated.sessionId, rotated.sessionSecret, rotated.deliveryGeneration,
+    )).resolves.toBeUndefined();
+    await expect(lifecycle.acknowledgeClaimDeliveryExact(
+      rotated.playerId, rotated.claimId, rotated.sessionId, rotated.sessionSecret, rotated.deliveryGeneration,
+    )).resolves.toBeUndefined();
+    await expect(lifecycle.authenticatePlayerSession(rotated.sessionSecret)).resolves.toMatchObject({
+      credentialKind: "current",
+    });
     await expect(lifecycle.authenticatePlayerSession(recovered.sessionSecret)).resolves.toMatchObject({
       credentialKind: "predecessor",
       rotationRequired: false,
@@ -4598,6 +4798,13 @@ describe("PostgreSQL persistence spine", () => {
     );
     const rotatedAtExpiry = await atExpiry.rotatePlayerSession(rotated.sessionSecret);
     if ("code" in rotatedAtExpiry) throw new Error("Current player session failed rotation at predecessor equality.");
+    await expect(atExpiry.authenticatePlayerSession(rotated.sessionSecret)).resolves.toEqual(
+      ACCOUNT_PLAYER_SESSION_PUBLIC_FAILURE,
+    );
+    await expect(atExpiry.acknowledgeClaimDeliveryExact(
+      rotatedAtExpiry.playerId, rotatedAtExpiry.claimId, rotatedAtExpiry.sessionId,
+      rotatedAtExpiry.sessionSecret, rotatedAtExpiry.deliveryGeneration,
+    )).resolves.toBeUndefined();
     await expect(atExpiry.authenticatePlayerSession(rotated.sessionSecret)).resolves.toMatchObject({
       credentialKind: "predecessor",
     });
@@ -4775,9 +4982,18 @@ describe("PostgreSQL persistence spine", () => {
         publicKey: publicKeyText,
         signature: signChallenge(deletionChallenge.challenge),
       },
-    })).resolves.toBeUndefined();
+    })).resolves.toEqual({ disposition: "deleted" });
     await expect(deletionService.deletePlayerWithWalletProof({
       deletionIntent,
+      challengeId: deletionChallenge.challengeId,
+      proof: {
+        challenge: deletionChallenge.challenge,
+        publicKey: publicKeyText,
+        signature: signChallenge(deletionChallenge.challenge),
+      },
+    })).resolves.toEqual({ disposition: "already-deleted" });
+    await expect(deletionService.deletePlayerWithWalletProof({
+      deletionIntent: { ...deletionIntent, idempotencyKey: "423e4567-e89b-42d3-a456-426614174997" },
       challengeId: deletionChallenge.challengeId,
       proof: {
         challenge: deletionChallenge.challenge,
@@ -4867,6 +5083,288 @@ describe("PostgreSQL persistence spine", () => {
         signature: signChallenge(relinkChallenge.challenge),
       },
     })).resolves.toEqual(ACCOUNT_CLAIM_PUBLIC_FAILURE);
+  });
+
+  it("logs out an exact pending session idempotently while preserving the player and a sibling session", async () => {
+    const fixture = await stage3Fixture();
+    const service = stage3Service();
+    const claimed = await service.claimGuest(fixture.claimInput);
+    if ("code" in claimed) throw new Error("Logout fixture claim failed.");
+    const clock = await rawPool.query<{ readonly now: Date }>("SELECT clock_timestamp() AS now");
+    const dbNow = clock.rows[0]!.now;
+    const siblingSecret = Buffer.alloc(32, 103).toString("base64url");
+    const siblingDigest = playerSessionKeys.digest(siblingSecret, dbNow);
+    const siblingSessionId = randomUUID();
+    const siblingClaimId = randomUUID();
+    await rawPool.query(
+      `INSERT INTO samurai_persistence.player_sessions
+        (id,player_id,issuance_kind,issuance_id,state,delivery_generation,created_at,last_seen_at,expires_at,rotate_after)
+       VALUES ($1,$2,'claim',$3,'active',1,$4,$4,$5,$6)`,
+      [siblingSessionId, claimed.playerId, siblingClaimId, dbNow,
+        new Date(dbNow.getTime() + 30 * 24 * 60 * 60 * 1_000),
+        new Date(dbNow.getTime() + 7 * 24 * 60 * 60 * 1_000)],
+    );
+    await rawPool.query(
+      `INSERT INTO samurai_persistence.player_session_digests
+        (player_session_id,slot,digest_key_version,digest_key_identity,digest,valid_until)
+       VALUES ($1,'current',$2,$3,$4,NULL)`,
+      [siblingSessionId, siblingDigest.keyVersion, keyIdentityBytes(siblingDigest.keyIdentity), siblingDigest.digest],
+    );
+
+    const beforeFaultTombstones = (await rawPool.query<CountRow>(
+      "SELECT count(*)::text AS count FROM samurai_persistence.deletion_tombstones",
+    )).rows[0]!.count;
+    const faultedLogout = stage3Service(new FailOnQueryPool(
+      pool, "SET state = 'revoked', revoked_at = $2", true,
+    ));
+    await expect(faultedLogout.logoutPlayerSession(claimed.sessionSecret)).resolves.toEqual(
+      ACCOUNT_PLAYER_SESSION_PUBLIC_FAILURE,
+    );
+    const afterFault = await rawPool.query<{ readonly state: string; readonly digests: string; readonly tombstones: string }>(`
+      SELECT
+        (SELECT state FROM samurai_persistence.player_sessions WHERE id=$1) AS state,
+        (SELECT count(*)::text FROM samurai_persistence.player_session_digests WHERE player_session_id=$1) AS digests,
+        (SELECT count(*)::text FROM samurai_persistence.deletion_tombstones) AS tombstones
+    `, [claimed.sessionId]);
+    expect(afterFault.rows[0]).toEqual({ state: "pending-delivery", digests: "1", tombstones: beforeFaultTombstones });
+
+    await expect(service.logoutPlayerSession(claimed.sessionSecret)).resolves.toEqual({ disposition: "logged-out" });
+    await expect(service.logoutPlayerSession(claimed.sessionSecret)).resolves.toEqual({ disposition: "already-logged-out" });
+    await expect(service.authenticatePlayerSession(claimed.sessionSecret)).resolves.toEqual(
+      ACCOUNT_PLAYER_SESSION_PUBLIC_FAILURE,
+    );
+    await expect(service.authenticatePlayerSession(siblingSecret)).resolves.toMatchObject({
+      playerId: claimed.playerId,
+      sessionId: siblingSessionId,
+    });
+    const state = await rawPool.query<{ readonly players: string; readonly wallets: string; readonly progress: string;
+      readonly revoked: string; readonly sibling: string; readonly logged_out_digests: string }>(`
+      SELECT
+        (SELECT count(*)::text FROM samurai_persistence.players WHERE id=$1) AS players,
+        (SELECT count(*)::text FROM samurai_persistence.wallet_credentials WHERE player_id=$1) AS wallets,
+        (SELECT count(*)::text FROM samurai_persistence.player_progress WHERE player_id=$1) AS progress,
+        (SELECT count(*)::text FROM samurai_persistence.player_sessions WHERE id=$2 AND state='revoked' AND revoked_at IS NOT NULL) AS revoked,
+        (SELECT count(*)::text FROM samurai_persistence.player_sessions WHERE id=$3 AND state='active') AS sibling,
+        (SELECT count(*)::text FROM samurai_persistence.player_session_digests WHERE player_session_id=$2) AS logged_out_digests
+    `, [claimed.playerId, claimed.sessionId, siblingSessionId]);
+    expect(state.rows[0]).toEqual({
+      players: "1", wallets: "1", progress: "1", revoked: "1", sibling: "1", logged_out_digests: "0",
+    });
+  });
+
+  it("serializes logout with rotation in both player-parent winner orders and converges observed predecessor retries", async () => {
+    for (const winner of ["logout", "rotate"] as const) {
+      await resetStage3Rows();
+      const fixture = await stage3Fixture();
+      const claimed = await stage3Service().claimGuest(fixture.claimInput);
+      if ("code" in claimed) throw new Error("Logout/rotation fixture claim failed.");
+      await expect(stage3Service().acknowledgeClaimDelivery(
+        claimed.playerId, claimed.claimId, claimed.sessionSecret, claimed.deliveryGeneration,
+      )).resolves.toBeUndefined();
+      const blocker = await rawPool.connect();
+      await blocker.query("BEGIN");
+      await blocker.query("SELECT id FROM samurai_persistence.players WHERE id=$1 FOR UPDATE", [claimed.playerId]);
+      const firstAttempted = deferred<number>();
+      const firstAcquired = deferred<number>();
+      const secondAttempted = deferred<number>();
+      const secondAcquired = deferred<number>();
+      const releaseFirst = deferred<void>();
+      const matchesParent = (sql: string) => sql.includes(
+        "SELECT id FROM samurai_persistence.players WHERE id = $1 FOR UPDATE",
+      );
+      const firstService = stage3Service(new ObservedQueryLockPool(
+        pool, matchesParent, firstAttempted, firstAcquired, releaseFirst.promise,
+      ));
+      const secondService = stage3Service(new ObservedQueryLockPool(
+        pool, matchesParent, secondAttempted, secondAcquired,
+      ));
+      const launch = (service: AccountClaimService, operation: "logout" | "rotate") => operation === "logout"
+        ? service.logoutPlayerSession(claimed.sessionSecret)
+        : service.rotatePlayerSession(claimed.sessionSecret);
+      const first = launch(firstService, winner);
+      await firstAttempted.promise;
+      await blocker.query("COMMIT");
+      blocker.release();
+      await firstAcquired.promise;
+      const secondOperation = winner === "logout" ? "rotate" : "logout";
+      const second = launch(secondService, secondOperation);
+      await expectLockWait(rawPool, await secondAttempted.promise);
+      releaseFirst.resolve();
+      const [firstResult, secondResult] = await Promise.all([first, second]);
+      await secondAcquired.promise;
+      if (winner === "logout") {
+        expect(firstResult).toEqual({ disposition: "logged-out" });
+        expect(secondResult).toEqual(ACCOUNT_PLAYER_SESSION_PUBLIC_FAILURE);
+      } else {
+        expect(firstResult).toMatchObject({ credentialKind: "current", deliveryGeneration: 2 });
+        expect(secondResult).toEqual({ disposition: "logged-out" });
+      }
+      await expect(stage3Service().logoutPlayerSession(claimed.sessionSecret)).resolves.toEqual(
+        { disposition: "already-logged-out" },
+      );
+      const state = await rawPool.query<{ readonly player: string; readonly state: string; readonly digests: string;
+        readonly tombstones: string }>(`
+        SELECT
+          (SELECT count(*)::text FROM samurai_persistence.players WHERE id=$1) AS player,
+          (SELECT state FROM samurai_persistence.player_sessions WHERE id=$2) AS state,
+          (SELECT count(*)::text FROM samurai_persistence.player_session_digests WHERE player_session_id=$2) AS digests,
+          (SELECT count(*)::text FROM samurai_persistence.deletion_tombstones WHERE kind='player-session') AS tombstones
+      `, [claimed.playerId, claimed.sessionId]);
+      expect(state.rows[0]).toEqual({
+        player: "1", state: "revoked", digests: "0", tombstones: winner === "logout" ? "2" : "4",
+      });
+    }
+
+    await resetStage3Rows();
+    const fixture = await stage3Fixture();
+    const claimed = await stage3Service().claimGuest(fixture.claimInput);
+    if ("code" in claimed) throw new Error("Observed retry fixture claim failed.");
+    await stage3Service().acknowledgeClaimDelivery(
+      claimed.playerId, claimed.claimId, claimed.sessionSecret, claimed.deliveryGeneration,
+    );
+    const rotated = await stage3Service().rotatePlayerSession(claimed.sessionSecret);
+    if ("code" in rotated) throw new Error("Initial observed rotation failed.");
+    const blocker = await rawPool.connect();
+    await blocker.query("BEGIN");
+    await blocker.query("SELECT id FROM samurai_persistence.players WHERE id=$1 FOR UPDATE", [claimed.playerId]);
+    const firstAttempted = deferred<number>(); const firstAcquired = deferred<number>();
+    const secondAttempted = deferred<number>(); const secondAcquired = deferred<number>();
+    const matchesParent = (sql: string) => sql.includes("SELECT id FROM samurai_persistence.players WHERE id = $1 FOR UPDATE");
+    const first = stage3Service(new ObservedQueryLockPool(pool, matchesParent, firstAttempted, firstAcquired))
+      .rotatePlayerSession(claimed.sessionSecret);
+    await firstAttempted.promise;
+    const second = stage3Service(new ObservedQueryLockPool(pool, matchesParent, secondAttempted, secondAcquired))
+      .rotatePlayerSession(claimed.sessionSecret);
+    await secondAttempted.promise;
+    await blocker.query("COMMIT"); blocker.release();
+    await firstAcquired.promise;
+    const retries = await Promise.all([first, second]);
+    await secondAcquired.promise;
+    expect(retries).toEqual([rotated, rotated]);
+    expect((await rawPool.query<CountRow>(
+      "SELECT count(*)::text AS count FROM samurai_persistence.player_session_digests WHERE player_session_id=$1",
+      [claimed.sessionId],
+    )).rows[0]?.count).toBe("2");
+  });
+
+  it("serializes logout with wallet deletion in both player-parent winner orders", async () => {
+    for (const winner of ["logout", "deletion"] as const) {
+      await resetStage3Rows();
+      const fixture = await stage3Fixture();
+      const claimed = await stage3Service().claimGuest(fixture.claimInput);
+      if ("code" in claimed) throw new Error("Logout/deletion fixture claim failed.");
+      const deletionIntent = { deleteClaimId: claimed.claimId, idempotencyKey: randomUUID() };
+      const issued = await stage3Service().issuePlayerDeletionChallenge({ deletionIntent, account: fixture.wallet.account });
+      if ("code" in issued) throw new Error("Logout/deletion challenge failed.");
+      const deletionInput = {
+        deletionIntent,
+        challengeId: issued.challengeId,
+        proof: {
+          challenge: issued.challenge,
+          publicKey: fixture.wallet.publicKey,
+          signature: b58Encode(
+            signMessage(null, blake2b(walletSigningBytes(issued.challenge), { dkLen: 32 }), fixture.wallet.privateKey),
+            PrefixV2.Ed25519Signature,
+          ),
+        },
+      };
+      const releaseFirst = deferred<void>();
+      const firstAttempted = deferred<number>(); const firstAcquired = deferred<number>();
+      const secondAttempted = deferred<number>(); const secondAcquired = deferred<number>();
+      const matchesParent = (sql: string) => sql.includes("SELECT id FROM samurai_persistence.players WHERE id = $1 FOR UPDATE");
+      const firstService = stage3Service(new ObservedQueryLockPool(
+        pool, matchesParent, firstAttempted, firstAcquired, releaseFirst.promise,
+      ));
+      const secondService = stage3Service(new ObservedQueryLockPool(pool, matchesParent, secondAttempted, secondAcquired));
+      const launch = (service: AccountClaimService, operation: "logout" | "deletion") => operation === "logout"
+        ? service.logoutPlayerSession(claimed.sessionSecret)
+        : service.deletePlayerWithWalletProof(deletionInput);
+      const first = launch(firstService, winner);
+      await firstAcquired.promise;
+      const second = launch(secondService, winner === "logout" ? "deletion" : "logout");
+      await expectLockWait(rawPool, await secondAttempted.promise);
+      releaseFirst.resolve();
+      const [firstResult, secondResult] = await Promise.all([first, second]);
+      await secondAcquired.promise;
+      if (winner === "logout") {
+        expect(firstResult).toEqual({ disposition: "logged-out" });
+        expect(secondResult).toEqual({ disposition: "deleted" });
+        await expect(stage3Service().logoutPlayerSession(claimed.sessionSecret)).resolves.toEqual(
+          { disposition: "already-logged-out" },
+        );
+      } else {
+        expect(firstResult).toEqual({ disposition: "deleted" });
+        expect(secondResult).toEqual(ACCOUNT_PLAYER_SESSION_PUBLIC_FAILURE);
+      }
+      expect((await rawPool.query<CountRow>(
+        "SELECT count(*)::text AS count FROM samurai_persistence.players WHERE id=$1", [claimed.playerId],
+      )).rows[0]?.count).toBe("0");
+      await expect(stage3Service().deletePlayerWithWalletProof(deletionInput)).resolves.toEqual(
+        { disposition: "already-deleted" },
+      );
+    }
+  });
+
+  it("serializes logout with expired-session cleanup in both player-parent winner orders", async () => {
+    for (const winner of ["logout", "cleanup"] as const) {
+      await resetStage3Rows();
+      const fixture = await stage3Fixture();
+      const claimed = await stage3Service().claimGuest(fixture.claimInput);
+      if ("code" in claimed) throw new Error("Logout/cleanup fixture claim failed.");
+      const session = await rawPool.query<{ readonly created_at: Date }>(
+        "SELECT created_at FROM samurai_persistence.player_sessions WHERE id=$1", [claimed.sessionId],
+      );
+      const expiresAt = new Date(session.rows[0]!.created_at.getTime() + 60 * 60 * 1_000);
+      await rawPool.query(
+        "UPDATE samurai_persistence.player_sessions SET expires_at=$2,rotate_after=$2 WHERE id=$1",
+        [claimed.sessionId, expiresAt],
+      );
+      const releaseFirst = deferred<void>();
+      const firstAttempted = deferred<number>(); const firstAcquired = deferred<number>();
+      const secondAttempted = deferred<number>(); const secondAcquired = deferred<number>();
+      const matchesParent = (sql: string) => sql.includes("SELECT id FROM samurai_persistence.players WHERE id = $1 FOR UPDATE");
+      const logoutPool = new ControlledClockPool(
+        new ObservedQueryLockPool(pool, matchesParent,
+          winner === "logout" ? firstAttempted : secondAttempted,
+          winner === "logout" ? firstAcquired : secondAcquired,
+          winner === "logout" ? releaseFirst.promise : undefined),
+        Array.from({ length: 20 }, () => new Date(expiresAt.getTime() - 1)),
+      );
+      const cleanupPool = new ControlledClockPool(
+        new ObservedQueryLockPool(pool, matchesParent,
+          winner === "cleanup" ? firstAttempted : secondAttempted,
+          winner === "cleanup" ? firstAcquired : secondAcquired,
+          winner === "cleanup" ? releaseFirst.promise : undefined),
+        Array.from({ length: 20 }, () => expiresAt),
+      );
+      const logout = () => stage3Service(logoutPool).logoutPlayerSession(claimed.sessionSecret);
+      const cleanup = () => stage3Service(cleanupPool).deleteExpiredPlayerSessions();
+      const first = winner === "logout" ? logout() : cleanup();
+      await firstAcquired.promise;
+      const second = winner === "logout" ? cleanup() : logout();
+      await expectLockWait(rawPool, await secondAttempted.promise);
+      releaseFirst.resolve();
+      const [firstResult, secondResult] = await Promise.all([first, second]);
+      await secondAcquired.promise;
+      if (winner === "logout") {
+        expect(firstResult).toEqual({ disposition: "logged-out" });
+        expect(secondResult).toBe(0);
+      } else {
+        expect(firstResult).toBe(1);
+        expect(secondResult).toEqual(ACCOUNT_PLAYER_SESSION_PUBLIC_FAILURE);
+      }
+      const state = await rawPool.query<{ readonly player: string; readonly state: string; readonly digests: string;
+        readonly tombstones: string }>(`
+        SELECT
+          (SELECT count(*)::text FROM samurai_persistence.players WHERE id=$1) AS player,
+          (SELECT state FROM samurai_persistence.player_sessions WHERE id=$2) AS state,
+          (SELECT count(*)::text FROM samurai_persistence.player_session_digests WHERE player_session_id=$2) AS digests,
+          (SELECT count(*)::text FROM samurai_persistence.deletion_tombstones WHERE kind='player-session') AS tombstones
+      `, [claimed.playerId, claimed.sessionId]);
+      expect(state.rows[0]).toEqual({
+        player: "1", state: "revoked", digests: "0", tombstones: winner === "logout" ? "2" : "1",
+      });
+    }
   });
 
   it("retries a live challenge nonce collision and rejects nonce resurrection after tombstoned cleanup", async () => {
@@ -5263,7 +5761,7 @@ describe("PostgreSQL persistence spine", () => {
               "claim-challenge": 2,
               command: 1,
               "guest-claim": 1,
-              "guest-session": 3,
+              "guest-session": 4,
               "save-export": 2,
               "save-import": 1,
             },

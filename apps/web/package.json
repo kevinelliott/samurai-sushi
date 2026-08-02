@@ -3,12 +3,13 @@
   "version": "0.0.0",
   "private": true,
   "scripts": {
-    "dev": "next dev --webpack",
+    "dev": "tsx server.ts",
     "build": "next build",
-    "start": "next start",
+    "start": "NODE_ENV=production tsx server.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@samurai-sushi/account-http-runtime": "workspace:*",
     "@samurai-sushi/domain": "workspace:*",
     "@samurai-sushi/network": "workspace:*",
     "next": "16.2.12",
@@ -19,6 +20,7 @@
     "@types/node": "24.3.0",
     "@types/react": "19.1.12",
     "@types/react-dom": "19.1.9",
+    "tsx": "4.20.5",
     "typescript": "5.9.2"
   }
 }
