@@ -241,12 +241,34 @@ drop, and reorg compensation are normative in `DOMAIN_SPEC.md`.
 
 `ReceiptIntent.id` is the durable local correlation key and parent of one or
 more `OperationAttempt` rows. `(chainId, hash)` and `(intentId, id)` are unique.
+A separate CSPRNG `publicIntentRef` and `publicAttemptRef` provide at least 128
+bits of non-semantic browser-safe correlation entropy; persistence primary keys,
+subject links, replacement keys, and worker fences remain server-only.
 A replacement creates a new attempt under the same intent and links both rows;
 it never overwrites the prior hash or evidence. Inclusion and reorg processing
 records canonical and orphaned block identities and timestamps. Exactly one
 accepted canonical attempt may populate `ServiceReceipt.operationHash`; all
 other attempts remain durable history. Re-inclusion updates the same attempt
 idempotently rather than creating a new receipt or attempt.
+An independent retry after `FAILED` or `DROPPED` uses a distinct retry lineage
+edge; it is never represented as replacement of a terminal attempt.
+
+The Phase 2B observer port accepts only strict normalized evidence. Its first
+adapter is deterministic and network-free. Fake RPC is the sole canonical-chain
+authority in this slice. Fake indexer evidence is persisted as a bounded hint
+in its own ordering namespace and has zero projection authority. RPC/indexer
+confirmation counts and finalized booleans are untrusted; the named policy
+evaluator recomputes both from a strict contiguous included-block-to-head proof.
+Later authoritative inclusion observations must match the durable level, block
+hash, and operation index, and their proof must contain the exact previously
+accepted canonical head. Confirmation/finality rows bind the accepted RPC
+sequence, head, derived count, and policy evidence in one authority tuple;
+explicit `REORGED` processing is the only path to a different inclusion tuple.
+Byte-exact idempotency is evaluated per source namespace before reduction; the
+same source sequence with any changed normalized byte opens a durable incident.
+Fetching occurs outside the apply
+transaction, while the apply transaction revalidates its database-clock worker
+lease after all blocking locks and immediately before commit.
 
 ### Canonical receipt
 

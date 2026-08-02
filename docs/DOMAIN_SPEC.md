@@ -18,9 +18,9 @@ The terms MUST, SHOULD, and MAY are used in their RFC sense.
 
 ```text
 Intent: DRAFT -> REVIEWED -> AWAITING_SIGNATURE -> SUBMITTED -> INCLUDED
-                                             \-> CANCELLED     -> CONFIRMED -> FINALIZED
-                                             \-> REJECTED          \-> REORGED
-                                             \-> EXPIRED
+          \-> EXPIRED         \-> CANCELLED     -> CONFIRMED -> FINALIZED
+                 \-> EXPIRED  \-> REJECTED          \-> REORGED
+                                \-> EXPIRED
 
 Attempt: SUBMITTED -> INCLUDED -> CONFIRMED -> FINALIZED
                   \-> FAILED      \-> REORGED -> INCLUDED
@@ -34,15 +34,44 @@ reached after the manifest-configured confirmation threshold and may settle the
 normal projection. Finalized is reached only after the manifest-configured
 finality/cemented-block policy and is terminal.
 
+`DRAFT`, `REVIEWED`, and `AWAITING_SIGNATURE` become `EXPIRED` exactly when
+PostgreSQL `clock_timestamp() >= expires_at`; equality is expired. No other
+state gains an expiry transition. The named
+`localnet-two-confirmation-rehearsal-v1` evaluator derives confirmations as
+`canonicalHeadLevel - includedLevel + 1`, treats inclusion as confirmation one,
+and satisfies both confirmation and rehearsal finality at confirmation two only
+when an explicit bounded, gap-free block proof begins at the exact included
+block and ends at the exact canonical head. Only the configured canonical RPC
+authority may supply state-changing proof. Indexer observations are durable,
+bounded hints or contradiction evidence and never create, confirm, finalize,
+reorg, fail, or drop lifecycle state. Adapter-supplied confirmation
+counts or finalized booleans have no authority. When one observation reaches
+both boundaries, the ordered `CONFIRMED` and `FINALIZED` lifecycle facts commit
+atomically.
+Every later inclusion proof is bound to the attempt's immutable canonical
+inclusion tuple: level, block hash, and operation index. Before finality, tuple
+or ancestry drift becomes bounded contradiction evidence with no projection
+mutation. After finality, any tuple drift, head regression, or proof that does
+not contain the exact previously accepted head opens finality incident review.
+An accepted same-tuple proof atomically persists its RPC sequence, canonical
+head, derived confirmations, and policy evidence.
+
 An old attempt marked `REPLACED` records the replacement hash; a new attempt
 starts at `SUBMITTED` under the same intent. Contract uniqueness ensures at most
 one can issue. If two attempts reach chain inclusion, the later mutation fails
 with duplicate nonce/commitment and projects as `FAILED`, never a second receipt.
+After `FAILED` or `DROPPED`, a later independent attempt is linked as a retry,
+not a replacement; it retains both immutable hashes without falsifying
+replacement lineage.
 
 `REORGED` is a compensating state allowed from `INCLUDED` or `CONFIRMED`. The
 projection removes the provisional/settled onchain receipt, preserves the
 offchain `SETTLED` service, records the orphaned block, and observes the same
 attempt until it is re-included or dropped. Re-inclusion reapplies idempotently.
+A reorg proof must identify the attempt's exact current canonical block and show
+the different canonical block at that same level through a bounded path to the
+new head. A mismatched level or block opens incident review and performs no
+downgrade.
 A finalized receipt does not transition; an event contradicting the finality
 assumption enters incident handling rather than being hidden as a normal state.
 
@@ -56,7 +85,9 @@ rechecked”; `DROPPED/FAILED/REJECTED` state that no receipt was recorded.
 | From | To | Condition |
 | --- | --- | --- |
 | DRAFT | REVIEWED | canonical permit and dispatch preview accepted |
+| DRAFT | EXPIRED | PostgreSQL clock is at or after permit expiry |
 | REVIEWED | AWAITING_SIGNATURE | wallet request begins after final preflight |
+| REVIEWED | EXPIRED | PostgreSQL clock is at or after permit expiry |
 | AWAITING_SIGNATURE | CANCELLED/REJECTED/EXPIRED | user/system terminal pre-submission result |
 | AWAITING_SIGNATURE | SUBMITTED | wallet returns an operation hash |
 | SUBMITTED | INCLUDED | RPC evidence places attempt in canonical block |

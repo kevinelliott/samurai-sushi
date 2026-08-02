@@ -840,7 +840,7 @@ describe("PostgreSQL persistence spine", () => {
     );
     await applyMigrations(pool);
     const result = await rawPool.query<CountRow>("SELECT count(*)::text AS count FROM samurai_persistence.schema_migrations");
-    expect(result.rows[0]?.count).toBe("5");
+    expect(result.rows[0]?.count).toBe("6");
   });
 
   it("upgrades an exactly attested 0001 catalog to 0002 atomically", async () => {
@@ -873,6 +873,7 @@ describe("PostgreSQL persistence spine", () => {
       "0003_account_claim_persistence.sql",
       "0004_evening_service_authority.sql",
       "0005_evening_service_generation.sql",
+      "0006_receipt_lifecycle_authority.sql",
     ]);
     const tables = await rawPool.query<{ readonly table_name: string }>(
       `SELECT table_name FROM information_schema.tables
@@ -1095,7 +1096,7 @@ describe("PostgreSQL persistence spine", () => {
     await Promise.all([first, second]);
     await expect(waiter.acquired.promise).resolves.toBe(waiterPid);
     const result = await rawPool.query<CountRow>("SELECT count(*)::text AS count FROM samurai_persistence.schema_migrations");
-    expect(result.rows[0]?.count).toBe("5");
+    expect(result.rows[0]?.count).toBe("6");
   });
 
   it("canonicalizes caller search_path and rejects ACL, type, collation, and generic schema-object drift", async () => {

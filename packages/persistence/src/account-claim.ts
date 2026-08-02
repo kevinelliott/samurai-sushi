@@ -137,6 +137,7 @@ const GUEST_OWNERSHIP_FOREIGN_KEYS = Object.freeze([
   { table_name: "guest_claim_capabilities", column_name: "guest_session_id", referenced_column_name: "id", column_count: 1, delete_action: "restrict", disposition: "revoke" },
   { table_name: "guest_progress", column_name: "guest_session_id", referenced_column_name: "id", column_count: 1, delete_action: "cascade", disposition: "revoke" },
   { table_name: "guest_resume_digests", column_name: "guest_session_id", referenced_column_name: "id", column_count: 1, delete_action: "cascade", disposition: "revoke" },
+  { table_name: "receipt_intents", column_name: "guest_session_id", referenced_column_name: "id", column_count: 1, delete_action: "cascade", disposition: "revoke" },
   { table_name: "recovery_imports", column_name: "guest_session_id", referenced_column_name: "id", column_count: 1, delete_action: "cascade", disposition: "revoke" },
   { table_name: "save_exports", column_name: "guest_session_id", referenced_column_name: "id", column_count: 1, delete_action: "cascade", disposition: "revoke" },
 ] as const);

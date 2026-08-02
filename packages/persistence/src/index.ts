@@ -10,5 +10,6 @@ export * from "./lifecycle";
 export * from "./migrations";
 export * from "./outbox";
 export * from "./portable-recovery";
+export * from "./receipt-lifecycle-authority";
 export * from "./repositories";
 export * from "./service-authority";

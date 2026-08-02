@@ -78,6 +78,20 @@ export class OutboxClaimLostError extends PersistenceError {
   }
 }
 
+export class ReceiptLifecycleError extends PersistenceError {
+  constructor(code: string, message: string) {
+    super(code, message);
+    this.name = "ReceiptLifecycleError";
+  }
+}
+
+export class ReceiptWorkerClaimLostError extends ReceiptLifecycleError {
+  constructor() {
+    super("WORKER_CLAIM_LOST", "The receipt reconciliation worker no longer owns this claim.");
+    this.name = "ReceiptWorkerClaimLostError";
+  }
+}
+
 export type PortableRecoveryErrorCode =
   | "RECOVERY_ALREADY_CONSUMED"
   | "RECOVERY_AUTHORITY_ROLLBACK"

@@ -150,6 +150,12 @@ importers:
       '@samurai-sushi/domain':
         specifier: workspace:*
         version: link:../domain
+      '@samurai-sushi/receipt-authority':
+        specifier: workspace:*
+        version: link:../receipt-authority
+      '@samurai-sushi/receipt-lifecycle':
+        specifier: workspace:*
+        version: link:../receipt-lifecycle
       pg:
         specifier: 8.16.3
         version: 8.16.3
@@ -179,6 +185,8 @@ importers:
       '@noble/curves':
         specifier: 1.9.7
         version: 1.9.7
+
+  packages/receipt-lifecycle: {}
 
 packages:
 
