@@ -91,6 +91,9 @@ importers:
 
   packages/persistence:
     dependencies:
+      '@samurai-sushi/account-proof-verifier':
+        specifier: workspace:*
+        version: link:../account-proof-verifier
       '@samurai-sushi/domain':
         specifier: workspace:*
         version: link:../domain
@@ -98,6 +101,12 @@ importers:
         specifier: 8.16.3
         version: 8.16.3
     devDependencies:
+      '@noble/hashes':
+        specifier: 1.8.0
+        version: 1.8.0
+      '@taquito/utils':
+        specifier: 25.0.0
+        version: 25.0.0
       '@types/pg':
         specifier: 8.15.5
         version: 8.15.5

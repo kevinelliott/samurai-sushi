@@ -272,8 +272,10 @@ single-use canonical signed challenge. First construct
 guestRevision,playerRevision?,idempotencyKey,contentVersion,
 cosmeticSelections}`. `claimId` is a client-generated 128-bit value unique to
 that claim and session issuance. The claim
-commitment is a server-issued random 256-bit value stored on the guest, not its
-ID; `cosmeticSelections` is a canonical map of selection IDs to option IDs. Its
+capability is a server-issued random 256-bit bearer value returned once. The
+database stores only its purpose-separated, versioned HMAC commitment, never
+the raw capability or a reversible encoding; `cosmeticSelections` is a
+canonical map of selection IDs to option IDs. Its
 `claimIntentHash` is SHA-256 over the UTF-8 bytes
 `samurai-sushi:claim-intent:v1\n` followed by its RFC 8785 canonical JSON. The
 signed challenge is
@@ -361,13 +363,16 @@ vectors. It reconstructs `walletSigningBytes` from the canonical challenge and
 accepts no caller-supplied signing payload. It does not issue, persist, expire,
 or consume a challenge and makes no wallet or network call.
 
-The next persistence slice issues `issuedAt` and `expiresAt` from one PostgreSQL
-clock sample with an exact 300,000 ms interval. Admission requires
+The third Stage 3 slice is migration 0003 and the repository-only persistence
+authority. Challenge issue owns origin, chain, nonce, and both timestamps and
+derives `issuedAt` and `expiresAt` from one PostgreSQL clock sample with an
+exact 300,000 ms interval. Admission requires
 `issuedAt <= dbNow < expiresAt`; equality at expiry rejects. Challenge hash and
-256-bit nonce are unique and single-use, and consumption occurs in the same
-transaction as the claim so any later failure rolls it back.
+the purpose-separated 256-bit nonce digest are unique and single-use during the
+live row and tombstone horizons. Consumption occurs in the same transaction as
+the claim, recovery, or deletion so any later failure rolls it back.
 
-That transaction authenticates or resolves identifiers without child locks,
+Claim transactions authenticate or resolve identifiers without child locks,
 then locks the guest and any existing target player in stable
 `(subjectKind, subjectId)` order. After resampling PostgreSQL time it revalidates
 active-unclaimed state and both exact revisions, then locks the challenge,
@@ -377,13 +382,30 @@ the guest parent first. Challenge consumption, progress merge, ownership
 rewrite, wallet link, pending-delivery player-session issuance, guest
 credential/export revocation, and tombstones commit atomically.
 
+Lost-response recovery uses a distinct canonical
+`ClaimSessionRecoveryIntentV1` hash domain and rotates only the exact
+`issuanceKind=claim, issuanceId=recoverClaimId` pending-delivery digest. It
+issues a non-oracular five-minute challenge before looking up the claimed
+player. Player deletion uses a separate `PlayerDeletionIntentV1` hash domain,
+so a recovery signature can never authorize deletion. The delete intent binds
+the wallet credential's durable, immutable linked-claim anchor; deletion
+therefore remains available after bounded merge/session metadata expires and
+also remains available when session-key material is missing or compromised.
+Both deletion routes preselect every owned row, acquire replay/global/nonce
+scopes, lock the exact children, and revalidate the selected session or wallet
+challenge at one final PostgreSQL time before the first mutation.
+
 Migration 0003, challenge persistence, player sessions, wallet credentials,
-claim transactions, ownership rewrites, endpoints, UI, and wallet/network calls
-remain explicit later gates. Their hostile suites must cover nonce reuse, exact
-expiry, replay, changed signature context, second-wallet conflict, lost
-response, import/delete races, and rollback after challenge consumption. The
-checksum, curve/prefix, account-derivation, malleability, and point attacks are
-owned by the completed pure verifier suite and must remain as regression gates.
+claim transactions, ownership rewrites, lost-response recovery, player
+deletion, retention cleanup, key-reference inventory, and live-catalog
+attestation are delivered in this slice. Their real-PostgreSQL suite covers
+nonce/hash reuse, exact expiry, replay, changed signature context,
+second-wallet conflict, lost response, import/delete races, compromised or
+missing key inventory, late-lock authority crossings, and rollback after
+challenge consumption. The checksum, curve/prefix, account-derivation,
+malleability, and point attacks remain owned by the completed pure verifier
+suite. HTTP endpoints, wallet SDK/network calls, browser UI, analytics, and
+deployment evidence remain explicit later gates.
 
 ### Privacy and deletion
 

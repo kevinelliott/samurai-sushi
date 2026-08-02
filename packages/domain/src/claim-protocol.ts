@@ -1,6 +1,8 @@
 import { canonicalJson } from "./canonical-json";
 
 const CLAIM_INTENT_HASH_DOMAIN = "samurai-sushi:claim-intent:v1\n";
+const CLAIM_SESSION_RECOVERY_INTENT_HASH_DOMAIN = "samurai-sushi:claim-session-recovery-intent:v1\n";
+const PLAYER_DELETION_INTENT_HASH_DOMAIN = "samurai-sushi:player-deletion-intent:v1\n";
 const CLAIM_CHALLENGE_HASH_DOMAIN = "samurai-sushi:claim-challenge-hash:v1\n";
 const CLAIM_CHALLENGE_DOMAIN = "samurai-sushi:guest-claim:v1";
 const UUID_V4_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
@@ -48,6 +50,16 @@ export interface ExistingPlayerClaimIntentV1 {
 }
 
 export type ClaimIntentV1 = CreatePlayerClaimIntentV1 | ExistingPlayerClaimIntentV1;
+
+export interface ClaimSessionRecoveryIntentV1 {
+  readonly recoverClaimId: string;
+  readonly idempotencyKey: string;
+}
+
+export interface PlayerDeletionIntentV1 {
+  readonly deleteClaimId: string;
+  readonly idempotencyKey: string;
+}
 
 /** Canonical challenge body; wallets sign walletSigningBytes, not these raw JSON bytes. */
 export interface ClaimChallengeV1 {
@@ -284,6 +296,26 @@ export function parseClaimIntent(input: unknown): ClaimIntentV1 {
   });
 }
 
+export function parseClaimSessionRecoveryIntent(input: unknown): ClaimSessionRecoveryIntentV1 {
+  const intent = detachedObject(input);
+  exactKeys(intent, ["recoverClaimId", "idempotencyKey"]);
+  if (typeof intent.recoverClaimId !== "string" || !UUID_V4_PATTERN.test(intent.recoverClaimId)) invalid();
+  return deepFreeze({
+    recoverClaimId: intent.recoverClaimId,
+    idempotencyKey: idempotencyKey(intent.idempotencyKey),
+  });
+}
+
+export function parsePlayerDeletionIntent(input: unknown): PlayerDeletionIntentV1 {
+  const intent = detachedObject(input);
+  exactKeys(intent, ["deleteClaimId", "idempotencyKey"]);
+  if (typeof intent.deleteClaimId !== "string" || !UUID_V4_PATTERN.test(intent.deleteClaimId)) invalid();
+  return deepFreeze({
+    deleteClaimId: intent.deleteClaimId,
+    idempotencyKey: idempotencyKey(intent.idempotencyKey),
+  });
+}
+
 function exactUtcMilliseconds(value: unknown): string {
   if (typeof value !== "string") invalid();
   const parsed = new Date(value);
@@ -347,6 +379,14 @@ export function canonicalClaimIntentBytes(input: unknown): Uint8Array {
   return canonicalBytes(parseClaimIntent(input));
 }
 
+export function canonicalClaimSessionRecoveryIntentBytes(input: unknown): Uint8Array {
+  return canonicalBytes(parseClaimSessionRecoveryIntent(input));
+}
+
+export function canonicalPlayerDeletionIntentBytes(input: unknown): Uint8Array {
+  return canonicalBytes(parsePlayerDeletionIntent(input));
+}
+
 export function canonicalClaimChallengeBytes(input: unknown): Uint8Array {
   return canonicalBytes(parseClaimChallenge(input));
 }
@@ -398,6 +438,25 @@ export async function hashClaimIntent(input: unknown): Promise<ClaimProtocolHash
   return sha256(claimIntentHashPreimage(input));
 }
 
+export function claimSessionRecoveryIntentHashPreimage(input: unknown): Uint8Array {
+  return concatDomain(
+    CLAIM_SESSION_RECOVERY_INTENT_HASH_DOMAIN,
+    canonicalClaimSessionRecoveryIntentBytes(input),
+  );
+}
+
+export async function hashClaimSessionRecoveryIntent(input: unknown): Promise<ClaimProtocolHash> {
+  return sha256(claimSessionRecoveryIntentHashPreimage(input));
+}
+
+export function playerDeletionIntentHashPreimage(input: unknown): Uint8Array {
+  return concatDomain(PLAYER_DELETION_INTENT_HASH_DOMAIN, canonicalPlayerDeletionIntentBytes(input));
+}
+
+export async function hashPlayerDeletionIntent(input: unknown): Promise<ClaimProtocolHash> {
+  return sha256(playerDeletionIntentHashPreimage(input));
+}
+
 export function claimChallengeHashPreimage(input: unknown): Uint8Array {
   return concatDomain(CLAIM_CHALLENGE_HASH_DOMAIN, canonicalClaimChallengeBytes(input));
 }
@@ -408,6 +467,16 @@ export async function hashClaimChallenge(input: unknown): Promise<ClaimProtocolH
 
 export function parseCanonicalClaimIntentBytes(bytes: Uint8Array): ClaimIntentV1 {
   return parseCanonicalBytes(bytes, parseClaimIntent);
+}
+
+export function parseCanonicalClaimSessionRecoveryIntentBytes(
+  bytes: Uint8Array,
+): ClaimSessionRecoveryIntentV1 {
+  return parseCanonicalBytes(bytes, parseClaimSessionRecoveryIntent);
+}
+
+export function parseCanonicalPlayerDeletionIntentBytes(bytes: Uint8Array): PlayerDeletionIntentV1 {
+  return parseCanonicalBytes(bytes, parsePlayerDeletionIntent);
 }
 
 export function parseCanonicalClaimChallengeBytes(bytes: Uint8Array): ClaimChallengeV1 {
@@ -435,6 +504,8 @@ function parseCanonicalBytes<T>(bytes: Uint8Array, parser: (input: unknown) => T
 
 export const claimProtocolProfile = Object.freeze({
   claimIntentHashDomain: CLAIM_INTENT_HASH_DOMAIN,
+  claimSessionRecoveryIntentHashDomain: CLAIM_SESSION_RECOVERY_INTENT_HASH_DOMAIN,
+  playerDeletionIntentHashDomain: PLAYER_DELETION_INTENT_HASH_DOMAIN,
   claimChallengeHashDomain: CLAIM_CHALLENGE_HASH_DOMAIN,
   challengeDomain: CLAIM_CHALLENGE_DOMAIN,
   walletSigningType: "MICHELINE",

@@ -1,4 +1,4 @@
-import type { HmacKeyMetadata, HmacKeyring, HmacKeyPurpose, TombstoneKeyring } from "./crypto";
+import type { HmacKeyMetadata, HmacKeyring, TombstoneKeyring } from "./crypto";
 import { KeyLifecycleError, keyIdentityBytes, keyIdentityFromBytes } from "./crypto";
 import type { SqlClient, SqlPool } from "./database";
 import { TransactionRunner } from "./database";
@@ -8,8 +8,10 @@ import { applyMigrations } from "./migrations";
 
 interface DatabaseClockRow { readonly now: Date }
 
+type PersistenceKeyPurpose = "resume" | "tombstone";
+
 interface KeyReferenceRow {
-  readonly source: HmacKeyPurpose;
+  readonly source: PersistenceKeyPurpose;
   readonly key_version: number;
   readonly key_identity: Uint8Array;
   readonly required_until: Date;
@@ -18,7 +20,7 @@ interface KeyReferenceRow {
 interface ReferenceCountRow { readonly reference_count: string }
 
 function metadataFor(
-  source: HmacKeyPurpose,
+  source: PersistenceKeyPurpose,
   version: number,
   resumeKeys: HmacKeyring,
   tombstoneKeys: TombstoneKeyring,
@@ -26,7 +28,7 @@ function metadataFor(
   return source === "resume" ? resumeKeys.metadata(version) : tombstoneKeys.metadata(version);
 }
 
-function minimumVerifyUntilMs(source: HmacKeyPurpose, retiredAtMs: number): number {
+function minimumVerifyUntilMs(source: PersistenceKeyPurpose, retiredAtMs: number): number {
   const lifecycle = ADR_0003_PERSISTENCE_LIFECYCLE;
   return source === "resume"
     ? retiredAtMs + lifecycle.sessionLifetimeMs + lifecycle.cleanupMaximumDelayMs
@@ -203,7 +205,7 @@ export class PersistenceAuthority {
   async assertGuestSecretNotTombstoned(client: SqlClient, secret: string, now: Date): Promise<void> {
     for (const resume of this.resumeKeys.tombstoneCandidates(secret, now)) {
       const replayKey = `resume:v${resume.keyVersion}:${Buffer.from(resume.digest).toString("base64url")}`;
-      for (const tombstone of this.tombstoneKeys.candidates("guest-session", replayKey, now)) {
+      for (const tombstone of this.tombstoneKeys.replayCandidates("guest-session", replayKey, now)) {
         const result = await client.query<{ readonly found: number }>(
           `SELECT 1 AS found
              FROM samurai_persistence.deletion_tombstones
@@ -231,7 +233,7 @@ export class PersistenceAuthority {
     }
   }
 
-  async assertSafeToDestroy(source: HmacKeyPurpose, version: number): Promise<void> {
+  async assertSafeToDestroy(source: PersistenceKeyPurpose, version: number): Promise<void> {
     await this.#runner.run(async (client) => {
       const now = await databaseNow(client);
       const metadata = metadataFor(source, version, this.resumeKeys, this.tombstoneKeys);
