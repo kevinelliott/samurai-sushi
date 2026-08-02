@@ -1,0 +1,26 @@
+{
+  "chainId": "NetXtJqPyJGB6Pc",
+  "confirmationThreshold": 2,
+  "consumer": "samurai-sushi",
+  "contractName": "SAMURAI_SUSHI_RECEIPT_V1",
+  "entrypoint": "submit_receipt",
+  "finalityPolicy": "localnet-two-confirmation-rehearsal-v1",
+  "issuerPolicies": [
+    {
+      "activatesAt": "1767225600",
+      "keyId": "localnet-issuer-2026-01",
+      "policyVersion": "1",
+      "publicKey": "edpkuZpp81M8NmaFbueXY8bk7EP9V54XTnwsFFt77Z5FTPs2QzLU9r",
+      "retiresAt": "2051222400",
+      "revoked": false,
+      "verifyUntil": "2051223300"
+    }
+  ],
+  "maxClockSkewSeconds": 30,
+  "maximumPermitLifetimeSeconds": 900,
+  "pauseController": "tz1VSUr8wwNhLAzempoch5d6hLRiTh8Cjcjb",
+  "profile": "localnet",
+  "schemaVersion": 1,
+  "sourceAdministrator": "tz1VSUr8wwNhLAzempoch5d6hLRiTh8Cjcjb",
+  "version": 1
+}

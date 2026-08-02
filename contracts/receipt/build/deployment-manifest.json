@@ -1,0 +1,65 @@
+{
+  "version": 1,
+  "schemaVersion": 1,
+  "kind": "samurai-sushi-receipt-source-candidate-v1",
+  "consumer": "samurai-sushi",
+  "chainId": "NetXtJqPyJGB6Pc",
+  "profile": "localnet",
+  "deploymentClaim": "source-only-not-originated",
+  "contractName": "SAMURAI_SUSHI_RECEIPT_V1",
+  "entrypoint": "submit_receipt",
+  "authorityManifestPath": "contracts/receipt/authority-manifest.json",
+  "authorityManifestHash": "9fa3874f00d4cce18de80d579c5be8f8ae970b33257c33ed15c2e2cd80937833",
+  "source": {
+    "path": "contracts/receipt/samurai_sushi_receipt.py",
+    "sha256": "3a655720e630dcf649bfb5f9e628139b08857571a87632bb77195b3fffab9c2c"
+  },
+  "artifact": {
+    "path": "contracts/receipt/build/samurai_sushi_receipt_v1.tz",
+    "sha256": "5bd83cf693db3511ac3a321aa36c75d6e456275140ac3215b3ec217f6752d034",
+    "storagePath": "contracts/receipt/build/samurai_sushi_receipt_v1.storage.tz",
+    "storageSha256": "b9a3626ccf13a8cb0d3534935364df9ade3fb689b128ee0ce8fd54af656d8fcb",
+    "parameterSchemaSha256": "de3bca12d4d4280baec0652361aedd7b463840d9738ed334148a42a5d22ef22f"
+  },
+  "generatedBindingPath": "packages/receipt-authority/src/generated/localnet-source-binding.ts",
+  "confirmationThreshold": 2,
+  "finalityPolicy": "localnet-two-confirmation-rehearsal-v1",
+  "publicStorageKeys": [
+    "contentVersion",
+    "deploymentManifestHash",
+    "expiry",
+    "issuedAt",
+    "issuerKeyId",
+    "issuerPolicyVersion",
+    "nonce",
+    "owner",
+    "payloadHash",
+    "serviceCommitment"
+  ],
+  "publicEventKeys": [
+    "contentVersion",
+    "nonce",
+    "owner",
+    "payloadHash",
+    "serviceCommitment"
+  ],
+  "forbiddenContractSurface": [
+    "approval",
+    "balance",
+    "burn",
+    "currency",
+    "delegate",
+    "der",
+    "economic",
+    "fa2",
+    "marketplace",
+    "metadata-mutation",
+    "migrate",
+    "operator",
+    "random",
+    "referral",
+    "reward",
+    "transfer"
+  ],
+  "claimBoundary": "authorized-permit-acceptance-only"
+}

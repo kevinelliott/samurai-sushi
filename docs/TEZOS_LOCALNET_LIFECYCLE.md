@@ -4,8 +4,9 @@ This is the normative network-development contract for Samurai Sushi. The
 shared runtime lives in the sibling workspace repository
 `REPOS/project-crypt-tezos-localnet`. Samurai Sushi pins its accepted runtime
 commit and entrypoint in `.tezos-runtime.json`; the application refuses to run
-an unapproved or dirty sibling checkout. The walletless Phase 0 shell exists,
-but no application contract or deployment manifest exists yet.
+an unapproved or dirty sibling checkout. Phase 2A adds a source-only receipt
+candidate, but an address, origination operation, invocation, or player wallet
+doorway exists only when separately evidenced below.
 
 ## Environment boundary
 
@@ -74,18 +75,20 @@ There must be no Mainnet development script. Contract origination and migration
 commands follow the same split: Localnet by default, Shadownet only by an
 explicit final-test name.
 
-No contract/address command may be added until the shared consumer registry
+No contract/address command may run until the shared consumer registry
 marks Samurai Sushi integrated, `namespace-init samurai-sushi` has bound its
-identity to the current Localnet generation, and `manifest-register` has
-recorded an immutable project manifest. Runtime readiness must report that
-identity and manifest fresh. Reset makes all earlier addresses and manifests
-stale before Docker state changes.
+identity to the current Localnet generation, and `manifest-register-commit` has
+recorded the exact manifest blob from a full candidate commit reachable under
+an approved `origin/*` ref in the canonical Samurai repository object database.
+Runtime readiness must report that identity and commit-bound manifest fresh.
+Reset or generation drift makes all earlier addresses and manifests stale
+before any new address-bearing command.
 
 The application adapter is registered as integrated in shared runtime revision
-`62c2abce341118a119a7eaebff2376ab8b91f01c`, but address-bearing readiness is
-intentionally false while no contract exists. Before any such command ships,
-run `node scripts/consumers.mjs ready samurai-sushi` from that exact clean
-shared-runtime checkout; it must pass against the live loopback chain.
+`1d6726650146cbcce292fa7a69f9c227c5465bde`. Before any address-bearing command,
+run `npm run consumers:ready -- samurai-sushi` from that exact clean runtime
+checkout; it must pass against the live loopback chain and current generation.
+Historical mutable manifests and a working-tree copy cannot satisfy this gate.
 
 ## Daily development
 
@@ -102,6 +105,21 @@ The application must display `localnet` and the expected chain identity.
 Contract addresses, manifests, generated bindings, and fixtures belong under a
 Samurai Sushi Localnet namespace; another project's local address is not valid
 Samurai Sushi deployment evidence.
+
+The Phase 2A gate order is immutable:
+
+1. build and verify source artifacts without an address claim;
+2. commit and push the exact candidate under `origin/*`;
+3. read the live identity, generation, and reset impact;
+4. initialize only an absent Samurai namespace and register only the exact
+   commit plus `contracts/receipt/build/deployment-manifest.json`;
+5. require `consumers:ready samurai-sushi`; then and only then
+6. originate and report generation, registered manifest, contract address,
+   origination operation, and authenticated invocation as separate evidence.
+
+Never reset the shared runtime merely to make Samurai ready. A source build or
+SmartPy scenario is not origination, and origination is not authenticated
+invocation or player-ready wallet UX.
 
 ## Preserve, inspect, or reset
 
