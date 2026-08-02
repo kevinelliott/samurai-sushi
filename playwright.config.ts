@@ -22,6 +22,8 @@ export default defineConfig({
     { name: "review-1024", grep: /@receipt-review/, use: { ...devices["Desktop Chrome"], viewport: { width: 1024, height: 768 } } },
     { name: "review-768", grep: /@receipt-review/, use: { ...devices["Desktop Chrome"], viewport: { width: 768, height: 1024 } } },
     { name: "review-390", grep: /@receipt-review/, use: { ...devices["Pixel 5"], viewport: { width: 390, height: 844 } } },
-    { name: "review-zoom-200", grep: /@receipt-review/, use: { ...devices["Desktop Chrome"], viewport: { width: 640, height: 720 } } },
+    { name: "review-zoom-200", grep: /@receipt-review/, use: {
+      ...devices["Desktop Chrome"], viewport: { width: 320, height: 720 }, deviceScaleFactor: 2,
+    } },
   ],
 });

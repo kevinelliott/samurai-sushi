@@ -88,6 +88,30 @@ describe("Phase 2C receipt review wallet authority", () => {
   const runtime = { providerId: "deterministic-wallet", chainId: "NetXtJqPyJGB6Pc", account: ACCOUNT, permissionScopes: ["account"] as const } as const;
   const credential = { kind: "player", sessionSecret: "fixture" } as const;
 
+  it("returns settled guests a display-only proof-unavailable result without durable wallet authority", async () => {
+    const guestService = { runSettledTransaction: async <T>(_credential: unknown, _scope: string,
+      operation: (context: SettledServiceTransactionContext) => Promise<T>) => runner.run(async (client) => {
+        const clock = await client.query<{ now: Date }>("SELECT clock_timestamp() AS now");
+        return operation({ client, subjectKind: "guest", subjectId: "guest_phase2c_test_001", playerSessionId: null,
+          playerSessionDeliveryGeneration: null, checkpoint: deterministicSettledCheckpointFixture(), now: clock.rows[0]!.now });
+      }) } as unknown as EveningServiceAuthority;
+    const guestReview = new ReceiptReviewWalletAuthority(pool, guestService, review.receipts, review.policy);
+    const access = await guestReview.syncRuntime({ kind: "guest", resumeSecret: "fixture" }, {
+      idempotencyKey: "phase2c-guest-runtime-0001", runtimeGeneration: 3, sessionRevision: 7, runtime,
+    });
+    expect(access).toEqual({ schemaVersion: 1, accessScope: "DISPLAY_ONLY", state: "ACCOUNT_PROOF_UNAVAILABLE",
+      providerId: runtime.providerId, chainId: runtime.chainId, account: runtime.account, permissionScopes: ["account"],
+      credentialMatch: false, reason: "ACCOUNT_PROOF_UNAVAILABLE",
+      presentation: expect.objectContaining({ ref: "wallet.access.account-proof-unavailable" }) });
+    expect(access).not.toHaveProperty("walletLinkRef"); expect(access).not.toHaveProperty("runtimeGeneration");
+    const counts = (await raw.query<{ credentials: string; links: string; challenges: string; intents: string }>(`SELECT
+      (SELECT count(*)::text FROM samurai_persistence.wallet_credentials) AS credentials,
+      (SELECT count(*)::text FROM samurai_persistence.wallet_runtime_links) AS links,
+      (SELECT count(*)::text FROM samurai_persistence.wallet_link_challenges) AS challenges,
+      (SELECT count(*)::text FROM samurai_persistence.receipt_intents) AS intents`)).rows[0]!;
+    expect(counts).toEqual({ credentials: "0", links: "0", challenges: "0", intents: "0" });
+  });
+
   it("keeps permission-only runtime unverified and creates no receipt or credential", async () => {
     const access = await review.syncRuntime(credential, { idempotencyKey: "phase2c-runtime-0001", runtimeGeneration: 1, sessionRevision: 0, runtime });
     expect(access).toMatchObject({ state: "ACCOUNT_PROOF_UNAVAILABLE", credentialMatch: false, reason: "ACCOUNT_PROOF_UNAVAILABLE" });
@@ -106,6 +130,70 @@ describe("Phase 2C receipt review wallet authority", () => {
     expect((await raw.query<{ credentials: string; intents: string }>(`SELECT
       (SELECT count(*)::text FROM samurai_persistence.wallet_credentials) credentials,
       (SELECT count(*)::text FROM samurai_persistence.receipt_intents) intents`)).rows[0]).toEqual({ credentials: "0", intents: "0" });
+  });
+
+  it("revokes a pending same-account proof generation without crossing the subject namespace", async () => {
+    const { privateKey, publicKey } = generateKeyPairSync("ed25519");
+    const der = publicKey.export({ format: "der", type: "spki" });
+    const proofPublicKey = b58Encode(der.subarray(der.byteLength - 32), PrefixV2.Ed25519PublicKey);
+    const proofAccount = getPkhfromPk(proofPublicKey); const proofRuntime = { ...runtime, account: proofAccount };
+    const access = await review.syncRuntime(credential, { idempotencyKey: "phase2c-revoke-pending-runtime",
+      runtimeGeneration: 2, sessionRevision: 2, runtime: proofRuntime });
+    const issued = await review.issueChallenge(credential, { idempotencyKey: "phase2c-revoke-pending-challenge",
+      walletLinkRef: access.walletLinkRef, runtimeGeneration: access.runtimeGeneration, sessionRevision: access.sessionRevision });
+    const proof = { challenge: issued.challenge, publicKey: proofPublicKey,
+      signature: b58Encode(signMessage(null, blake2b(walletLinkSigningBytes(issued.challenge), { dkLen: 32 }), privateKey), PrefixV2.Ed25519Signature) };
+
+    const otherPlayer = "player_phase2c_test_002"; const otherSession = "55555555-5555-4555-8555-555555555555";
+    const now = (await raw.query<{ now: Date }>("SELECT clock_timestamp() AS now")).rows[0]!.now;
+    await raw.query("INSERT INTO samurai_persistence.players (id,state,created_at,updated_at) VALUES ($1,'active',$2,$2)", [otherPlayer, now]);
+    await raw.query(`INSERT INTO samurai_persistence.player_sessions
+      (id,player_id,issuance_kind,issuance_id,state,delivery_generation,created_at,last_seen_at,expires_at,rotate_after)
+      VALUES ($1,$2,'claim',$3,'active',1,$4,$4,$5,$6)`, [otherSession, otherPlayer,
+      "66666666-6666-4666-8666-666666666666", now, new Date(now.getTime() + 86_400_000), new Date(now.getTime() + 43_200_000)]);
+    const otherService = { runSettledTransaction: async <T>(_credential: unknown, _scope: string,
+      operation: (context: SettledServiceTransactionContext) => Promise<T>) => runner.run(async (client) => {
+        const clock = await client.query<{ now: Date }>("SELECT clock_timestamp() AS now");
+        return operation({ client, subjectKind: "player", subjectId: otherPlayer, playerSessionId: otherSession,
+          playerSessionDeliveryGeneration: 1, checkpoint: deterministicSettledCheckpointFixture(), now: clock.rows[0]!.now });
+      }) } as unknown as EveningServiceAuthority;
+    const otherReview = new ReceiptReviewWalletAuthority(pool, otherService, review.receipts, review.policy);
+    const otherAccess = await otherReview.syncRuntime({ kind: "player", sessionSecret: "other" }, {
+      idempotencyKey: "phase2c-other-pending-runtime", runtimeGeneration: 4, sessionRevision: 4, runtime: proofRuntime });
+    const otherChallenge = await otherReview.issueChallenge({ kind: "player", sessionSecret: "other" }, {
+      idempotencyKey: "phase2c-other-pending-challenge", walletLinkRef: otherAccess.walletLinkRef,
+      runtimeGeneration: otherAccess.runtimeGeneration, sessionRevision: otherAccess.sessionRevision });
+
+    const revokedCredential = "77777777-7777-4777-8777-777777777777";
+    await raw.query(`INSERT INTO samurai_persistence.wallet_credentials
+      (credential_id,player_id,chain_id,account,public_key,scheme,linked_claim_id,linked_at)
+      VALUES ($1,$2,'NetXtJqPyJGB6Pc',$3,$4,'tz1',$5,$6)`, [revokedCredential, PLAYER, proofAccount, proofPublicKey,
+      "88888888-8888-4888-8888-888888888888", now]);
+    const revokedAt = new Date(now.getTime() + 1_000);
+    await expect(raw.query(`UPDATE samurai_persistence.wallet_credentials SET player_id=$2,state='revoked',
+      credential_revision=credential_revision+1,updated_at=$3,revoked_at=$3 WHERE credential_id=$1`,
+    [revokedCredential, otherPlayer, revokedAt])).rejects.toMatchObject({ code: "23514" });
+    expect((await raw.query<{ state: string }>("SELECT state FROM samurai_persistence.wallet_link_challenges WHERE public_challenge_ref=$1",
+      [issued.challengeRef])).rows[0]).toEqual({ state: "ISSUED" });
+    expect((await raw.query<{ state: string }>("SELECT state FROM samurai_persistence.wallet_link_challenges WHERE public_challenge_ref=$1",
+      [otherChallenge.challengeRef])).rows[0]).toEqual({ state: "ISSUED" });
+    await raw.query(`UPDATE samurai_persistence.wallet_credentials SET state='revoked',credential_revision=credential_revision+1,
+      updated_at=$2,revoked_at=$2 WHERE credential_id=$1`, [revokedCredential, revokedAt]);
+
+    await expect(review.consumeProof(credential, { idempotencyKey: "phase2c-revoke-pending-proof",
+      walletLinkRef: access.walletLinkRef, challengeRef: issued.challengeRef, proof })).rejects.toMatchObject({ code: "WALLET_PROOF_REJECTED" });
+    expect((await raw.query<{ state: string }>("SELECT state FROM samurai_persistence.wallet_link_challenges WHERE public_challenge_ref=$1",
+      [issued.challengeRef])).rows[0]).toEqual({ state: "REVOKED" });
+    expect((await raw.query<{ state: string }>("SELECT state FROM samurai_persistence.wallet_runtime_links WHERE public_link_ref=$1",
+      [access.walletLinkRef])).rows[0]).toEqual({ state: "REVOKED" });
+    expect((await raw.query<{ state: string }>("SELECT state FROM samurai_persistence.wallet_link_challenges WHERE public_challenge_ref=$1",
+      [otherChallenge.challengeRef])).rows[0]).toEqual({ state: "ISSUED" });
+    expect((await raw.query<{ state: string }>("SELECT state FROM samurai_persistence.wallet_runtime_links WHERE public_link_ref=$1",
+      [otherAccess.walletLinkRef])).rows[0]).toEqual({ state: "CHALLENGE_ISSUED" });
+    expect((await raw.query<{ active: string; total: string }>(`SELECT
+      count(*) FILTER (WHERE state='active')::text AS active,count(*)::text AS total
+      FROM samurai_persistence.wallet_credentials WHERE player_id=$1 AND chain_id='NetXtJqPyJGB6Pc' AND account=$2`,
+    [PLAYER, proofAccount])).rows[0]).toEqual({ active: "0", total: "1" });
   });
 
   it("consumes a deterministic purpose proof once and replays only its exact committed public result", async () => {

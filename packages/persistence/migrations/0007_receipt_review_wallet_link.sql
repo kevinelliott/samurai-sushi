@@ -24,6 +24,27 @@ CREATE UNIQUE INDEX wallet_credentials_active_chain_account
 CREATE UNIQUE INDEX wallet_credentials_active_player_chain_account
   ON samurai_persistence.wallet_credentials (player_id, chain_id, account) WHERE state = 'active';
 
+CREATE FUNCTION samurai_persistence.reject_wallet_credential_identity_change()
+RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  IF NEW.credential_id IS DISTINCT FROM OLD.credential_id
+    OR NEW.player_id IS DISTINCT FROM OLD.player_id
+    OR NEW.chain_id IS DISTINCT FROM OLD.chain_id
+    OR NEW.account IS DISTINCT FROM OLD.account
+    OR NEW.public_key IS DISTINCT FROM OLD.public_key
+    OR NEW.scheme IS DISTINCT FROM OLD.scheme
+    OR NEW.linked_claim_id IS DISTINCT FROM OLD.linked_claim_id
+    OR NEW.linked_at IS DISTINCT FROM OLD.linked_at THEN
+    RAISE EXCEPTION 'wallet credential identity is immutable' USING ERRCODE = '23514';
+  END IF;
+  RETURN NEW;
+END $$;
+
+CREATE TRIGGER wallet_credential_identity_immutable
+BEFORE UPDATE OF credential_id, player_id, chain_id, account, public_key, scheme, linked_claim_id, linked_at
+ON samurai_persistence.wallet_credentials
+FOR EACH ROW EXECUTE FUNCTION samurai_persistence.reject_wallet_credential_identity_change();
+
 ALTER TABLE samurai_persistence.player_sessions
   ADD UNIQUE (player_id, id, delivery_generation);
 
@@ -238,14 +259,20 @@ BEGIN
        SET state='REVOKED', revoked_at=authority_now
      WHERE c.state='ISSUED' AND EXISTS (
        SELECT 1 FROM samurai_persistence.wallet_runtime_links l
-        WHERE l.id=c.wallet_link_id AND l.credential_id=NEW.credential_id
+        WHERE l.id=c.wallet_link_id AND l.player_id=NEW.player_id
+          AND l.chain_id=NEW.chain_id AND l.account=NEW.account
+          AND (l.credential_id=NEW.credential_id
+            OR (l.credential_id IS NULL AND l.state IN ('CHALLENGE_ISSUED','PROOF_PENDING')))
      );
     UPDATE samurai_persistence.wallet_link_challenges c
        SET runtime_generation=CASE WHEN c.runtime_generation < 9007199254740991 THEN c.runtime_generation+1 ELSE c.runtime_generation END,
            session_revision=CASE WHEN c.session_revision < 9007199254740991 THEN c.session_revision+1 ELSE c.session_revision END
      WHERE EXISTS (
        SELECT 1 FROM samurai_persistence.wallet_runtime_links l
-        WHERE l.id=c.wallet_link_id AND l.credential_id=NEW.credential_id AND l.state <> 'REVOKED'
+        WHERE l.id=c.wallet_link_id AND l.player_id=NEW.player_id
+          AND l.chain_id=NEW.chain_id AND l.account=NEW.account AND l.state <> 'REVOKED'
+          AND (l.credential_id=NEW.credential_id
+            OR (l.credential_id IS NULL AND l.state IN ('CHALLENGE_ISSUED','PROOF_PENDING')))
      );
     UPDATE samurai_persistence.wallet_runtime_links
        SET state='REVOKED', terminal_reason='CREDENTIAL_REVOKED',
@@ -254,7 +281,9 @@ BEGIN
            linked_challenge_state=CASE WHEN linked_challenge_id IS NULL THEN NULL ELSE
              (SELECT state FROM samurai_persistence.wallet_link_challenges c WHERE c.challenge_id=linked_challenge_id) END,
            changed_at=authority_now, disconnected_at=NULL, revoked_at=authority_now
-     WHERE credential_id=NEW.credential_id AND state <> 'REVOKED';
+     WHERE player_id=NEW.player_id AND chain_id=NEW.chain_id AND account=NEW.account AND state <> 'REVOKED'
+       AND (credential_id=NEW.credential_id
+         OR (credential_id IS NULL AND state IN ('CHALLENGE_ISSUED','PROOF_PENDING')));
   END IF;
   RETURN NEW;
 END $$;

@@ -79,7 +79,7 @@ function serviceFixture(initial = createInitialEveningServiceCheckpoint(), activ
   let credentialRefreshNext = false;
   let malformedNextQuery = false;
   let conflictNextQuery = false;
-  let identity: "guest" | "player" = "guest";
+  let identity: "guest" | "player" = activeReview ? "player" : "guest";
   let preparedReview: Record<string, unknown> | null = null;
   let currentWalletAccess: Record<string, unknown> | null = null;
   let heldQuery: { readonly started: () => void; readonly wait: Promise<void>; readonly release: () => void } | null = null;
@@ -113,6 +113,10 @@ function serviceFixture(initial = createInitialEveningServiceCheckpoint(), activ
     }, projection: preparedReview, walletAccess: currentWalletAccess });
     if (path === "/api/account/wallet/runtime/sync") {
       const request = JSON.parse(route.request().postData() ?? "{}") as { runtimeGeneration?: number; runtime?: { providerId?: string; chainId?: string; account?: string } };
+      if (identity === "guest") return json(route, 200, { schemaVersion: 1, accessScope: "DISPLAY_ONLY", state: "ACCOUNT_PROOF_UNAVAILABLE",
+        providerId: request.runtime?.providerId, chainId: request.runtime?.chainId, account: request.runtime?.account,
+        permissionScopes: ["account"], credentialMatch: false, reason: "ACCOUNT_PROOF_UNAVAILABLE",
+        presentation: WALLET_REVIEW_COPY["wallet.access.account-proof-unavailable"] });
       currentWalletAccess = { schemaVersion: 1, walletLinkRef: "wl_AAAAAAAAAAAAAAAAAAAAAA", state: activeReview ? "ACTIVE_CREDENTIAL_MATCH" : "ACCOUNT_PROOF_UNAVAILABLE",
         runtimeGeneration: request.runtimeGeneration, sessionRevision: 1, providerId: request.runtime?.providerId,
         chainId: request.runtime?.chainId, account: request.runtime?.account, permissionScopes: ["account"], credentialMatch: activeReview,
@@ -404,10 +408,32 @@ test("projection-only first service completes with exact commands and one-shot c
   const tripwires = await page.evaluate(() => (window as unknown as { __walletTripwires: Record<string, number> }).__walletTripwires);
   expect(tripwires).toEqual({ permission: 1, read: 0, disconnect: 0, sign: 0, send: 0, inject: 0, broadcast: 0, contract: 0, fee: 0, observe: 0 });
   expect(fixture.requests.filter((path) => path === "/api/account/receipt/review/prepare")).toEqual([]);
+  expect(fixture.requests.filter((path) => path === "/api/account/wallet/link/disconnect")).toEqual([]);
   expect(new Set(fixture.bodies.map((body) => JSON.parse(body).idempotencyKey)).size).toBe(29);
   const renderedText = await page.locator("body").innerText();
   for (const body of fixture.bodies) expect(renderedText).not.toContain((JSON.parse(body) as PublicCommand).idempotencyKey);
   expect(diagnostics.join("\n")).not.toMatch(/hostile|cookie|subject|checkpoint|signature|proof|database|digest|hmac/iu);
+});
+
+test("@receipt-review a settled player without an active credential receives the stable proof-unavailable outcome", async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== "desktop", "the unmatched durable player path is exercised once");
+  const settled = (compiledFirstEveningService.goldenReplay.at(-1) as {
+    readonly response: { readonly checkpoint: EveningServiceCheckpoint } }).response.checkpoint;
+  const fixture = serviceFixture(settled, false); fixture.setIdentity("player"); await fixture.install(page);
+  await page.addInitScript((runtime) => {
+    const counters = { permission: 0, read: 0, disconnect: 0, sign: 0, send: 0, inject: 0, broadcast: 0, contract: 0, fee: 0, observe: 0 };
+    Object.defineProperty(window, "__walletTripwires", { value: counters });
+    Object.defineProperty(window, "samuraiLocalnetWallet", { value: {
+      requestPermission: async () => { counters.permission += 1; return runtime; }, readRuntime: async () => { counters.read += 1; return runtime; },
+      subscribe: () => () => undefined, disconnect: async () => { counters.disconnect += 1; },
+    } });
+  }, EXPECTED_REVIEW_RUNTIME);
+  await page.goto("/"); await page.getByRole("button", { name: "Review optional keepsake" }).click();
+  await page.getByRole("button", { name: "Connect wallet for Localnet rehearsal" }).click();
+  await expect(page.getByRole("heading", { name: "Verified account proof unavailable" })).toBeFocused();
+  await expect(page.getByText("The wallet reported an account, but this phase cannot request the proof needed to verify it.", { exact: false })).toBeVisible();
+  expect(fixture.requests.filter((path) => path === "/api/account/receipt/review/prepare")).toEqual([]);
+  expect(await reviewTripwires(page)).toMatchObject({ permission: 1, sign: 0, send: 0, inject: 0, broadcast: 0, contract: 0, fee: 0, observe: 0 });
 });
 
 test("@receipt-review settled optional review keeps gameplay primary and renders exact access and review stages", async ({ page }, testInfo) => {
@@ -430,7 +456,38 @@ test("@receipt-review settled optional review keeps gameplay primary and renders
     } });
   });
   await page.goto("/");
-  const zoomSession = testInfo.project.name === "review-zoom-200" ? await page.context().newCDPSession(page) : null;
+  const assertEffectiveZoomReflow = async (targets: readonly Locator[]) => {
+    if (testInfo.project.name !== "review-zoom-200") return;
+    const geometry = await page.evaluate(() => {
+      const dialog = document.querySelector("dialog"); if (!(dialog instanceof HTMLDialogElement)) throw new Error("dialog");
+      const dialogRect = dialog.getBoundingClientRect();
+      const horizontallyClipped = [...dialog.querySelectorAll("*")].filter((element) => {
+        const rect = element.getBoundingClientRect();
+        return rect.width > 0 && rect.height > 0 && (rect.left < dialogRect.left - 1 || rect.right > dialogRect.right + 1);
+      }).map((element) => element.tagName);
+      return { innerWidth, visualWidth: visualViewport?.width ?? innerWidth, devicePixelRatio,
+        documentWidth: document.documentElement.scrollWidth, documentClientWidth: document.documentElement.clientWidth,
+        dialogWidth: dialog.scrollWidth, dialogClientWidth: dialog.clientWidth,
+        dialogScrollHeight: dialog.scrollHeight, dialogClientHeight: dialog.clientHeight,
+        frameWidth: dialog.firstElementChild?.scrollWidth ?? 0, frameClientWidth: dialog.firstElementChild?.clientWidth ?? 0,
+        horizontallyClipped };
+    });
+    expect(geometry).toMatchObject({ innerWidth: 320, visualWidth: 320, devicePixelRatio: 2, horizontallyClipped: [] });
+    expect(geometry.documentWidth).toBeLessThanOrEqual(geometry.documentClientWidth);
+    expect(geometry.dialogWidth).toBeLessThanOrEqual(geometry.dialogClientWidth);
+    expect(geometry.frameWidth).toBeLessThanOrEqual(geometry.frameClientWidth);
+    expect(geometry.dialogScrollHeight).toBeGreaterThan(geometry.dialogClientHeight);
+    for (const target of targets) {
+      await expect(target).toBeVisible(); await target.scrollIntoViewIfNeeded(); const box = await target.boundingBox(); expect(box).not.toBeNull();
+      expect(box!.x).toBeGreaterThanOrEqual(0); expect(box!.x + box!.width).toBeLessThanOrEqual(320);
+    }
+    await page.locator(".review-dialog-frame").evaluate((frame) => { frame.scrollTop = 0; });
+    await page.locator("dialog").evaluate((dialog) => { dialog.scrollTop = 0; });
+    await page.evaluate(() => window.scrollTo(0, 0));
+    const title = page.getByRole("heading", { name: "Review optional service keepsake" }); await expect(title).toBeVisible();
+    const titleBox = await title.boundingBox(); expect(titleBox).not.toBeNull(); expect(titleBox!.y).toBeGreaterThanOrEqual(0);
+    expect(titleBox!.y + titleBox!.height).toBeLessThanOrEqual(720);
+  };
   await expect(page.getByRole("button", { name: "Keep playing" })).toHaveClass(/primary-action/);
   const invoker = page.getByRole("button", { name: "Review optional keepsake" });
   await invoker.click();
@@ -441,18 +498,20 @@ test("@receipt-review settled optional review keeps gameplay primary and renders
     dialog: document.querySelector("dialog")?.scrollWidth ?? 0, dialogClient: document.querySelector("dialog")?.clientWidth ?? 0 }));
   expect(dimensions.body).toBeLessThanOrEqual(dimensions.viewport);
   expect(dimensions.dialog).toBeLessThanOrEqual(dimensions.dialogClient);
-  if (zoomSession) await zoomSession.send("Emulation.setPageScaleFactor", { pageScaleFactor: 2 });
+  await assertEffectiveZoomReflow([page.getByText("Optional · non-transferable · no financial value", { exact: true }), page.getByRole("heading", { name: "Review optional service keepsake" }),
+    page.getByText("This optional review can prepare one non-transferable service receipt", { exact: false }),
+    page.locator("#wallet-access-title"), page.getByRole("button", { name: "Connect wallet for Localnet rehearsal" })]);
   await page.screenshot({ path: `.scratch/phase2c-review/access-${testInfo.project.name}.png`, fullPage: false });
-  if (zoomSession) await zoomSession.send("Emulation.setPageScaleFactor", { pageScaleFactor: 1 });
   await activate(page.getByRole("button", { name: "Connect wallet for Localnet rehearsal" }));
   await expect(page.getByRole("heading", { name: "Wallet connected for review" })).toBeFocused();
   await expect(page.getByText("Nothing has been sent.", { exact: false })).toBeVisible();
   await expect(page.getByText("Exact active credential match", { exact: true })).toBeVisible();
   await expect(page.getByText("0 mutez attached", { exact: true })).toBeVisible();
   await expect(page.getByText("Not estimated in this phase.", { exact: false })).toBeVisible();
-  if (zoomSession) await zoomSession.send("Emulation.setPageScaleFactor", { pageScaleFactor: 2 });
+  await assertEffectiveZoomReflow([page.getByText("Optional · non-transferable · no financial value", { exact: true }), page.getByRole("heading", { name: "Review optional service keepsake" }),
+    page.getByRole("heading", { name: "Wallet connected for review" }), page.getByText("Exact active credential match", { exact: true }),
+    page.getByText("Registered manifest verified", { exact: true }), page.getByText("0 mutez attached", { exact: true })]);
   await page.screenshot({ path: `.scratch/phase2c-review/review-${testInfo.project.name}.png`, fullPage: false });
-  if (zoomSession) await zoomSession.send("Emulation.setPageScaleFactor", { pageScaleFactor: 1 });
   await activate(page.getByRole("button", { name: "Check review readiness" }));
   await expect(page.getByRole("heading", { name: "Review ready" })).toBeFocused();
   await expect(page.getByText("Exact current facts match.", { exact: true })).toBeVisible();
@@ -518,6 +577,14 @@ test("@receipt-review distinct access, drift, preflight, keyboard, announcement,
   await expect(page.getByRole("heading", { name: "Wallet network does not match" })).toBeFocused();
   expect(fixture.requests.filter((path) => path === "/api/account/wallet/runtime/sync")).toHaveLength(0);
   await page.getByRole("button", { name: "Not now" }).click();
+
+  await setMode("PERMISSIONED", { providerId: "unknown-wallet", chainId: "NetXtJqPyJGB6Pc",
+    account: "tz1aSkwEot3L2kmUvcoxzjMomb9mvBNuzFK6", permissionScopes: ["account"], rawProviderError: "hostile" });
+  await openReview(); await page.getByRole("button", { name: /connect wallet/i }).click();
+  await expect(page.getByRole("heading", { name: "Wallet access unavailable" })).toBeFocused();
+  await expect(page.getByText("Verified account proof unavailable", { exact: true })).toHaveCount(0);
+  expect(fixture.requests.filter((path) => path === "/api/account/wallet/runtime/sync")).toHaveLength(0);
+  expect(await page.locator("body").innerText()).not.toContain("hostile"); await page.getByRole("button", { name: "Not now" }).click();
 
   const expected = { providerId: "deterministic-wallet", chainId: "NetXtJqPyJGB6Pc",
     account: "tz1aSkwEot3L2kmUvcoxzjMomb9mvBNuzFK6", permissionScopes: ["account"] };

@@ -33,6 +33,21 @@ export interface WalletAccessView {
   readonly presentation: WalletReviewCopy;
 }
 
+export interface DisplayOnlyWalletAccessView {
+  readonly schemaVersion: 1;
+  readonly accessScope: "DISPLAY_ONLY";
+  readonly state: "ACCOUNT_PROOF_UNAVAILABLE";
+  readonly providerId: "localnet-wallet" | "deterministic-wallet";
+  readonly chainId: string;
+  readonly account: string;
+  readonly permissionScopes: readonly ["account"];
+  readonly credentialMatch: false;
+  readonly reason: "ACCOUNT_PROOF_UNAVAILABLE";
+  readonly presentation: WalletReviewCopy;
+}
+
+export type WalletRuntimeSyncView = WalletAccessView | DisplayOnlyWalletAccessView;
+
 export interface ReceiptReviewDoorwayView {
   readonly schemaVersion: 1;
   readonly network: Readonly<{ profile: "localnet"; chainId: "NetXtJqPyJGB6Pc";
@@ -141,6 +156,28 @@ export function parseWalletAccessView(value: unknown): WalletAccessView {
     runtimeGeneration: row.runtimeGeneration as number, sessionRevision: row.sessionRevision as number,
     providerId: row.providerId, chainId: row.chainId, account: row.account, permissionScopes: Object.freeze(["account"] as const),
     credentialMatch: row.credentialMatch, reason: expectedReason, presentation: allowed });
+}
+
+export function parseDisplayOnlyWalletAccessView(value: unknown): DisplayOnlyWalletAccessView {
+  const row = exact(value, ["accessScope", "account", "chainId", "credentialMatch", "permissionScopes", "presentation", "providerId",
+    "reason", "schemaVersion", "state"]);
+  if (row.schemaVersion !== 1 || row.accessScope !== "DISPLAY_ONLY" || row.state !== "ACCOUNT_PROOF_UNAVAILABLE"
+    || (row.providerId !== "localnet-wallet" && row.providerId !== "deterministic-wallet")
+    || typeof row.chainId !== "string" || !/^Net[1-9A-HJ-NP-Za-km-z]{12}$/.test(row.chainId)
+    || typeof row.account !== "string" || !/^tz[1-4][1-9A-HJ-NP-Za-km-z]{33}$/.test(row.account)
+    || !Array.isArray(row.permissionScopes) || row.permissionScopes.length !== 1 || row.permissionScopes[0] !== "account"
+    || row.credentialMatch !== false || row.reason !== "ACCOUNT_PROOF_UNAVAILABLE"
+    || parseWalletReviewCopy(row.presentation) !== WALLET_REVIEW_COPY["wallet.access.account-proof-unavailable"]) invalid();
+  return Object.freeze({ schemaVersion: 1, accessScope: "DISPLAY_ONLY", state: "ACCOUNT_PROOF_UNAVAILABLE",
+    providerId: row.providerId, chainId: row.chainId, account: row.account,
+    permissionScopes: Object.freeze(["account"] as const), credentialMatch: false,
+    reason: "ACCOUNT_PROOF_UNAVAILABLE", presentation: WALLET_REVIEW_COPY["wallet.access.account-proof-unavailable"] });
+}
+
+export function parseWalletRuntimeSyncView(value: unknown): WalletRuntimeSyncView {
+  if (!value || typeof value !== "object" || Array.isArray(value)) invalid();
+  const scope = Object.getOwnPropertyDescriptor(value, "accessScope");
+  return scope ? parseDisplayOnlyWalletAccessView(value) : parseWalletAccessView(value);
 }
 
 export function parseReceiptReviewDoorway(value: unknown): ReceiptReviewDoorwayView {

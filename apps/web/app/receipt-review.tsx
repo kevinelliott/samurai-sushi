@@ -3,9 +3,10 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { parseBrowserSafeReceiptReviewProjection, RECEIPT_REVIEW_STATE_MEANINGS,
   type BrowserSafeReceiptReviewProjectionV1 } from "@samurai-sushi/receipt-lifecycle";
-import { parseReceiptReviewDoorway, parseReceiptReviewPreflightResult, parseWalletAccessView,
+import { parseReceiptReviewDoorway, parseReceiptReviewPreflightResult, parseWalletAccessView, parseWalletRuntimeSyncView,
   runtimeDriftPresentation, WALLET_REVIEW_COPY, type ReceiptReviewDoorwayView,
-  type ReceiptReviewPreflightResult, type WalletAccessView, type WalletRuntimePort, type WalletReviewCopy } from "@samurai-sushi/wallet-link";
+  type ReceiptReviewPreflightResult, type WalletAccessView, type WalletRuntimePort, type WalletRuntimeSyncView,
+  type WalletReviewCopy } from "@samurai-sushi/wallet-link";
 import { RECEIPT_REVIEW_PREFLIGHT_PATH, RECEIPT_REVIEW_PREPARE_PATH, RECEIPT_REVIEW_RESTORE_PATH,
   WALLET_RUNTIME_DISCONNECT_PATH, WALLET_RUNTIME_SYNC_PATH, postJson } from "./service-browser";
 
@@ -56,6 +57,9 @@ function preparedBody(value: unknown): BrowserSafeReceiptReviewProjectionV1 {
   if (row.schemaVersion !== 1) throw new TypeError("Receipt preparation is unavailable.");
   return parseBrowserSafeReceiptReviewProjection(row.projection);
 }
+function durableWalletAccess(value: WalletRuntimeSyncView): value is WalletAccessView {
+  return !("accessScope" in value);
+}
 
 function CopyFact({ label, value, generationToken, compact = false, commit }: Readonly<{
   label: string; value: string; generationToken: number; compact?: boolean;
@@ -98,16 +102,16 @@ export function ReceiptReviewDoorway() {
   const [copy, setCopy] = useState<WalletReviewCopy>(WALLET_REVIEW_COPY["wallet.access.required"]);
   const [projection, setProjection] = useState<BrowserSafeReceiptReviewProjectionV1 | null>(null);
   const [doorway, setDoorway] = useState<ReceiptReviewDoorwayView | null>(null);
-  const [wallet, setWallet] = useState<WalletAccessView | null>(null); const [retiredWallet, setRetiredWallet] = useState<WalletAccessView | null>(null);
+  const [wallet, setWallet] = useState<WalletRuntimeSyncView | null>(null); const [retiredWallet, setRetiredWallet] = useState<WalletAccessView | null>(null);
   const [runtimeStale, setRuntimeStale] = useState(false); const [preflight, setPreflight] = useState<ReceiptReviewPreflightResult | null>(null);
   const [announcement, setAnnouncement] = useState("");
   const dialogRef = useRef<HTMLDialogElement>(null); const invokerRef = useRef<HTMLButtonElement>(null);
   const headingRef = useRef<HTMLHeadingElement>(null); const statusRef = useRef<HTMLHeadingElement>(null);
   const generation = useRef(0); const openRef = useRef(false); const portRef = useRef<WalletRuntimePort | null>(null);
-  const projectionRef = useRef<BrowserSafeReceiptReviewProjectionV1 | null>(null); const walletRef = useRef<WalletAccessView | null>(null);
+  const projectionRef = useRef<BrowserSafeReceiptReviewProjectionV1 | null>(null); const walletRef = useRef<WalletRuntimeSyncView | null>(null);
   const unsubscribeRef = useRef<(() => void) | null>(null); const abortRef = useRef<AbortController | null>(null);
 
-  const active = useCallback((token: number, expectedProjection?: BrowserSafeReceiptReviewProjectionV1, expectedWallet?: WalletAccessView) =>
+  const active = useCallback((token: number, expectedProjection?: BrowserSafeReceiptReviewProjectionV1, expectedWallet?: WalletRuntimeSyncView) =>
     openRef.current && generation.current === token && (!expectedProjection || projectionRef.current === expectedProjection)
       && (!expectedWallet || walletRef.current === expectedWallet), []);
   const controller = useCallback(() => { abortRef.current?.abort(); const next = new AbortController(); abortRef.current = next; return next; }, []);
@@ -147,7 +151,7 @@ export function ReceiptReviewDoorway() {
     retireAsync(); const token = generation.current; const runtimeGeneration = token; setPhase("requesting"); setPreflight(null); setRuntimeStale(false);
     commitCopy(token, WALLET_REVIEW_COPY["wallet.access.requesting"]);
     try {
-      const priorWallet = wallet ?? retiredWallet;
+      const priorWallet = wallet && durableWalletAccess(wallet) ? wallet : retiredWallet;
       if (priorWallet) {
         if (!active(token)) return; const disconnected = await postJson(WALLET_RUNTIME_DISCONNECT_PATH, JSON.stringify({ idempotencyKey: requestId(),
           walletLinkRef: priorWallet.walletLinkRef, runtimeGeneration: priorWallet.runtimeGeneration, sessionRevision: priorWallet.sessionRevision }), controller().signal);
@@ -163,8 +167,8 @@ export function ReceiptReviewDoorway() {
       const response = await postJson(WALLET_RUNTIME_SYNC_PATH, JSON.stringify({ idempotencyKey: requestId(), runtimeGeneration,
         sessionRevision: 0, runtime }), controller().signal);
       if (!active(token) || !response.ok) throw new TypeError("sync"); const accessRaw = await response.json();
-      if (!active(token)) return; const access = parseWalletAccessView(accessRaw); walletRef.current = access; setWallet(access); commitCopy(token, access.presentation);
-      if (!access.credentialMatch) { setPhase("unavailable"); focusStatus(token); return; }
+      if (!active(token)) return; const access = parseWalletRuntimeSyncView(accessRaw); walletRef.current = access; setWallet(access); commitCopy(token, access.presentation);
+      if (!durableWalletAccess(access) || !access.credentialMatch) { setPhase("unavailable"); focusStatus(token); return; }
       if (!active(token, undefined, access)) return; const prepared = await postJson(RECEIPT_REVIEW_PREPARE_PATH, JSON.stringify({ idempotencyKey: requestId(),
         walletLinkRef: access.walletLinkRef, runtimeGeneration: access.runtimeGeneration, sessionRevision: access.sessionRevision }), controller().signal);
       if (!active(token, undefined, access) || !prepared.ok) throw new TypeError("prepare"); const preparedRaw = await prepared.json();
@@ -182,7 +186,7 @@ export function ReceiptReviewDoorway() {
   }, [active, commitCopy, controller, doorway, focusStatus, retiredWallet, retireAsync, wallet]);
 
   const check = useCallback(async () => {
-    if (!projection || !wallet || runtimeStale) return; abortRef.current?.abort(); const token = generation.current;
+    if (!projection || !wallet || !durableWalletAccess(wallet) || runtimeStale) return; abortRef.current?.abort(); const token = generation.current;
     projectionRef.current = projection; walletRef.current = wallet; setPhase("preflight"); commitCopy(token, WALLET_REVIEW_COPY["receipt.preflight.checking"]);
     try {
       const port = portRef.current; if (!port || !active(token, projection, wallet)) return;

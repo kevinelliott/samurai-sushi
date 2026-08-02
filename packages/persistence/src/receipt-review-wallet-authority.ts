@@ -10,9 +10,11 @@ import {
   notReady,
   RECEIPT_REVIEW_DOORWAY,
   WALLET_REVIEW_COPY,
+  type DisplayOnlyWalletAccessView,
   type NormalizedWalletRuntime,
   type ReceiptReviewPreflightResult,
   type WalletAccessView,
+  type WalletRuntimeSyncView,
   type WalletLinkChallengeV1,
 } from "@samurai-sushi/wallet-link";
 import type { SqlClient, SqlPool } from "./database";
@@ -162,6 +164,14 @@ function publicView(row: RuntimeRow): WalletAccessView {
     presentation });
 }
 
+function displayOnlyGuestView(runtime: NormalizedWalletRuntime): WalletRuntimeSyncView {
+  return Object.freeze({ schemaVersion: 1, accessScope: "DISPLAY_ONLY", state: "ACCOUNT_PROOF_UNAVAILABLE",
+    providerId: runtime.providerId, chainId: runtime.chainId, account: runtime.account,
+    permissionScopes: Object.freeze(["account"] as const), credentialMatch: false,
+    reason: "ACCOUNT_PROOF_UNAVAILABLE" as const,
+    presentation: WALLET_REVIEW_COPY["wallet.access.account-proof-unavailable"] });
+}
+
 export class ReceiptReviewWalletAuthority {
   constructor(
     _pool: SqlPool,
@@ -170,11 +180,17 @@ export class ReceiptReviewWalletAuthority {
     readonly policy: ReceiptReviewWalletPolicy,
   ) {}
 
-  async syncRuntime(credential: ServiceSubjectCredential, input: SyncWalletRuntimeInput): Promise<WalletAccessView> {
+  async syncRuntime(credential: Extract<ServiceSubjectCredential, { readonly kind: "guest" }>, input: SyncWalletRuntimeInput): Promise<DisplayOnlyWalletAccessView>;
+  async syncRuntime(credential: Extract<ServiceSubjectCredential, { readonly kind: "player" }>, input: SyncWalletRuntimeInput): Promise<WalletAccessView>;
+  async syncRuntime(credential: ServiceSubjectCredential, input: SyncWalletRuntimeInput): Promise<WalletRuntimeSyncView>;
+  async syncRuntime(credential: ServiceSubjectCredential, input: SyncWalletRuntimeInput): Promise<WalletRuntimeSyncView> {
     exactIdempotency(input.idempotencyKey); safeCoordinate(input.runtimeGeneration, 1); safeCoordinate(input.sessionRevision, 4);
     const runtimeHash = digestCanonical(input.runtime);
     const requestHash = digestCanonical(input);
     return this.service.runSettledTransaction(credential, input.idempotencyKey, async (context) => {
+      if (input.runtime.chainId !== NETWORK.chainId || input.runtime.permissionScopes.length !== 1
+        || input.runtime.permissionScopes[0] !== "account") throw new PersistenceError("WALLET_RUNTIME_INVALID", "Wallet runtime facts do not match the registered review policy.");
+      if (context.subjectKind === "guest") return displayOnlyGuestView(input.runtime);
       this.#requirePlayerContext(context);
       await this.#lockScope(context.client, `wallet-account:${input.runtime.chainId}:${input.runtime.account}`);
       const replay = await context.client.query<RuntimeRow>(`SELECT * FROM samurai_persistence.wallet_runtime_links
@@ -183,8 +199,6 @@ export class ReceiptReviewWalletAuthority {
         if (!same(replay.rows[0].request_hash, requestHash)) throw new IdempotencyPayloadMismatchError();
         return this.#validatedPublicView(context.client, context, replay.rows[0]);
       }
-      if (input.runtime.chainId !== NETWORK.chainId || input.runtime.permissionScopes.length !== 1
-        || input.runtime.permissionScopes[0] !== "account") throw new PersistenceError("WALLET_RUNTIME_INVALID", "Wallet runtime facts do not match the registered review policy.");
       const active = await context.client.query<CredentialRow>(`SELECT * FROM samurai_persistence.wallet_credentials
         WHERE player_id=$1 AND chain_id=$2 AND account=$3 AND state='active' FOR UPDATE`,
       [context.subjectId, input.runtime.chainId, input.runtime.account]);
@@ -280,6 +294,7 @@ export class ReceiptReviewWalletAuthority {
         || !link.credential_id || !["LINKED_EXISTING", "LINKED"].includes(link.state)) {
         throw new PersistenceError("WALLET_LINK_REVOKED", "The wallet credential cannot be revoked from stale runtime authority.");
       }
+      await this.#lockScope(context.client, `wallet-account:${link.chain_id}:${link.account}`);
       const active = await context.client.query<CredentialRow>(`SELECT * FROM samurai_persistence.wallet_credentials
         WHERE credential_id=$1 AND player_id=$2 AND chain_id=$3 AND account=$4 AND state='active' FOR UPDATE`,
       [link.credential_id, context.subjectId, link.chain_id, link.account]);
@@ -302,6 +317,7 @@ export class ReceiptReviewWalletAuthority {
     return this.service.runSettledTransaction(credential, input.idempotencyKey, async (context) => {
       this.#requirePlayerContext(context);
       const link = await this.#lockRuntime(context.client, context.subjectId, input.walletLinkRef);
+      await this.#lockScope(context.client, `wallet-account:${link.chain_id}:${link.account}`);
       const replay = await context.client.query<ChallengeRow>(`SELECT * FROM samurai_persistence.wallet_link_challenges
         WHERE idempotency_key=$1 FOR UPDATE`, [input.idempotencyKey]);
       const authorityNow = await this.#finalAuthorityNow(context.client);
@@ -357,6 +373,7 @@ export class ReceiptReviewWalletAuthority {
     return this.service.runSettledTransaction(credential, input.idempotencyKey, async (context) => {
       this.#requirePlayerContext(context);
       const link = await this.#lockRuntime(context.client, context.subjectId, input.walletLinkRef);
+      await this.#lockScope(context.client, `wallet-account:${link.chain_id}:${link.account}`);
       const found = await context.client.query<ChallengeRow>(`SELECT * FROM samurai_persistence.wallet_link_challenges
         WHERE public_challenge_ref=$1 AND wallet_link_id=$2 AND player_id=$3 FOR UPDATE`, [input.challengeRef, link.id, context.subjectId]);
       const challenge = found.rows[0];
@@ -403,7 +420,6 @@ export class ReceiptReviewWalletAuthority {
         || link.state !== "CHALLENGE_ISSUED" || link.linked_challenge_state !== "ISSUED" || link.credential_id !== null) {
         throw new PersistenceError("WALLET_PROOF_REJECTED", "Wallet proof could not be accepted.");
       }
-      await this.#lockScope(context.client, `wallet-account:${link.chain_id}:${link.account}`);
       const active = await context.client.query<CredentialRow>(`SELECT * FROM samurai_persistence.wallet_credentials
         WHERE chain_id=$1 AND account=$2 AND state='active' FOR UPDATE`, [link.chain_id, link.account]);
       let credentialRow = active.rows[0];

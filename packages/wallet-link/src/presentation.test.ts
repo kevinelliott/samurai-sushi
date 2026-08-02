@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { notReady, parseReceiptReviewPreflightResult, RECEIPT_PREFLIGHT_REASONS } from "./preflight";
-import { parseReceiptReviewDoorway, parseWalletAccessView, RECEIPT_REVIEW_DOORWAY, WALLET_REVIEW_COPY } from "./presentation";
+import { parseReceiptReviewDoorway, parseWalletAccessView, parseWalletRuntimeSyncView,
+  RECEIPT_REVIEW_DOORWAY, WALLET_REVIEW_COPY } from "./presentation";
 
 describe("wallet review browser boundary", () => {
   const access = { schemaVersion: 1, walletLinkRef: "wl_AAAAAAAAAAAAAAAAAAAAAA", state: "ACTIVE_CREDENTIAL_MATCH",
@@ -14,6 +15,18 @@ describe("wallet review browser boundary", () => {
     expect(() => parseWalletAccessView({ ...access, presentation: WALLET_REVIEW_COPY["receipt.preflight.ready"] })).toThrow();
     expect(() => parseWalletAccessView({ ...access, providerId: "provider--name" })).toThrow();
     expect(() => parseWalletAccessView({ ...access, rawProvider: {} })).toThrow();
+  });
+
+  it("strictly separates display-only guest access from durable player runtime authority", () => {
+    const displayOnly = { schemaVersion: 1, accessScope: "DISPLAY_ONLY", state: "ACCOUNT_PROOF_UNAVAILABLE",
+      providerId: "deterministic-wallet", chainId: "NetXtJqPyJGB6Pc",
+      account: "tz1aSkwEot3L2kmUvcoxzjMomb9mvBNuzFK6", permissionScopes: ["account"], credentialMatch: false,
+      reason: "ACCOUNT_PROOF_UNAVAILABLE", presentation: WALLET_REVIEW_COPY["wallet.access.account-proof-unavailable"] } as const;
+    expect(parseWalletRuntimeSyncView(displayOnly)).toEqual(displayOnly);
+    expect(parseWalletRuntimeSyncView(access)).toEqual(access);
+    expect(() => parseWalletRuntimeSyncView({ ...displayOnly, walletLinkRef: "wl_AAAAAAAAAAAAAAAAAAAAAA" })).toThrow();
+    expect(() => parseWalletRuntimeSyncView({ ...displayOnly, runtimeGeneration: 1, sessionRevision: 1 })).toThrow();
+    expect(() => parseWalletRuntimeSyncView({ ...displayOnly, accessScope: "DURABLE" })).toThrow();
   });
 
   it("strictly accepts only the registered server-owned review doorway", () => {

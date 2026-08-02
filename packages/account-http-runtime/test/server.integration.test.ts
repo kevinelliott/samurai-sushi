@@ -748,6 +748,86 @@ describe("built account HTTP boundary", () => {
     expect(deletedState.rows[0]).toEqual({ players: "0", wallets: "0", sessions: "0", digests: "0", merges: "0" });
   });
 
+  it("returns truthful proof-unavailable results for settled guests and players without active credentials", async () => {
+    const wallet = testWallet(); const issued = await requestIssue(portOf(server));
+    const guest = cookieValue(issued.rawHeaders, "__Host-samurai-guest");
+    const capability = cookieValue(issued.rawHeaders, "__Host-samurai-guest-claim");
+    const guestCookies = cookiePair(guest, capability);
+    for (const entry of compiledFirstEveningService.goldenReplay.slice(1)) {
+      const item = entry as { readonly command: { readonly idempotencyKey: string; readonly expectedRevision: number;
+        readonly commandName: string; readonly payload: object } };
+      const response = await requestJson(portOf(server), "/api/account/service/command", JSON.stringify({
+        idempotencyKey: item.command.idempotencyKey, expectedRevision: item.command.expectedRevision,
+        commandName: item.command.commandName, payload: item.command.payload,
+      }), guestCookies);
+      expect(response.status, `${item.command.commandName}: ${response.body}`).toBe(200);
+    }
+    expect(JSON.parse((await requestJson(portOf(server), "/api/account/service", "{}", guestCookies)).body))
+      .toMatchObject({ view: { identity: "guest", phase: "SETTLED", revision: 29 } });
+    const beforeGuest = (await admin.query<{ credentials: string; links: string; challenges: string; intents: string }>(`SELECT
+      (SELECT count(*)::text FROM samurai_persistence.wallet_credentials) credentials,
+      (SELECT count(*)::text FROM samurai_persistence.wallet_runtime_links) links,
+      (SELECT count(*)::text FROM samurai_persistence.wallet_link_challenges) challenges,
+      (SELECT count(*)::text FROM samurai_persistence.receipt_intents) intents`)).rows[0]!;
+    const guestSyncBody = JSON.stringify({ idempotencyKey: randomUUID(), runtimeGeneration: 1, sessionRevision: 0,
+      runtime: { providerId: "deterministic-wallet", chainId: "NetXtJqPyJGB6Pc", account: wallet.account,
+        permissionScopes: ["account"] } });
+    const guestSync = await requestJson(portOf(server), "/api/account/wallet/runtime/sync", guestSyncBody, guestCookies);
+    expect(guestSync.status, guestSync.body).toBe(200);
+    expect(JSON.parse(guestSync.body)).toEqual({ schemaVersion: 1, accessScope: "DISPLAY_ONLY",
+      state: "ACCOUNT_PROOF_UNAVAILABLE", providerId: "deterministic-wallet", chainId: "NetXtJqPyJGB6Pc",
+      account: wallet.account, permissionScopes: ["account"], credentialMatch: false, reason: "ACCOUNT_PROOF_UNAVAILABLE",
+      presentation: expect.objectContaining({ ref: "wallet.access.account-proof-unavailable" }) });
+    expect(guestSync.body).not.toMatch(/walletLinkRef|runtimeGeneration|sessionRevision|guestId|playerId|credentialId|challengeId/);
+    const malformedPrepare = await requestJson(portOf(server), "/api/account/receipt/review/prepare",
+      JSON.stringify({ idempotencyKey: randomUUID() }), guestCookies);
+    expect(malformedPrepare.status).toBe(400);
+    const afterGuest = (await admin.query<{ credentials: string; links: string; challenges: string; intents: string }>(`SELECT
+      (SELECT count(*)::text FROM samurai_persistence.wallet_credentials) credentials,
+      (SELECT count(*)::text FROM samurai_persistence.wallet_runtime_links) links,
+      (SELECT count(*)::text FROM samurai_persistence.wallet_link_challenges) challenges,
+      (SELECT count(*)::text FROM samurai_persistence.receipt_intents) intents`)).rows[0]!;
+    expect(afterGuest).toEqual(beforeGuest);
+
+    const intent = { claimId: randomUUID(), createPlayer: true, guestRevision: 29, idempotencyKey: randomUUID(),
+      contentVersion: compiledFirstEveningService.contentVersion, cosmeticSelections: {} } as const;
+    const challengeResponse = await requestJson(portOf(server), "/api/account/claim/challenge",
+      JSON.stringify({ intent, account: wallet.account }), guestCookies);
+    expect(challengeResponse.status, challengeResponse.body).toBe(200);
+    const challenge = challengeBody(challengeResponse); const proof = { challenge: challenge.challenge,
+      publicKey: wallet.publicKey, signature: wallet.sign(challenge.challenge) };
+    const claimed = await requestJson(portOf(server), "/api/account/claim",
+      JSON.stringify({ intent, challengeId: challenge.challengeId, proof }), guestCookies);
+    expect(claimed.status, claimed.body).toBe(200);
+    const claimPayload = JSON.parse(claimed.body) as { readonly playerId: string; readonly claimId: string;
+      readonly sessionId: string; readonly deliveryGeneration: number };
+    const coordinates = { playerId: claimPayload.playerId, claimId: claimPayload.claimId,
+      sessionId: claimPayload.sessionId, deliveryGeneration: claimPayload.deliveryGeneration };
+    const playerCookie = `__Host-samurai-player=${cookieValue(claimed.rawHeaders, "__Host-samurai-player")}`;
+    expect((await requestJson(portOf(server), "/api/account/claim/delivery", JSON.stringify(coordinates), playerCookie)).status).toBe(200);
+    const revokedAt = (await admin.query<{ now: Date }>("SELECT clock_timestamp() AS now")).rows[0]!.now;
+    expect((await admin.query(`UPDATE samurai_persistence.wallet_credentials SET state='revoked',
+      credential_revision=credential_revision+1,updated_at=$3,revoked_at=$3
+      WHERE player_id=$1 AND chain_id='NetXtJqPyJGB6Pc' AND account=$2 AND state='active'`,
+    [coordinates.playerId, wallet.account, revokedAt])).rowCount).toBe(1);
+    const playerSync = await requestJson(portOf(server), "/api/account/wallet/runtime/sync", JSON.stringify({
+      idempotencyKey: randomUUID(), runtimeGeneration: 2, sessionRevision: 0,
+      runtime: { providerId: "deterministic-wallet", chainId: "NetXtJqPyJGB6Pc", account: wallet.account,
+        permissionScopes: ["account"] },
+    }), playerCookie);
+    expect(playerSync.status, playerSync.body).toBe(200);
+    expect(JSON.parse(playerSync.body)).toMatchObject({ state: "ACCOUNT_PROOF_UNAVAILABLE", credentialMatch: false,
+      reason: "ACCOUNT_PROOF_UNAVAILABLE", walletLinkRef: expect.stringMatching(/^wl_[A-Za-z0-9_-]{22}$/),
+      runtimeGeneration: 2, sessionRevision: 1, presentation: { ref: "wallet.access.account-proof-unavailable" } });
+    expect((await admin.query<{ activeCredentials: string; links: string; challenges: string; intents: string }>(`SELECT
+      (SELECT count(*)::text FROM samurai_persistence.wallet_credentials
+        WHERE player_id=$1 AND chain_id='NetXtJqPyJGB6Pc' AND account=$2 AND state='active') AS "activeCredentials",
+      (SELECT count(*)::text FROM samurai_persistence.wallet_runtime_links WHERE player_id=$1) AS links,
+      (SELECT count(*)::text FROM samurai_persistence.wallet_link_challenges WHERE player_id=$1) AS challenges,
+      (SELECT count(*)::text FROM samurai_persistence.receipt_intents WHERE subject_kind='player' AND subject_id=$1) AS intents`,
+    [coordinates.playerId, wallet.account])).rows[0]).toEqual({ activeCredentials: "0", links: "1", challenges: "0", intents: "0" });
+  });
+
   it("keeps guest capability recovery cookie-only and converges rotation/delete response-loss retries", async () => {
     const issued = await requestIssue(portOf(server));
     const originalGuest = cookieValue(issued.rawHeaders, "__Host-samurai-guest");
