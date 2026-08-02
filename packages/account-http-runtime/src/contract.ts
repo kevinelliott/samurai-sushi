@@ -17,6 +17,13 @@ export const ACCOUNT_HTTP_ROUTES = Object.freeze([
   ["deletion.submit", "/api/account/player/deletion"],
   ["service.query", "/api/account/service"],
   ["service.command", "/api/account/service/command"],
+  ["receipt.review.prepare", "/api/account/receipt/review/prepare"],
+  ["receipt.review.restore", "/api/account/receipt/review/restore"],
+  ["wallet.runtime.sync", "/api/account/wallet/runtime/sync"],
+  ["wallet.link.challenge", "/api/account/wallet/link/challenge"],
+  ["wallet.link.proof", "/api/account/wallet/link/proof"],
+  ["wallet.link.disconnect", "/api/account/wallet/link/disconnect"],
+  ["receipt.review.preflight", "/api/account/receipt/review/preflight"],
 ] as const);
 
 export type AccountRouteId = typeof ACCOUNT_HTTP_ROUTES[number][0];
@@ -33,4 +40,7 @@ export const PUBLIC_HTTP_FAILURES = Object.freeze({
   serviceCredentialRefreshed: Object.freeze({ status: 428, body: Object.freeze({ code: "SERVICE_CREDENTIAL_REFRESHED", message: "Service access was refreshed. Requery the saved service." }) }),
   service: Object.freeze({ status: 409, body: Object.freeze({ code: "SERVICE_REQUEST_REJECTED", message: "The saved service could not be updated." }) }),
   runtime: Object.freeze({ status: 503, body: Object.freeze({ code: "SERVICE_UNAVAILABLE", message: "The account service is unavailable." }) }),
+  wallet: Object.freeze({ status: 409, body: Object.freeze({ code: "WALLET_ACCESS_REJECTED", message: "Wallet access could not be accepted." }) }),
+  review: Object.freeze({ status: 409, body: Object.freeze({ code: "RECEIPT_REVIEW_REJECTED", message: "The optional receipt review could not be prepared." }) }),
+  notFound: Object.freeze({ status: 404, body: Object.freeze({ code: "NOT_FOUND", message: "The requested review state is unavailable." }) }),
 } as const);

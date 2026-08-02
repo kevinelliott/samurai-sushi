@@ -60,6 +60,12 @@ importers:
       '@samurai-sushi/network':
         specifier: workspace:*
         version: link:../../packages/network
+      '@samurai-sushi/receipt-lifecycle':
+        specifier: workspace:*
+        version: link:../../packages/receipt-lifecycle
+      '@samurai-sushi/wallet-link':
+        specifier: workspace:*
+        version: link:../../packages/wallet-link
       next:
         specifier: 16.2.12
         version: 16.2.12(@playwright/test@1.62.1)(@types/node@24.3.0)(react-dom@19.2.8(react@19.2.8))(react@19.2.8)
@@ -88,6 +94,12 @@ importers:
 
   packages/account-http-runtime:
     dependencies:
+      '@noble/curves':
+        specifier: 1.9.7
+        version: 1.9.7
+      '@noble/hashes':
+        specifier: 1.8.0
+        version: 1.8.0
       '@samurai-sushi/account-proof-verifier':
         specifier: workspace:*
         version: link:../account-proof-verifier
@@ -100,6 +112,12 @@ importers:
       '@samurai-sushi/persistence':
         specifier: workspace:*
         version: link:../persistence
+      '@samurai-sushi/receipt-authority':
+        specifier: workspace:*
+        version: link:../receipt-authority
+      '@taquito/utils':
+        specifier: 25.0.0
+        version: 25.0.0
       next:
         specifier: 16.2.12
         version: 16.2.12(@playwright/test@1.62.1)(@types/node@24.3.0)(react-dom@19.2.8(react@19.2.8))(react@19.2.8)
@@ -107,12 +125,6 @@ importers:
         specifier: 8.16.3
         version: 8.16.3
     devDependencies:
-      '@noble/hashes':
-        specifier: 1.8.0
-        version: 1.8.0
-      '@taquito/utils':
-        specifier: 25.0.0
-        version: 25.0.0
       '@types/node':
         specifier: 24.3.0
         version: 24.3.0
@@ -128,6 +140,9 @@ importers:
       '@samurai-sushi/domain':
         specifier: workspace:*
         version: link:../domain
+      '@samurai-sushi/wallet-link':
+        specifier: workspace:*
+        version: link:../wallet-link
       '@taquito/utils':
         specifier: 25.0.0
         version: 25.0.0
@@ -156,6 +171,9 @@ importers:
       '@samurai-sushi/receipt-lifecycle':
         specifier: workspace:*
         version: link:../receipt-lifecycle
+      '@samurai-sushi/wallet-link':
+        specifier: workspace:*
+        version: link:../wallet-link
       pg:
         specifier: 8.16.3
         version: 8.16.3
@@ -187,6 +205,12 @@ importers:
         version: 1.9.7
 
   packages/receipt-lifecycle: {}
+
+  packages/wallet-link:
+    dependencies:
+      '@samurai-sushi/domain':
+        specifier: workspace:*
+        version: link:../domain
 
 packages:
 

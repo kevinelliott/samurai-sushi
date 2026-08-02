@@ -16,6 +16,7 @@
   "dependencies": {
     "@noble/curves": "1.9.7",
     "@samurai-sushi/domain": "workspace:*",
+    "@samurai-sushi/wallet-link": "workspace:*",
     "@taquito/utils": "25.0.0"
   }
 }

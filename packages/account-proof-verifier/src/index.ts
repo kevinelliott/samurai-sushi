@@ -14,6 +14,11 @@ import {
   walletSigningBytes,
   type ClaimChallengeV1,
 } from "@samurai-sushi/domain/claim-protocol";
+import {
+  parseWalletLinkChallenge,
+  walletLinkSigningBytes,
+  type WalletLinkChallengeV1,
+} from "@samurai-sushi/wallet-link";
 
 const MAX_BASE58_TEXT = 192;
 const ED25519_ORDER = 0x1000000000000000000000000000000014def9dea2f79cd65812631a5cf5d3edn;
@@ -206,14 +211,18 @@ function validatePoints(scheme: TezosAccountScheme, publicKey: Uint8Array, signa
   }
 }
 
-function schemeFor(challenge: ClaimChallengeV1): Scheme {
+function schemeFor(challenge: Pick<ClaimChallengeV1, "account"> | Pick<WalletLinkChallengeV1, "account">): Scheme {
   const name = challenge.account.slice(0, 3) as TezosAccountScheme;
   return SCHEMES[name] ?? invalid();
 }
 
-function verify(input: unknown): VerifiedAccountProof {
+function verifyParsed(
+  input: unknown,
+  parse: (value: unknown) => Pick<ClaimChallengeV1, "account" | "chainId"> | Pick<WalletLinkChallengeV1, "account" | "chainId">,
+  signingBytes: (value: unknown) => Uint8Array,
+): VerifiedAccountProof {
   const raw = proofInput(input);
-  const challenge = parseClaimChallenge(raw.challenge);
+  const challenge = parse(raw.challenge);
   const scheme = schemeFor(challenge);
 
   canonicalBase58(challenge.chainId, PrefixV2.ChainID, 4);
@@ -225,7 +234,7 @@ function verify(input: unknown): VerifiedAccountProof {
   validatePoints(scheme.name, publicKeyBytes, signatureBytes);
 
   if (getPkhfromPk(publicKey) !== challenge.account) invalid();
-  if (!verifySignature(walletSigningBytes(challenge), publicKey, signature, undefined, false)) invalid();
+  if (!verifySignature(signingBytes(challenge), publicKey, signature, undefined, false)) invalid();
 
   return Object.freeze({ account: challenge.account, publicKey, scheme: scheme.name });
 }
@@ -236,7 +245,16 @@ function verify(input: unknown): VerifiedAccountProof {
  */
 export function verifyAccountProof(input: unknown): VerifiedAccountProof {
   try {
-    return verify(input);
+    return verifyParsed(input, parseClaimChallenge, walletSigningBytes);
+  } catch {
+    throw new AccountProofError();
+  }
+}
+
+/** Purpose-specific Phase 2C proof verification. PostgreSQL owns freshness and one-time consumption. */
+export function verifyWalletLinkProof(input: unknown): VerifiedAccountProof {
+  try {
+    return verifyParsed(input, parseWalletLinkChallenge, walletLinkSigningBytes);
   } catch {
     throw new AccountProofError();
   }

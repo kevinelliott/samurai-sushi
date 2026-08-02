@@ -6,6 +6,11 @@ export const SERVICE_QUERY_PATH = "/api/account/service";
 export const SERVICE_COMMAND_PATH = "/api/account/service/command";
 export const COOKIE_RESET_PATH = "/api/account/cookies/reset";
 export const GUEST_ISSUE_PATH = "/api/account/guest/issue";
+export const RECEIPT_REVIEW_PREPARE_PATH = "/api/account/receipt/review/prepare";
+export const RECEIPT_REVIEW_RESTORE_PATH = "/api/account/receipt/review/restore";
+export const RECEIPT_REVIEW_PREFLIGHT_PATH = "/api/account/receipt/review/preflight";
+export const WALLET_RUNTIME_SYNC_PATH = "/api/account/wallet/runtime/sync";
+export const WALLET_RUNTIME_DISCONNECT_PATH = "/api/account/wallet/link/disconnect";
 const SERVICE_AUTHORITY_REJECTION = Object.freeze({
   code: "SERVICE_AUTHORITY_REJECTED",
   message: "Service access could not be authenticated.",
@@ -391,6 +396,8 @@ export function createIntentEnvelope(view: ServiceView, choice: ViewChoice): Int
 }
 
 export async function postJson(path: string, canonicalBody: string, signal?: AbortSignal): Promise<Response> {
-  if (![SERVICE_QUERY_PATH, SERVICE_COMMAND_PATH, COOKIE_RESET_PATH, GUEST_ISSUE_PATH].includes(path) || !path.startsWith("/")) throw new Error("Request path unavailable.");
+  if (![SERVICE_QUERY_PATH, SERVICE_COMMAND_PATH, COOKIE_RESET_PATH, GUEST_ISSUE_PATH, RECEIPT_REVIEW_PREPARE_PATH,
+    RECEIPT_REVIEW_RESTORE_PATH, RECEIPT_REVIEW_PREFLIGHT_PATH, WALLET_RUNTIME_SYNC_PATH,
+    WALLET_RUNTIME_DISCONNECT_PATH].includes(path) || !path.startsWith("/")) throw new Error("Request path unavailable.");
   return fetch(path, { method: "POST", credentials: "same-origin", cache: "no-store", redirect: "error", headers: { "Content-Type": "application/json" }, body: canonicalBody, signal: signal ?? null });
 }

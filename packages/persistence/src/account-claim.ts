@@ -432,6 +432,7 @@ export interface AuthenticatedPlayerSession {
 export interface LockedPlayerServiceSubject {
   readonly playerId: string;
   readonly sessionId: string;
+  readonly deliveryGeneration: number;
   readonly credentialKind: "current" | "predecessor";
   readonly now: Date;
 }
@@ -1048,6 +1049,7 @@ export class AccountClaimService {
     return {
       playerId: session.player_id,
       sessionId: session.id,
+      deliveryGeneration: Number(session.delivery_generation),
       credentialKind: digest.slot,
       now,
     };

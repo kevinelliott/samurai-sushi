@@ -15,6 +15,8 @@ import {
   type EveningServiceCheckpoint,
 } from "../../packages/domain/src/evening-service";
 import { FIRST_SERVICE_BROWSER_INVENTORY } from "../../apps/web/app/service-browser-inventory.generated";
+import { WALLET_REVIEW_COPY } from "../../packages/wallet-link/src/presentation";
+import { GENERATED_REGISTERED_RECEIPT_NETWORK_INVENTORY, RECEIPT_STATUS_PRESENTATION } from "../../packages/receipt-lifecycle/src/review-projection";
 
 const subject = { kind: "guest", guestSessionId: "browser-fixture-guest-0001" } as const;
 type PublicCommand = { readonly idempotencyKey: string; readonly expectedRevision: number; readonly commandName: string; readonly payload: Readonly<Record<string, unknown>> };
@@ -46,7 +48,26 @@ interface RouteFixture {
   readonly checkpoint: () => EveningServiceCheckpoint;
 }
 
-function serviceFixture(initial = createInitialEveningServiceCheckpoint()): RouteFixture {
+function reviewedProjection(): Record<string, unknown> {
+  const account = "tz1aSkwEot3L2kmUvcoxzjMomb9mvBNuzFK6";
+  return {
+    schemaVersion: 1, projectionRevision: "1",
+    intent: { intentRef: "ri_AAAAAAAAAAAAAAAAAAAAAA", state: "REVIEWED",
+      createdAt: "2026-08-02T12:00:00.000Z", expiresAt: "2026-08-03T12:15:00.000Z" },
+    status: { displayState: "REVIEWED", ...RECEIPT_STATUS_PRESENTATION.REVIEWED },
+    reviewFacts: { domain: "SAMURAI_SUSHI_RECEIPT_V1", payloadSchemaVersion: 1,
+      network: GENERATED_REGISTERED_RECEIPT_NETWORK_INVENTORY[0], owner: account, source: account,
+      destination: `KT1${"1".repeat(33)}`, entrypoint: "submit_receipt", attachedMutez: "0",
+      serviceCommitment: "11".repeat(32), contentVersion: FIRST_EVENING_CONTENT_VERSION, nonce: "22".repeat(32),
+      issuedAt: "2026-08-02T12:00:00.000Z", expiry: "2026-08-03T12:15:00.000Z",
+      issuerKeyId: "localnet-issuer-v1", issuerPolicyVersion: "localnet-policy-v1",
+      packedPayloadHex: "0501", payloadHash: "33".repeat(32) },
+    policy: { confirmationThreshold: "2", finalityPolicyRef: "localnet-two-confirmation-rehearsal-v1" },
+    activeAttempt: null, canonicalReceipt: null, incident: null,
+  };
+}
+
+function serviceFixture(initial = createInitialEveningServiceCheckpoint(), activeReview = false): RouteFixture {
   let checkpoint = initial;
   let dropNextAfterCommit = false;
   let unavailable = false;
@@ -56,6 +77,8 @@ function serviceFixture(initial = createInitialEveningServiceCheckpoint()): Rout
   let malformedNextQuery = false;
   let conflictNextQuery = false;
   let identity: "guest" | "player" = "guest";
+  let preparedReview: Record<string, unknown> | null = null;
+  let currentWalletAccess: Record<string, unknown> | null = null;
   let heldQuery: { readonly started: () => void; readonly wait: Promise<void>; readonly release: () => void } | null = null;
   let heldCommand: { readonly started: () => void; readonly wait: Promise<void>; readonly release: () => void } | null = null;
   const receipts = new Map<string, { readonly body: string; readonly checkpoint: EveningServiceCheckpoint; readonly cue: string | null }>();
@@ -72,6 +95,43 @@ function serviceFixture(initial = createInitialEveningServiceCheckpoint()): Rout
       identity = "guest";
       authorityRejected = false;
       return json(route, 200, { issued: true });
+    }
+    if (path === "/api/account/receipt/review/restore") return json(route, 200, { schemaVersion: 1, doorway: {
+      schemaVersion: 1, network: { profile: "localnet", chainId: "NetXtJqPyJGB6Pc",
+        networkLabelRef: "network.localnet-rehearsal", label: "Localnet rehearsal" },
+      effect: "This optional review can prepare one non-transferable service receipt for the displayed account. It does not change your saved service, unlock anything, or create a financial asset.",
+      access: "Connecting asks the wallet for account access on the required network. This phase does not request a signature, estimate a fee, call a contract, or send an operation.",
+      actionLabel: "Connect wallet for Localnet rehearsal",
+    }, projection: preparedReview, walletAccess: currentWalletAccess });
+    if (path === "/api/account/wallet/runtime/sync") {
+      const request = JSON.parse(route.request().postData() ?? "{}") as { runtimeGeneration?: number; runtime?: { providerId?: string; chainId?: string; account?: string } };
+      currentWalletAccess = { schemaVersion: 1, walletLinkRef: "wl_AAAAAAAAAAAAAAAAAAAAAA", state: activeReview ? "ACTIVE_CREDENTIAL_MATCH" : "ACCOUNT_PROOF_UNAVAILABLE",
+        runtimeGeneration: request.runtimeGeneration, sessionRevision: 1, providerId: request.runtime?.providerId,
+        chainId: request.runtime?.chainId, account: request.runtime?.account, permissionScopes: ["account"], credentialMatch: activeReview,
+        reason: activeReview ? null : "ACCOUNT_PROOF_UNAVAILABLE", presentation: activeReview
+          ? WALLET_REVIEW_COPY["wallet.access.connected"] : WALLET_REVIEW_COPY["wallet.access.account-proof-unavailable"] };
+      return json(route, 200, currentWalletAccess);
+    }
+    if (activeReview && path === "/api/account/receipt/review/prepare") {
+      preparedReview ??= reviewedProjection();
+      return json(route, 200, { schemaVersion: 1, projection: preparedReview });
+    }
+    if (activeReview && path === "/api/account/receipt/review/preflight") {
+      const request = JSON.parse(route.request().postData() ?? "{}") as Record<string, unknown>;
+      return json(route, 200, { schemaVersion: 1, status: "REVIEW_READY", intentRef: request.publicIntentRef,
+        projectionRevision: request.expectedProjectionRevision, walletLinkRef: request.walletLinkRef,
+        runtimeGeneration: request.runtimeGeneration, sessionRevision: request.sessionRevision,
+        reviewDigest: request.reviewDigest, expiresAt: "2026-08-03T12:15:00.000Z" });
+    }
+    if (activeReview && path === "/api/account/wallet/link/disconnect") {
+      currentWalletAccess = null;
+      return json(route, 200, { schemaVersion: 1, walletLinkRef: "wl_AAAAAAAAAAAAAAAAAAAAAA", state: "DISCONNECTED",
+        runtimeGeneration: 2, sessionRevision: 2, providerId: "deterministic-wallet", chainId: "NetXtJqPyJGB6Pc",
+        account: "tz1aSkwEot3L2kmUvcoxzjMomb9mvBNuzFK6", permissionScopes: ["account"], credentialMatch: false,
+        reason: "DISCONNECTED", presentation: WALLET_REVIEW_COPY["wallet.access.disconnected"] });
+    }
+    if (path.startsWith("/api/account/receipt/review/") || path.startsWith("/api/account/wallet/")) {
+      return json(route, 409, { code: "RECEIPT_REVIEW_REJECTED", message: "The optional receipt review could not be prepared." });
     }
     if (path !== "/api/account/service" && path !== "/api/account/service/command") return route.continue();
     if (unavailable) {
@@ -198,11 +258,22 @@ test("projection-only first service completes with exact commands and one-shot c
   const fixture = serviceFixture();
   await fixture.install(page);
   await interdictPersistence(page);
+  await page.addInitScript(() => {
+    const counters = { permission: 0, read: 0, disconnect: 0, sign: 0, send: 0, inject: 0, broadcast: 0, contract: 0, fee: 0, observe: 0 };
+    Object.defineProperty(window, "__walletTripwires", { configurable: false, value: counters });
+    Object.defineProperty(window, "samuraiLocalnetWallet", { configurable: false, value: {
+      requestPermission: async () => { counters.permission += 1; return { providerId: "deterministic-wallet", chainId: "NetXtJqPyJGB6Pc", account: "tz1aSkwEot3L2kmUvcoxzjMomb9mvBNuzFK6", permissionScopes: ["account"] }; },
+      readRuntime: async () => { counters.read += 1; throw new Error("not requested"); },
+      subscribe: () => () => undefined,
+      disconnect: async () => { counters.disconnect += 1; },
+    } });
+  });
   const diagnostics: string[] = [];
   page.on("console", (message) => diagnostics.push(message.text()));
   page.on("pageerror", (error) => diagnostics.push(error.message));
   await page.goto("/");
   await expect(page.getByRole("heading", { name: "Start the first shift." })).toBeVisible();
+  await expect(page.getByRole("button", { name: /review optional keepsake/i })).toHaveCount(0);
 
   const replay = compiledFirstEveningService.goldenReplay.slice(1) as readonly { readonly command: PublicCommand; readonly response: { readonly checkpoint: EveningServiceCheckpoint } }[];
   for (const [index, item] of replay.entries()) {
@@ -229,11 +300,76 @@ test("projection-only first service completes with exact commands and one-shot c
   }
   await expect(page.getByText("Service settled", { exact: true })).toBeVisible();
   await expect(page.getByText("Saved cosmetic restoration", { exact: true })).toBeVisible();
-  await expect(page.getByRole("button", { name: /wallet/i })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Review optional keepsake" })).toBeVisible();
+  expect(await page.evaluate(() => (window as unknown as { __walletTripwires: { permission: number } }).__walletTripwires.permission)).toBe(0);
+  await page.getByRole("button", { name: "Review optional keepsake" }).click();
+  await expect(page.getByRole("heading", { name: "Review optional service keepsake" })).toBeFocused();
+  await expect(page.getByRole("button", { name: "Connect wallet for Localnet rehearsal" })).toBeVisible();
+  expect(await page.evaluate(() => (window as unknown as { __walletTripwires: { permission: number } }).__walletTripwires.permission)).toBe(0);
+  await page.getByRole("button", { name: "Connect wallet for Localnet rehearsal" }).click();
+  await expect(page.getByRole("heading", { name: "Verified account proof unavailable" })).toBeFocused();
+  const tripwires = await page.evaluate(() => (window as unknown as { __walletTripwires: Record<string, number> }).__walletTripwires);
+  expect(tripwires).toEqual({ permission: 1, read: 0, disconnect: 0, sign: 0, send: 0, inject: 0, broadcast: 0, contract: 0, fee: 0, observe: 0 });
+  expect(fixture.requests.filter((path) => path === "/api/account/receipt/review/prepare")).toEqual([]);
   expect(new Set(fixture.bodies.map((body) => JSON.parse(body).idempotencyKey)).size).toBe(29);
   const renderedText = await page.locator("body").innerText();
   for (const body of fixture.bodies) expect(renderedText).not.toContain((JSON.parse(body) as PublicCommand).idempotencyKey);
   expect(diagnostics.join("\n")).not.toMatch(/hostile|cookie|subject|checkpoint|signature|proof|database|digest|hmac/iu);
+});
+
+test("settled optional review keeps gameplay primary and renders exact access and review stages", async ({ page }, testInfo) => {
+  const settled = (compiledFirstEveningService.goldenReplay.at(-1) as {
+    readonly response: { readonly checkpoint: EveningServiceCheckpoint } }).response.checkpoint;
+  const fixture = serviceFixture(settled, true);
+  await fixture.install(page);
+  await page.addInitScript(() => {
+    const runtime = { providerId: "deterministic-wallet", chainId: "NetXtJqPyJGB6Pc",
+      account: "tz1aSkwEot3L2kmUvcoxzjMomb9mvBNuzFK6", permissionScopes: ["account"] };
+    const counters = { permission: 0, read: 0, disconnect: 0, sign: 0, send: 0, inject: 0, broadcast: 0, contract: 0, fee: 0, observe: 0 };
+    Object.defineProperty(window, "__walletTripwires", { configurable: false, value: counters });
+    Object.defineProperty(window, "samuraiLocalnetWallet", { configurable: false, value: {
+      requestPermission: async () => { counters.permission += 1; return runtime; },
+      readRuntime: async () => { counters.read += 1; return runtime; },
+      subscribe: () => () => undefined,
+      disconnect: async () => { counters.disconnect += 1; },
+    } });
+  });
+  await page.goto("/");
+  await expect(page.getByRole("button", { name: "Keep playing" })).toHaveClass(/primary-action/);
+  const invoker = page.getByRole("button", { name: "Review optional keepsake" });
+  await invoker.click();
+  await expect(page.getByRole("heading", { name: "Review optional service keepsake" })).toBeFocused();
+  await expect(page.getByText("Localnet rehearsal · non-production · no real value", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Connect wallet for Localnet rehearsal" })).toBeVisible();
+  const dimensions = await page.evaluate(() => ({ viewport: innerWidth, body: document.body.scrollWidth,
+    dialog: document.querySelector("dialog")?.scrollWidth ?? 0, dialogClient: document.querySelector("dialog")?.clientWidth ?? 0 }));
+  expect(dimensions.body).toBeLessThanOrEqual(dimensions.viewport);
+  expect(dimensions.dialog).toBeLessThanOrEqual(dimensions.dialogClient);
+  await page.screenshot({ path: `.scratch/phase2c-review/access-${testInfo.project.name}.png`, fullPage: false });
+  await page.getByRole("button", { name: "Connect wallet for Localnet rehearsal" }).click();
+  await expect(page.getByRole("heading", { name: "Wallet connected for review" })).toBeFocused();
+  await expect(page.getByText("Nothing has been sent.", { exact: false })).toBeVisible();
+  await expect(page.getByText("Exact active credential match", { exact: true })).toBeVisible();
+  await expect(page.getByText("0 mutez attached", { exact: true })).toBeVisible();
+  await expect(page.getByText("Not estimated in this phase.", { exact: false })).toBeVisible();
+  await page.screenshot({ path: `.scratch/phase2c-review/review-${testInfo.project.name}.png`, fullPage: false });
+  await page.getByRole("button", { name: "Check review readiness" }).click();
+  await expect(page.getByRole("heading", { name: "Review ready" })).toBeFocused();
+  await expect(page.getByText("Exact current facts match.", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: /sign|send|submit|continue/i })).toHaveCount(0);
+  const tripwires = await page.evaluate(() => (window as unknown as { __walletTripwires: Record<string, number> }).__walletTripwires);
+  expect(tripwires).toEqual({ permission: 1, read: 1, disconnect: 0, sign: 0, send: 0, inject: 0, broadcast: 0, contract: 0, fee: 0, observe: 0 });
+  await page.getByRole("button", { name: "Close review" }).first().click();
+  await expect(invoker).toBeFocused();
+  expect(fixture.requests.filter((path) => path === "/api/account/receipt/review/prepare")).toHaveLength(1);
+  expect(fixture.requests.filter((path) => path === "/api/account/receipt/review/preflight")).toHaveLength(1);
+  await page.reload();
+  await page.getByRole("button", { name: "Review optional keepsake" }).click();
+  await expect(page.getByText("Wallet disconnected. The receipt details remain read-only.", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Reconnect matching wallet" }).click();
+  await expect(page.getByRole("heading", { name: "Wallet connected for review" })).toBeFocused();
+  await expect(page.getByText("Exact active credential match", { exact: true })).toBeVisible();
+  expect(fixture.requests.filter((path) => path === "/api/account/wallet/link/disconnect")).toHaveLength(1);
 });
 
 test("lost response requeries then retries the byte-identical envelope without ceremony duplication", async ({ page }, testInfo) => {

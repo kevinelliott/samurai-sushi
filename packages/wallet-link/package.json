@@ -1,0 +1,16 @@
+{
+  "name": "@samurai-sushi/wallet-link",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "test": "vitest run --root ../.. packages/wallet-link/src",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@samurai-sushi/domain": "workspace:*"
+  }
+}

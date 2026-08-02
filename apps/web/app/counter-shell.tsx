@@ -17,6 +17,7 @@ import {
   type ViewChoice,
   type ViewLedgerRow,
 } from "./service-browser";
+import { ReceiptReviewDoorway } from "./receipt-review";
 
 type TransportPhase = "loading" | "ready" | "sending" | "outcome-unknown" | "requerying" | "unavailable" | "authority";
 type FocusTarget = "preserve" | "task" | "choice" | "feedback";
@@ -413,6 +414,7 @@ export function CounterShell() {
             {view?.ledgerRows.length === 0 ? <p>No served order has entered the ledger yet.</p> : null}
           </div>
           {view?.restoration ? <div className="restoration-proof"><PixelAsset asset={view.restoration} scale={1} /><span>Saved cosmetic restoration</span></div> : null}
+          {view?.phase === "SETTLED" ? <ReceiptReviewDoorway /> : null}
           <details className="runtime-disclosure"><summary>Service evidence</summary><p>Same-origin, no-store requests. Runtime details remain server-side.</p></details>
           <div className="truth-strip"><span>Review-pending content</span><strong>Provisional role labels</strong><small>No cultural or public-release approval is claimed.</small></div>
         </aside>
