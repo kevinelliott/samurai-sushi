@@ -108,6 +108,26 @@ describe("account HTTP boundary", () => {
     expect(setCookie).toContain(`${ACCOUNT_COOKIE_NAMES.claim}=${claimSecret}; Path=/; Secure; HttpOnly; SameSite=Strict`);
   });
 
+  it("derives the browser first-service checkpoint server-side and publishes no gameplay authority", async () => {
+    const issue = vi.fn(services().guests.issue.bind(services().guests));
+    const result = await handleAccountHttpRequest("guest.issue", request("guest.issue", JSON.stringify({
+      consentVersion: "first-service-browser-v1",
+    })), services({ guests: { issue } }), config);
+    expect(result.status).toBe(200);
+    expect(await result.json()).toEqual({ issued: true });
+    expect(issue).toHaveBeenCalledWith(expect.objectContaining({
+      consentVersion: "first-service-browser-v1",
+      contentVersion: "phase-1-evening-service-v1",
+      checkpointSchemaVersion: 1,
+      checkpoint: expect.objectContaining({ phase: "IDLE", revision: 0 }),
+    }));
+
+    const rejected = await handleAccountHttpRequest("guest.issue", request("guest.issue", JSON.stringify({
+      consentVersion: "unreviewed-browser-contract",
+    })), services(), config);
+    expect(rejected.status).toBe(400);
+  });
+
   it("injects the HttpOnly capability and rejects a client-supplied commitment", async () => {
     const issue = vi.fn(async () => ({ challengeId: randomUUID(), challenge: {} }));
     const runtime = services({ accounts: { issueClaimChallenge: issue } });
@@ -250,9 +270,9 @@ describe("account HTTP boundary", () => {
     expect(guest.status).toBe(200);
     expect(execute).toHaveBeenCalledWith({ kind: "guest", resumeSecret: guestSecret }, expect.objectContaining({ commandName: "service.start" }));
     const published = await guest.text();
-    expect(published).toContain('"currentPromptId":"prompt.service.start"');
+    expect(published).toContain('"prompt":{"ref":"prompt.service.start"');
     expect(published).toContain('"disposition":"committed"');
-    expect(published).not.toMatch(new RegExp(`${guestSecret}|${claimSecret}|guestId|playerId|subjectKind|resultHash`));
+    expect(published).not.toMatch(new RegExp(`${guestSecret}|${claimSecret}|guestId|playerId|subjectKind|resultHash|checkpoint|contentManifestHash|artAssetMapHash`));
 
     const playerRuntime = services();
     const player = await handleAccountHttpRequest("service.query",

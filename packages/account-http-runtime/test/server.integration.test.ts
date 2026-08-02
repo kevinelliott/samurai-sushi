@@ -89,6 +89,30 @@ async function requestJson(
   });
 }
 
+async function requestAndDropAfterCommit(
+  port: number,
+  path: string,
+  body: string,
+  cookie: string,
+): Promise<void> {
+  return new Promise((resolveRequest, reject) => {
+    const request = httpRequest({
+      host: "127.0.0.1", port, path, method: "POST", headers: {
+        Host: canonicalHost, Origin: canonicalOrigin, Cookie: cookie,
+        "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body),
+      },
+    }, (response) => {
+      response.once("data", () => {
+        response.destroy();
+        resolveRequest();
+      });
+      response.once("error", () => resolveRequest());
+    });
+    request.once("error", reject);
+    request.end(body);
+  });
+}
+
 function setCookies(rawHeaders: readonly string[]): readonly string[] {
   const result: string[] = [];
   for (let index = 0; index < rawHeaders.length; index += 2) {
@@ -271,26 +295,38 @@ describe("built account HTTP boundary", () => {
 
   it("drives signed claim, exact delivery, lost-response recovery, and wallet deletion through production Next and PostgreSQL", async () => {
     const wallet = testWallet();
-    const issued = await requestIssue(portOf(server));
+    const issued = await requestJson(portOf(server), "/api/account/guest/issue", JSON.stringify({ consentVersion: "first-service-browser-v1" }));
     const guest = cookieValue(issued.rawHeaders, "__Host-samurai-guest");
     const capability = cookieValue(issued.rawHeaders, "__Host-samurai-guest-claim");
     const guestCookies = cookiePair(guest, capability);
     const initialService = await requestJson(portOf(server), "/api/account/service", "{}", guestCookies);
     expect(initialService.status, initialService.body).toBe(200);
-    expect(JSON.parse(initialService.body)).toMatchObject({ disposition: "query", checkpoint: { phase: "IDLE", revision: 0 } });
-    let guestServiceBody = "";
-    for (const entry of compiledFirstEveningService.goldenReplay.slice(1, 3)) {
+    expect(JSON.parse(initialService.body)).toMatchObject({ view: { disposition: "query", phase: "IDLE", revision: 0 } });
+    const firstEntry = compiledFirstEveningService.goldenReplay[1] as { readonly command: { readonly idempotencyKey: string;
+      readonly expectedRevision: number; readonly commandName: string; readonly payload: object } };
+    const droppedServiceBody = JSON.stringify({ idempotencyKey: firstEntry.command.idempotencyKey,
+      expectedRevision: firstEntry.command.expectedRevision, commandName: firstEntry.command.commandName,
+      payload: firstEntry.command.payload });
+    await requestAndDropAfterCommit(portOf(server), "/api/account/service/command", droppedServiceBody, guestCookies);
+    const afterDroppedCommand = await requestJson(portOf(server), "/api/account/service", "{}", guestCookies);
+    expect(JSON.parse(afterDroppedCommand.body)).toMatchObject({ view: { disposition: "query", revision: 1,
+      prompt: { ref: "prompt.rice.wash" } } });
+    const recoveredService = await requestJson(portOf(server), "/api/account/service/command", droppedServiceBody, guestCookies);
+    expect(JSON.parse(recoveredService.body)).toMatchObject({ view: { disposition: "replayed", revision: 1,
+      announceCeremony: false } });
+
+    for (const entry of compiledFirstEveningService.goldenReplay.slice(2, 3)) {
       const command = (entry as { readonly command: { readonly idempotencyKey: string; readonly expectedRevision: number;
         readonly commandName: string; readonly payload: object } }).command;
-      guestServiceBody = JSON.stringify({ idempotencyKey: command.idempotencyKey, expectedRevision: command.expectedRevision,
+      const guestServiceBody = JSON.stringify({ idempotencyKey: command.idempotencyKey, expectedRevision: command.expectedRevision,
         commandName: command.commandName, payload: command.payload });
       const serviceCommand = await requestJson(portOf(server), "/api/account/service/command", guestServiceBody, guestCookies);
       expect(serviceCommand.status, serviceCommand.body).toBe(200);
       expect(serviceCommand.body).not.toMatch(/guestId|playerId|subjectKind|resumeSecret|sessionSecret/);
     }
     const beforeClaimService = await requestJson(portOf(server), "/api/account/service", "{}", guestCookies);
-    const beforeClaimCheckpoint = (JSON.parse(beforeClaimService.body) as { readonly checkpoint: unknown }).checkpoint;
-    expect(beforeClaimCheckpoint).toMatchObject({ phase: "OPEN", revision: 2, riceBeatIndex: 1 });
+    const beforeClaimView = (JSON.parse(beforeClaimService.body) as { readonly view: Record<string, unknown> }).view;
+    expect(beforeClaimView).toMatchObject({ phase: "OPEN", revision: 2, prompt: { ref: "prompt.rice.steam" } });
     const intent = {
       claimId: randomUUID(), createPlayer: true, guestRevision: 2, idempotencyKey: randomUUID(),
       contentVersion: compiledFirstEveningService.contentVersion, cosmeticSelections: {},
@@ -329,7 +365,11 @@ describe("built account HTTP boundary", () => {
     expect((await requestJson(portOf(server), "/api/account/player/session", "{}", playerCookie)).status).toBe(200);
     const afterClaimService = await requestJson(portOf(server), "/api/account/service", "{}", playerCookie);
     expect(afterClaimService.status, afterClaimService.body).toBe(200);
-    expect((JSON.parse(afterClaimService.body) as { readonly checkpoint: unknown }).checkpoint).toEqual(beforeClaimCheckpoint);
+    const afterClaimView = (JSON.parse(afterClaimService.body) as { readonly view: Record<string, unknown> }).view;
+    const { identity: _beforeIdentity, identityLabel: _beforeLabel, ...beforeProjection } = beforeClaimView;
+    const { identity: afterIdentity, identityLabel: afterLabel, ...afterProjection } = afterClaimView;
+    expect({ afterIdentity, afterLabel }).toEqual({ afterIdentity: "player", afterLabel: "Saved play · no wallet" });
+    expect(afterProjection).toEqual(beforeProjection);
     let finalCommandBody = "";
     for (const entry of compiledFirstEveningService.goldenReplay.slice(3)) {
       const command = (entry as { readonly command: { readonly idempotencyKey: string; readonly expectedRevision: number;
@@ -338,12 +378,12 @@ describe("built account HTTP boundary", () => {
         commandName: command.commandName, payload: command.payload });
       const serviceCommand = await requestJson(portOf(server), "/api/account/service/command", finalCommandBody, playerCookie);
       expect(serviceCommand.status, `${command.commandName}: ${serviceCommand.body}`).toBe(200);
-      expect(JSON.parse(serviceCommand.body)).toMatchObject({ disposition: "committed", accepted: true });
+      expect(JSON.parse(serviceCommand.body)).toMatchObject({ view: { disposition: "committed" } });
     }
     const settledService = await requestJson(portOf(server), "/api/account/service", "{}", playerCookie);
-    expect(JSON.parse(settledService.body)).toMatchObject({ checkpoint: {
-      phase: "SETTLED", unlocks: ["atlantic-salmon-sashimi@1"], revision: 29,
-    }, projection: { disposition: "query", ledgerRows: [{ orderId: "ceramicist-kappa" },
+    expect(JSON.parse(settledService.body)).toMatchObject({ view: {
+      phase: "SETTLED", unlock: { key: "dish-salmon-sashimi" }, revision: 29,
+      disposition: "query", ledgerRows: [{ orderId: "ceramicist-kappa" },
       { orderId: "fishmonger-tamago" }, { orderId: "courier-salmon" }] } });
     const serviceMatrixBeforeReplay = (await admin.query<{ events: string; outbox: string; receipts: string }>(`SELECT
       (SELECT count(*)::text FROM samurai_persistence.domain_events WHERE player_id=$1 AND event_type LIKE 'service.%') AS events,
@@ -353,9 +393,8 @@ describe("built account HTTP boundary", () => {
     [claimPayload.playerId])).rows[0]!;
     expect(serviceMatrixBeforeReplay).toEqual({ events: "29", outbox: "29", receipts: "29" });
     const exactSettlementReplay = await requestJson(portOf(server), "/api/account/service/command", finalCommandBody, playerCookie);
-    expect(JSON.parse(exactSettlementReplay.body)).toMatchObject({ disposition: "replayed", accepted: true,
-      checkpoint: { phase: "SETTLED", unlocks: ["atlantic-salmon-sashimi@1"] },
-      projection: { announceCeremony: false } });
+    expect(JSON.parse(exactSettlementReplay.body)).toMatchObject({ view: { disposition: "replayed",
+      phase: "SETTLED", unlock: { key: "dish-salmon-sashimi" }, announceCeremony: false } });
     const serviceMatrixAfterReplay = (await admin.query<{ events: string; outbox: string; receipts: string }>(`SELECT
       (SELECT count(*)::text FROM samurai_persistence.domain_events WHERE player_id=$1 AND event_type LIKE 'service.%') AS events,
       (SELECT count(*)::text FROM samurai_persistence.outbox_deliveries o JOIN samurai_persistence.domain_events e ON e.event_id=o.event_id
@@ -582,14 +621,21 @@ describe("built account HTTP boundary", () => {
     )).rows[0]?.count).toBe("1");
   });
 
-  it("keeps Node authority and representative secret/config markers out of client chunks", async () => {
+  it("keeps Node authority and representative secret/config markers out of client chunks, maps, HTML, and RSC payloads", async () => {
     const staticRoot = resolve(appRoot, ".next/static");
-    const files = (await readdir(staticRoot, { recursive: true })).filter((file) => file.endsWith(".js"));
-    const source = (await Promise.all(files.map((file) => readFile(resolve(staticRoot, file), "utf8")))).join("\n");
+    const staticFiles = (await readdir(staticRoot, { recursive: true })).filter((file) => file.endsWith(".js") || file.endsWith(".map"));
+    const appOutputRoot = resolve(appRoot, ".next/server/app");
+    const appFiles = (await readdir(appOutputRoot, { recursive: true })).filter((file) => /\.(?:html|rsc|txt)$/u.test(file));
+    const source = (await Promise.all([
+      ...staticFiles.map((file) => readFile(resolve(staticRoot, file), "utf8")),
+      ...appFiles.map((file) => readFile(resolve(appOutputRoot, file), "utf8")),
+    ])).join("\n");
     for (const marker of ["account-http-runtime", "@samurai-sushi/persistence", "service-authority",
-      "@samurai-sushi/content", "claim-protocol", "node:crypto", "pg-pool", "@taquito", "@noble",
+      "@samurai-sushi/content", "account-proof-verifier", "claim-protocol", "node:crypto", "pg-pool", "@taquito", "@noble",
       "SAMURAI_DATABASE_URL", "SAMURAI_HMAC_RESUME_KEY", "SAMURAI_HMAC_GUEST_CLAIM_KEY",
-      "x-samurai-raw-header-guard", "postgresql://", "tz1", "edpk"]) {
+      "x-samurai-raw-header-guard", "__Host-samurai", "postgresql://", "challengeId", "claimId", "guestId", "playerId",
+      "subjectId", "payloadHash", "resultHash", "publicKey", "signature", "checkpoint", "tz1", "edpk",
+      "NetXtJqPyJGB6Pc", "NetXsqzbfFenSTS", "rpc.shadownet.teztnets.com", "api.shadownet.tzkt.io", "127.0.0.1:8732"]) {
       expect(source).not.toContain(marker);
     }
   });

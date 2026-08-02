@@ -11,9 +11,9 @@ import {
   type GuestSessionService,
   type ServiceSubjectCredential,
 } from "@samurai-sushi/persistence";
-import { compiledFirstEveningService } from "@samurai-sushi/content";
+import { buildBrowserEveningServiceView, compiledFirstEveningService } from "@samurai-sushi/content";
 import type { JsonObject } from "@samurai-sushi/domain";
-import { projectEveningService } from "@samurai-sushi/domain/evening-service";
+import { createInitialEveningServiceCheckpoint, projectEveningService, type EveningServiceCheckpoint } from "@samurai-sushi/domain/evening-service";
 import { ACCOUNT_COOKIE_NAMES, clearAccountCookie, CookieRejectedError, parseAccountCookies, setAccountCookie } from "./cookies";
 import {
   ACCOUNT_ROUTE_PATHS,
@@ -190,15 +190,17 @@ function serviceCredential(cookies: ReadonlyMap<string, string>): ServiceSubject
   throw new StrictJsonError();
 }
 
-function serviceProjection(
-  checkpoint: unknown,
+function serviceView(
+  checkpoint: EveningServiceCheckpoint,
+  credential: ServiceSubjectCredential,
   disposition: "query" | "committed" | "replayed",
   correctiveCueId: string | null,
 ): Readonly<Record<string, unknown>> {
-  return projectEveningService(checkpoint, compiledFirstEveningService.projectionManifest, {
+  const projection = projectEveningService(checkpoint, compiledFirstEveningService.projectionManifest, {
     disposition,
     correctiveCueId,
-  }) as unknown as Readonly<Record<string, unknown>>;
+  });
+  return buildBrowserEveningServiceView(checkpoint, projection, credential.kind) as unknown as Readonly<Record<string, unknown>>;
 }
 
 function assertRequestAuthority(request: Request, operation: AccountRouteId, config: AccountRuntimeConfig): void {
@@ -240,16 +242,22 @@ export async function handleAccountHttpRequest(
         break;
       }
       case "guest.issue": {
-        const input = strictObject(body, ["consentVersion", "contentVersion", "checkpointSchemaVersion", "checkpoint"]);
+        const browserIssue = Object.keys(body).length === 1 && Object.hasOwn(body, "consentVersion");
+        const input = browserIssue
+          ? strictObject(body, ["consentVersion"])
+          : strictObject(body, ["consentVersion", "contentVersion", "checkpointSchemaVersion", "checkpoint"]);
+        if (browserIssue && input.consentVersion !== "first-service-browser-v1") throw new StrictJsonError();
+        const initial = createInitialEveningServiceCheckpoint();
         const issued = await services.guests.issue({
           consentVersion: text(input.consentVersion),
-          contentVersion: text(input.contentVersion),
-          checkpointSchemaVersion: safeInteger(input.checkpointSchemaVersion),
-          checkpoint: plainObject(input.checkpoint),
+          contentVersion: browserIssue ? initial.contentVersion : text(input.contentVersion),
+          checkpointSchemaVersion: browserIssue ? initial.schemaVersion : safeInteger(input.checkpointSchemaVersion),
+          checkpoint: browserIssue ? initial : plainObject(input.checkpoint),
         });
         if (!issued.claimCapability) throw new StrictJsonError();
         outgoing = [setAccountCookie("guest", issued.resumeSecret), setAccountCookie("claim", issued.claimCapability)];
-        payload = { guestId: issued.session.id, expiresAt: issued.session.expiresAt.toISOString(), revision: issued.progress.revision };
+        payload = browserIssue ? { issued: true }
+          : { guestId: issued.session.id, expiresAt: issued.session.expiresAt.toISOString(), revision: issued.progress.revision };
         break;
       }
       case "guest.resume": {
@@ -374,30 +382,21 @@ export async function handleAccountHttpRequest(
       }
       case "service.query": {
         exactEmpty(body);
-        const queried = await services.evening.query(serviceCredential(cookies));
-        payload = {
-          checkpoint: queried.checkpoint,
-          projection: serviceProjection(queried.checkpoint, "query", null),
-          disposition: "query",
-        };
+        const credential = serviceCredential(cookies);
+        const queried = await services.evening.query(credential);
+        payload = { view: serviceView(queried.checkpoint, credential, "query", null) };
         break;
       }
       case "service.command": {
         const input = strictObject(body, ["commandName", "expectedRevision", "idempotencyKey", "payload"]);
-        const executed = await services.evening.execute(serviceCredential(cookies), {
+        const credential = serviceCredential(cookies);
+        const executed = await services.evening.execute(credential, {
           commandName: text(input.commandName),
           expectedRevision: safeInteger(input.expectedRevision),
           idempotencyKey: text(input.idempotencyKey),
           payload: plainObject(input.payload) as JsonObject,
         });
-        payload = {
-          checkpoint: executed.response.checkpoint,
-          projection: serviceProjection(executed.response.checkpoint, executed.disposition, executed.response.correctiveCueId),
-          disposition: executed.disposition,
-          accepted: executed.response.accepted,
-          feedbackRef: executed.response.feedbackRef,
-          committedRevision: executed.committedRevision,
-        };
+        payload = { view: serviceView(executed.response.checkpoint, credential, executed.disposition, executed.response.correctiveCueId) };
         break;
       }
     }

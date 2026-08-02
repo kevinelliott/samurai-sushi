@@ -270,7 +270,7 @@ describe("server-side account proof verifier", () => {
     const client = readFileSync(new URL("../../../apps/web/app/counter-shell.tsx", import.meta.url), "utf8");
     expect(domainPackage).not.toMatch(/taquito|noble/u);
     expect(claimProtocol).not.toMatch(/taquito|noble|node:/u);
-    expect(client).toContain('from "@samurai-sushi/domain/claim-protocol"');
+    expect(client).not.toContain("claim-protocol");
     expect(client).not.toContain("account-proof-verifier");
   });
 });
