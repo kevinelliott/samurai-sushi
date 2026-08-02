@@ -7,6 +7,7 @@ import {
   createInitialEveningServiceCheckpoint,
   decodeEveningServiceCheckpoint,
   projectEveningService,
+  rebaseEveningServiceCheckpointForClaim,
   reduceEveningService,
   type EveningServiceCheckpoint,
 } from "./evening-service";
@@ -53,6 +54,29 @@ describe("first evening service reducer", () => {
     expect(() => reduceEveningService({ ...initial, revision: Number.MAX_SAFE_INTEGER }, command(Number.MAX_SAFE_INTEGER, "service.start", {}, 4))).toThrow();
     const corrupted = initial.components.map((component, index) => index === 0 ? { ...component, available: component.available + 1 } : component);
     expect(() => decodeEveningServiceCheckpoint({ ...initial, components: corrupted })).toThrow();
+  });
+
+  it("rebases guest-active service history while preserving the player's monotonic unlock", () => {
+    const guest = apply(createInitialEveningServiceCheckpoint(), "service.start", {}, 20).checkpoint;
+    const player = decodeEveningServiceCheckpoint({
+      ...createInitialEveningServiceCheckpoint(), revision: 29, phase: "SETTLED", riceBeatIndex: 3,
+      presentationChoice: "sand-speckle", restorationChoice: "refresh-menu-board", activeOrderIndex: 3,
+      orders: FIRST_EVENING_SERVICE_DEFINITION.orders.map((definition) => ({
+        id: definition.id, state: "SERVED", stepIndex: definition.steps.length,
+        plateFeedbackRef: definition.plateFeedbackRef, serveFeedbackRef: definition.serveFeedbackRef,
+      })),
+      components: createInitialEveningServiceCheckpoint().components.map((component) => ({
+        ...component, available: 0, placed: 0, served: component.total, discarded: 0,
+      })),
+      storyFlags: FIRST_EVENING_SERVICE_DEFINITION.orders.map((order) => order.storyFlagId),
+      unlocks: [SALMON_SASHIMI_UNLOCK_ID],
+    });
+    const rebased = rebaseEveningServiceCheckpointForClaim(guest, player, 40);
+    expect(rebased).toMatchObject({ revision: 40, phase: "OPEN", presentationChoice: null, restorationChoice: null,
+      riceBeatIndex: 0, unlocks: [SALMON_SASHIMI_UNLOCK_ID] });
+    expect(rebased.orders).toEqual(guest.orders);
+    expect(Object.isFrozen(rebased)).toBe(true);
+    expect(() => rebaseEveningServiceCheckpointForClaim(guest, player, Number.MAX_SAFE_INTEGER + 1)).toThrow();
   });
 
   it("abandons only an open service, discards outstanding work, and never unlocks", () => {

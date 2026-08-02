@@ -5,7 +5,13 @@ import { b58Encode, getPkhfromPk, PrefixV2 } from "@taquito/utils";
 import type { JsonObject } from "@samurai-sushi/domain";
 import { createCommandEnvelope, parseIdempotencyKey } from "@samurai-sushi/domain";
 import { walletSigningBytes } from "@samurai-sushi/domain/claim-protocol";
-import { FIRST_EVENING_CONTENT_VERSION, FIRST_EVENING_SERVICE_DEFINITION, createInitialEveningServiceCheckpoint } from "@samurai-sushi/domain/evening-service";
+import {
+  FIRST_EVENING_CONTENT_VERSION,
+  FIRST_EVENING_SERVICE_DEFINITION,
+  createInitialEveningServiceCheckpoint,
+  reduceEveningService,
+  type EveningServiceCheckpoint,
+} from "@samurai-sushi/domain/evening-service";
 import type { PoolClient, QueryResult as PgQueryResult } from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { GuestCommandExecutor } from "../src/command-executor";
@@ -53,7 +59,7 @@ import { ADR_0003_PERSISTENCE_LIFECYCLE } from "../src/lifecycle";
 import { applyMigrations, bundledMigrations } from "../src/migrations";
 import { OutboxDeliveryService } from "../src/outbox";
 import { PortableRecoveryAuthority, PortableRecoveryService } from "../src/portable-recovery";
-import { EveningServiceAuthority } from "../src/service-authority";
+import { EveningServiceAuthority, mergeFirstEveningCheckpointForClaim } from "../src/service-authority";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 if (!databaseUrl) throw new Error("TEST_DATABASE_URL is required; the PostgreSQL persistence suite must never skip silently.");
@@ -662,8 +668,43 @@ describe("PostgreSQL persistence spine", () => {
   }> = {}) => new AccountClaimService(servicePool, claimAuthority, {
     origin: "https://game.samurai-sushi.example",
     chainId: "NetXdQprcVkpaWU",
+    mergeCheckpoint: mergeFirstEveningCheckpointForClaim,
     ...options,
   });
+
+  const firstServiceCommandsBeforeSettlement = (): Array<{ readonly commandName: string; readonly payload: JsonObject }> => {
+    const commands: Array<{ readonly commandName: string; readonly payload: JsonObject }> = [
+      { commandName: "service.start", payload: {} },
+      ...FIRST_EVENING_SERVICE_DEFINITION.riceBeats.map((beat) => ({ commandName: "service.prepare-rice", payload: { beat } })),
+    ];
+    FIRST_EVENING_SERVICE_DEFINITION.orders.forEach((order, orderIndex) => {
+      commands.push({ commandName: "service.accept-order", payload: { orderId: order.id } });
+      order.steps.forEach((step) => commands.push({ commandName: "service.perform-step", payload: { orderId: order.id, stepId: step.id } }));
+      if (orderIndex === 0) commands.push({ commandName: "service.choose-presentation", payload: { orderId: order.id, choice: "indigo-rim" } });
+      commands.push({ commandName: "service.plate-order", payload: { orderId: order.id } });
+      commands.push({ commandName: "service.serve-order", payload: { orderId: order.id } });
+    });
+    commands.push({ commandName: "service.close-ledger", payload: {} });
+    return commands;
+  };
+
+  const reduceServiceCommands = (
+    commands: readonly { readonly commandName: string; readonly payload: JsonObject }[],
+  ): EveningServiceCheckpoint => {
+    let checkpoint = createInitialEveningServiceCheckpoint();
+    commands.forEach((command, index) => {
+      checkpoint = reduceEveningService(checkpoint, createCommandEnvelope({
+        schemaVersion: 1,
+        subject: { kind: "guest", guestSessionId: "guest-service-fixture-0001" },
+        idempotencyKey: parseIdempotencyKey(`018f47fe-347b-4dac-8f45-a6f3f43b${(3000 + index).toString().padStart(4, "0")}`),
+        expectedRevision: checkpoint.revision,
+        contentVersion: FIRST_EVENING_CONTENT_VERSION,
+        commandName: command.commandName,
+        payload: command.payload,
+      })).checkpoint;
+    });
+    return checkpoint;
+  };
 
   const stage3Fixture = async (wallet = stage3Wallet()) => {
     const claimCapability = randomBytes(32).toString("base64url");
@@ -871,6 +912,18 @@ describe("PostgreSQL persistence spine", () => {
        VALUES ($1,0,'historical-v1',1,'{}','2026-08-01T12:00:00Z','2026-08-01T12:00:00Z')`,
       [playerId],
     );
+    const historicalServicePlayerId = "historical-service-player-0001";
+    await rawPool.query(
+      `INSERT INTO samurai_persistence.players (id,created_at,updated_at)
+       VALUES ($1,'2026-08-01T12:00:00Z','2026-08-01T12:00:00Z')`,
+      [historicalServicePlayerId],
+    );
+    await rawPool.query(
+      `INSERT INTO samurai_persistence.player_progress
+        (player_id,revision,content_version,checkpoint_schema_version,checkpoint,created_at,updated_at)
+       VALUES ($1,2,$2,1,'{"revision":0}','2026-08-01T12:00:00Z','2026-08-01T12:00:00Z')`,
+      [historicalServicePlayerId, FIRST_EVENING_CONTENT_VERSION],
+    );
     await rawPool.query(
       `INSERT INTO samurai_persistence.player_sessions
         (id,player_id,issuance_kind,issuance_id,state,delivery_generation,created_at,last_seen_at,expires_at,rotate_after)
@@ -898,9 +951,19 @@ describe("PostgreSQL persistence spine", () => {
         FROM samurai_persistence.progress_merges m WHERE m.claim_id=$1
     `, [claimId]);
     expect(historical.rows[0]).toEqual({ guest_revision: "2", player_revision_after: "0", validated: false });
+    const historicalService = await rawPool.query<{ readonly revision: string; readonly checkpoint_revision: string; readonly validated: boolean }>(`
+      SELECT p.revision::text,p.checkpoint->>'revision' AS checkpoint_revision,
+             (SELECT convalidated FROM pg_constraint WHERE conname='player_progress_service_revision_check') AS validated
+        FROM samurai_persistence.player_progress p WHERE p.player_id=$1
+    `, [historicalServicePlayerId]);
+    expect(historicalService.rows[0]).toEqual({ revision: "2", checkpoint_revision: "0", validated: false });
     await expect(rawPool.query(
       "UPDATE samurai_persistence.progress_merges SET idempotency_key=idempotency_key WHERE claim_id=$1",
       [claimId],
+    )).rejects.toMatchObject({ code: "23514" });
+    await expect(rawPool.query(
+      "UPDATE samurai_persistence.player_progress SET revision=revision WHERE player_id=$1",
+      [historicalServicePlayerId],
     )).rejects.toMatchObject({ code: "23514" });
   });
 
@@ -6342,6 +6405,28 @@ describe("PostgreSQL persistence spine", () => {
                '2026-08-01T20:00:00Z','2026-08-01T20:00:00Z')`,
     )).rejects.toMatchObject({ code: "23514" });
     await rawPool.query(
+      `INSERT INTO samurai_persistence.player_progress
+        (player_id,revision,content_version,checkpoint_schema_version,checkpoint,created_at,updated_at)
+       VALUES ('hostile-player-0001',0,$1,1,$2::jsonb,
+               '2026-08-01T20:00:00Z','2026-08-01T20:00:00Z')`,
+      [FIRST_EVENING_CONTENT_VERSION, JSON.stringify(createInitialEveningServiceCheckpoint())],
+    );
+    await expect(rawPool.query(
+      `UPDATE samurai_persistence.player_progress
+          SET revision=1,checkpoint=$1::jsonb
+        WHERE player_id='hostile-player-0001'`,
+      [JSON.stringify(createInitialEveningServiceCheckpoint())],
+    )).rejects.toMatchObject({ code: "23514" });
+    const hostileGuest = await sessionService.issue({
+      consentVersion: "service-v1", contentVersion: "bootstrap-v1", checkpointSchemaVersion: 1, checkpoint: { bootstrap: true },
+    });
+    await expect(rawPool.query(
+      `UPDATE samurai_persistence.guest_progress
+          SET revision=1,content_version=$2,checkpoint=$3::jsonb
+        WHERE guest_session_id=$1`,
+      [hostileGuest.session.id, FIRST_EVENING_CONTENT_VERSION, JSON.stringify(createInitialEveningServiceCheckpoint())],
+    )).rejects.toMatchObject({ code: "23514" });
+    await rawPool.query(
       `INSERT INTO samurai_persistence.wallet_credentials
         (credential_id,player_id,chain_id,account,public_key,scheme,linked_claim_id,linked_at)
        VALUES ('323e4567-e89b-42d3-a456-426614174101','hostile-player-0001','NetXdQprcVkpaWU',
@@ -6566,6 +6651,79 @@ describe("PostgreSQL persistence spine", () => {
       .resolves.toMatchObject({ revision: 1, checkpoint: { phase: "OPEN" } });
   });
 
+  it("rejects an observed new-key stale revision and the opposite same-key corrective winner exactly", async () => {
+    const parentLock = (text: string) => text.includes("FROM samurai_persistence.guest_sessions WHERE id = $1 FOR UPDATE");
+
+    const staleGuest = await sessionService.issue({
+      consentVersion: "service-v1", contentVersion: "bootstrap-v1", checkpointSchemaVersion: 1, checkpoint: { bootstrap: true },
+    });
+    const winnerAttempted = deferred<number>();
+    const winnerAcquired = deferred<number>();
+    const staleAttempted = deferred<number>();
+    const staleAcquired = deferred<number>();
+    const releaseWinner = deferred<void>();
+    const winnerPool = new ObservedQueryLockPool(pool, parentLock, winnerAttempted, winnerAcquired, releaseWinner.promise);
+    const stalePool = new ObservedQueryLockPool(pool, parentLock, staleAttempted, staleAcquired);
+    const winner = new EveningServiceAuthority(winnerPool, authority, stage3Service(winnerPool)).execute(
+      { kind: "guest", resumeSecret: staleGuest.resumeSecret },
+      { idempotencyKey: randomUUID(), expectedRevision: 0, commandName: "service.start", payload: {} },
+    );
+    await winnerAcquired.promise;
+    const stale = new EveningServiceAuthority(stalePool, authority, stage3Service(stalePool)).execute(
+      { kind: "guest", resumeSecret: staleGuest.resumeSecret },
+      { idempotencyKey: randomUUID(), expectedRevision: 0, commandName: "service.start", payload: {} },
+    );
+    await staleAttempted.promise;
+    releaseWinner.resolve();
+    await expect(winner).resolves.toMatchObject({ committedRevision: 1 });
+    await expect(stale).rejects.toBeInstanceOf(RevisionConflictError);
+    const staleMatrix = await rawPool.query<{ readonly revision: string; readonly unlocks: unknown;
+      readonly receipts: string; readonly events: string; readonly outbox: string }>(`SELECT
+        p.revision::text,p.checkpoint->'unlocks' AS unlocks,
+        (SELECT count(*)::text FROM samurai_persistence.command_receipts WHERE guest_session_id=$1) AS receipts,
+        (SELECT count(*)::text FROM samurai_persistence.domain_events WHERE guest_session_id=$1) AS events,
+        (SELECT count(*)::text FROM samurai_persistence.outbox_deliveries o JOIN samurai_persistence.domain_events e USING(event_id) WHERE e.guest_session_id=$1) AS outbox
+      FROM samurai_persistence.guest_progress p WHERE p.guest_session_id=$1`, [staleGuest.session.id]);
+    expect(staleMatrix.rows[0]).toEqual({ revision: "1", unlocks: [], receipts: "1", events: "1", outbox: "1" });
+
+    const correctiveGuest = await sessionService.issue({
+      consentVersion: "service-v1", contentVersion: "bootstrap-v1", checkpointSchemaVersion: 1, checkpoint: { bootstrap: true },
+    });
+    const correctionAttempted = deferred<number>();
+    const correctionAcquired = deferred<number>();
+    const changedAttempted = deferred<number>();
+    const changedAcquired = deferred<number>();
+    const releaseCorrection = deferred<void>();
+    const correctionPool = new ObservedQueryLockPool(pool, parentLock, correctionAttempted, correctionAcquired, releaseCorrection.promise);
+    const changedPool = new ObservedQueryLockPool(pool, parentLock, changedAttempted, changedAcquired);
+    const key = randomUUID();
+    const correction = new EveningServiceAuthority(correctionPool, authority, stage3Service(correctionPool)).execute(
+      { kind: "guest", resumeSecret: correctiveGuest.resumeSecret },
+      { idempotencyKey: key, expectedRevision: 0, commandName: "service.prepare-rice", payload: { beat: "steam" } },
+    );
+    await correctionAcquired.promise;
+    const changedStart = new EveningServiceAuthority(changedPool, authority, stage3Service(changedPool)).execute(
+      { kind: "guest", resumeSecret: correctiveGuest.resumeSecret },
+      { idempotencyKey: key, expectedRevision: 0, commandName: "service.start", payload: {} },
+    );
+    await changedAttempted.promise;
+    releaseCorrection.resolve();
+    await expect(correction).resolves.toMatchObject({ checkpointAdvanced: false, committedRevision: 0,
+      response: { accepted: false, correctiveCueId: "cue.rice.expected.wash" } });
+    await expect(changedStart).rejects.toBeInstanceOf(IdempotencyPayloadMismatchError);
+    await expect(new EveningServiceAuthority(pool, authority, stage3Service()).query({
+      kind: "guest", resumeSecret: correctiveGuest.resumeSecret,
+    })).resolves.toMatchObject({ revision: 0, checkpoint: { phase: "IDLE", revision: 0, unlocks: [] } });
+    const correctiveMatrix = await rawPool.query<{ readonly revision: string; readonly phase: string; readonly unlocks: unknown;
+      readonly receipts: string; readonly events: string; readonly outbox: string }>(`SELECT
+        p.revision::text,p.checkpoint->>'phase' AS phase,p.checkpoint->'unlocks' AS unlocks,
+        (SELECT count(*)::text FROM samurai_persistence.command_receipts WHERE guest_session_id=$1) AS receipts,
+        (SELECT count(*)::text FROM samurai_persistence.domain_events WHERE guest_session_id=$1) AS events,
+        (SELECT count(*)::text FROM samurai_persistence.outbox_deliveries o JOIN samurai_persistence.domain_events e USING(event_id) WHERE e.guest_session_id=$1) AS outbox
+      FROM samurai_persistence.guest_progress p WHERE p.guest_session_id=$1`, [correctiveGuest.session.id]);
+    expect(correctiveMatrix.rows[0]).toEqual({ revision: "0", phase: null, unlocks: null, receipts: "1", events: "0", outbox: "0" });
+  });
+
   it("serializes service commands and guest deletion in both observed parent-lock winners without resurrection", async () => {
     const serviceParent = (text: string) => text.includes("FROM samurai_persistence.guest_sessions WHERE id = $1 FOR UPDATE");
     const deletionParent = (text: string) => text.includes("JOIN samurai_persistence.guest_sessions s") && text.includes("FOR UPDATE OF s");
@@ -6699,6 +6857,194 @@ describe("PostgreSQL persistence spine", () => {
           response: { correctiveCueId: "cue.rice.expected.wash", checkpoint: { phase: "IDLE", revision: 0 } } });
       }
     }
+  });
+
+  it("rebases unequal existing-player service revisions with guest-history precedence and monotonic unlocks", async () => {
+    const throughKappaPresentation = (choice: "indigo-rim" | "sand-speckle") => {
+      const order = FIRST_EVENING_SERVICE_DEFINITION.orders[0]!;
+      return [
+        { commandName: "service.start", payload: {} },
+        ...FIRST_EVENING_SERVICE_DEFINITION.riceBeats.map((beat) => ({ commandName: "service.prepare-rice", payload: { beat } })),
+        { commandName: "service.accept-order", payload: { orderId: order.id } },
+        ...order.steps.map((step) => ({ commandName: "service.perform-step", payload: { orderId: order.id, stepId: step.id } })),
+        { commandName: "service.choose-presentation", payload: { orderId: order.id, choice } },
+      ];
+    };
+    const settledCommands = (restoration: "mend-counter-stool" | "refresh-menu-board") => [
+      ...firstServiceCommandsBeforeSettlement(),
+      { commandName: "service.choose-restoration", payload: { choice: restoration } },
+    ];
+    const scenarios = [
+      {
+        name: "guest-in-progress-player-settled",
+        guestCommands: throughKappaPresentation("indigo-rim"),
+        playerCheckpoint: { ...reduceServiceCommands(settledCommands("refresh-menu-board")), revision: 40,
+          presentationChoice: "sand-speckle", restorationChoice: "refresh-menu-board" },
+        playerRevision: 40,
+        expected: { phase: "OPEN", presentationChoice: "indigo-rim", restorationChoice: null,
+          unlocks: ["atlantic-salmon-sashimi@1"] },
+        next: { commandName: "service.plate-order", payload: { orderId: "ceramicist-kappa" }, accepted: true },
+      },
+      {
+        name: "guest-settled-player-in-progress",
+        guestCommands: settledCommands("mend-counter-stool"),
+        playerCheckpoint: { ...reduceServiceCommands(throughKappaPresentation("sand-speckle")), revision: 17 },
+        playerRevision: 17,
+        expected: { phase: "SETTLED", presentationChoice: "indigo-rim", restorationChoice: "mend-counter-stool",
+          unlocks: ["atlantic-salmon-sashimi@1"] },
+        next: { commandName: "service.start", payload: {}, accepted: false },
+      },
+    ] as const;
+
+    for (const scenario of scenarios) {
+      const wallet = stage3Wallet();
+      const playerId = `existing-${scenario.name}`;
+      await rawPool.query("INSERT INTO samurai_persistence.players (id,created_at,updated_at) VALUES ($1,clock_timestamp(),clock_timestamp())", [playerId]);
+      await rawPool.query(
+        `INSERT INTO samurai_persistence.wallet_credentials
+          (credential_id,player_id,chain_id,account,public_key,scheme,linked_claim_id,linked_at)
+         VALUES ($1,$2,'NetXdQprcVkpaWU',$3,$4,'tz1',$5,clock_timestamp())`,
+        [randomUUID(), playerId, wallet.account, wallet.publicKey, randomUUID()],
+      );
+      await rawPool.query(
+        `INSERT INTO samurai_persistence.player_progress
+          (player_id,revision,content_version,checkpoint_schema_version,checkpoint,created_at,updated_at)
+         VALUES ($1,$2,$3,1,$4::jsonb,clock_timestamp(),clock_timestamp())`,
+        [playerId, scenario.playerRevision, FIRST_EVENING_CONTENT_VERSION, JSON.stringify(scenario.playerCheckpoint)],
+      );
+
+      const claimCapability = randomBytes(32).toString("base64url");
+      const guest = await new GuestSessionService(pool, authority, {
+        claimKeys: guestClaimKeys, issueClaimCapability: () => claimCapability,
+      }).issue({ consentVersion: "service-v1", contentVersion: "bootstrap-v1", checkpointSchemaVersion: 1, checkpoint: { bootstrap: true } });
+      const guestCredential = { kind: "guest", resumeSecret: guest.resumeSecret } as const;
+      const guestService = new EveningServiceAuthority(pool, authority, stage3Service());
+      let guestRevision = 0;
+      for (const command of scenario.guestCommands) {
+        const result = await guestService.execute(guestCredential, {
+          idempotencyKey: randomUUID(), expectedRevision: guestRevision, ...command,
+        });
+        guestRevision = result.committedRevision;
+      }
+      const guestBeforeClaim = await guestService.query(guestCredential);
+      expect(guestRevision).not.toBe(scenario.playerRevision + 1);
+
+      const intent = {
+        claimId: randomUUID(), guestClaimCommitment: claimCapability, createPlayer: false,
+        targetPlayerId: playerId, guestRevision, playerRevision: scenario.playerRevision,
+        idempotencyKey: randomUUID(), contentVersion: FIRST_EVENING_CONTENT_VERSION, cosmeticSelections: {},
+      } as const;
+      const claimService = stage3Service();
+      const challenge = await claimService.issueClaimChallenge({ resumeSecret: guest.resumeSecret, intent, account: wallet.account });
+      if ("code" in challenge) throw new Error(`Existing service challenge failed: ${challenge.code}`);
+      const proof = {
+        challenge: challenge.challenge,
+        publicKey: wallet.publicKey,
+        signature: b58Encode(signMessage(null, blake2b(walletSigningBytes(challenge.challenge), { dkLen: 32 }), wallet.privateKey), PrefixV2.Ed25519Signature),
+      };
+      const claimed = await claimService.claimGuest({ resumeSecret: guest.resumeSecret, intent, challengeId: challenge.challengeId, proof });
+      if ("code" in claimed) throw new Error(`Existing service claim failed: ${claimed.code}`);
+      const committedRevision = scenario.playerRevision + 1;
+      expect(claimed.playerRevision).toBe(committedRevision);
+      await claimService.acknowledgeClaimDeliveryExact(
+        claimed.playerId, claimed.claimId, claimed.sessionId, claimed.sessionSecret, claimed.deliveryGeneration,
+      );
+      const playerCredential = { kind: "player", sessionSecret: claimed.sessionSecret } as const;
+      const playerService = new EveningServiceAuthority(pool, authority, claimService);
+      const query = await playerService.query(playerCredential);
+      expect(query).toMatchObject({ revision: committedRevision, checkpoint: { revision: committedRevision, ...scenario.expected } });
+      expect({
+        activeOrderIndex: query.checkpoint.activeOrderIndex,
+        components: query.checkpoint.components,
+        orders: query.checkpoint.orders,
+        presentationChoice: query.checkpoint.presentationChoice,
+        restorationChoice: query.checkpoint.restorationChoice,
+        riceBeatIndex: query.checkpoint.riceBeatIndex,
+        storyFlags: query.checkpoint.storyFlags,
+      }).toEqual({
+        activeOrderIndex: guestBeforeClaim.checkpoint.activeOrderIndex,
+        components: guestBeforeClaim.checkpoint.components,
+        orders: guestBeforeClaim.checkpoint.orders,
+        presentationChoice: guestBeforeClaim.checkpoint.presentationChoice,
+        restorationChoice: guestBeforeClaim.checkpoint.restorationChoice,
+        riceBeatIndex: guestBeforeClaim.checkpoint.riceBeatIndex,
+        storyFlags: guestBeforeClaim.checkpoint.storyFlags,
+      });
+      const continued = await playerService.execute(playerCredential, {
+        idempotencyKey: randomUUID(), expectedRevision: query.revision, commandName: scenario.next.commandName, payload: scenario.next.payload,
+      });
+      expect(continued.response.accepted).toBe(scenario.next.accepted);
+      const matrix = await rawPool.query<{ readonly outer_revision: string; readonly inner_revision: string; readonly merge_revision: string;
+        readonly receipts: string; readonly events: string; readonly outbox: string }>(`
+        SELECT p.revision::text AS outer_revision,p.checkpoint->>'revision' AS inner_revision,
+          (SELECT player_revision_after::text FROM samurai_persistence.progress_merges WHERE player_id=$1 ORDER BY created_at DESC LIMIT 1) AS merge_revision,
+          (SELECT count(*)::text FROM samurai_persistence.command_receipts WHERE player_id=$1) AS receipts,
+          (SELECT count(*)::text FROM samurai_persistence.domain_events WHERE player_id=$1) AS events,
+          (SELECT count(*)::text FROM samurai_persistence.outbox_deliveries o JOIN samurai_persistence.domain_events e USING(event_id) WHERE e.player_id=$1) AS outbox
+        FROM samurai_persistence.player_progress p WHERE p.player_id=$1`, [playerId]);
+      expect(matrix.rows[0]).toMatchObject({
+        outer_revision: continued.committedRevision.toString(), inner_revision: continued.committedRevision.toString(),
+        merge_revision: committedRevision.toString(), receipts: (scenario.guestCommands.length + 1).toString(),
+        events: (scenario.guestCommands.length + (scenario.next.accepted ? 1 : 0)).toString(),
+        outbox: (scenario.guestCommands.length + (scenario.next.accepted ? 1 : 0)).toString(),
+      });
+    }
+  });
+
+  it("rolls back an existing-player service rebase after the progress rewrite", async () => {
+    const wallet = stage3Wallet();
+    const playerId = "existing-service-rollback";
+    const playerCheckpoint = { ...createInitialEveningServiceCheckpoint(), revision: 12 };
+    await rawPool.query("INSERT INTO samurai_persistence.players (id,created_at,updated_at) VALUES ($1,clock_timestamp(),clock_timestamp())", [playerId]);
+    await rawPool.query(
+      `INSERT INTO samurai_persistence.wallet_credentials
+        (credential_id,player_id,chain_id,account,public_key,scheme,linked_claim_id,linked_at)
+       VALUES ($1,$2,'NetXdQprcVkpaWU',$3,$4,'tz1',$5,clock_timestamp())`,
+      [randomUUID(), playerId, wallet.account, wallet.publicKey, randomUUID()],
+    );
+    await rawPool.query(
+      `INSERT INTO samurai_persistence.player_progress
+        (player_id,revision,content_version,checkpoint_schema_version,checkpoint,created_at,updated_at)
+       VALUES ($1,12,$2,1,$3::jsonb,clock_timestamp(),clock_timestamp())`,
+      [playerId, FIRST_EVENING_CONTENT_VERSION, JSON.stringify(playerCheckpoint)],
+    );
+    const claimCapability = randomBytes(32).toString("base64url");
+    const guest = await new GuestSessionService(pool, authority, {
+      claimKeys: guestClaimKeys, issueClaimCapability: () => claimCapability,
+    }).issue({ consentVersion: "service-v1", contentVersion: "bootstrap-v1", checkpointSchemaVersion: 1, checkpoint: { bootstrap: true } });
+    const guestService = new EveningServiceAuthority(pool, authority, stage3Service());
+    await guestService.execute({ kind: "guest", resumeSecret: guest.resumeSecret }, {
+      idempotencyKey: randomUUID(), expectedRevision: 0, commandName: "service.start", payload: {},
+    });
+    const intent = {
+      claimId: randomUUID(), guestClaimCommitment: claimCapability, createPlayer: false,
+      targetPlayerId: playerId, guestRevision: 1, playerRevision: 12,
+      idempotencyKey: randomUUID(), contentVersion: FIRST_EVENING_CONTENT_VERSION, cosmeticSelections: {},
+    } as const;
+    const claimService = stage3Service();
+    const challenge = await claimService.issueClaimChallenge({ resumeSecret: guest.resumeSecret, intent, account: wallet.account });
+    if ("code" in challenge) throw new Error(`Rollback challenge failed: ${challenge.code}`);
+    const proof = {
+      challenge: challenge.challenge,
+      publicKey: wallet.publicKey,
+      signature: b58Encode(signMessage(null, blake2b(walletSigningBytes(challenge.challenge), { dkLen: 32 }), wallet.privateKey), PrefixV2.Ed25519Signature),
+    };
+    const state = () => rawPool.query<{ readonly player_revision: string; readonly player_checkpoint: unknown;
+      readonly guests: string; readonly guest_revision: string; readonly consumed_at: Date | null;
+      readonly merges: string; readonly sessions: string }>(`
+      SELECT p.revision::text AS player_revision,p.checkpoint AS player_checkpoint,
+        (SELECT count(*)::text FROM samurai_persistence.guest_sessions WHERE id=$2) AS guests,
+        (SELECT revision::text FROM samurai_persistence.guest_progress WHERE guest_session_id=$2) AS guest_revision,
+        (SELECT consumed_at FROM samurai_persistence.claim_challenges WHERE challenge_id=$3) AS consumed_at,
+        (SELECT count(*)::text FROM samurai_persistence.progress_merges WHERE player_id=$1) AS merges,
+        (SELECT count(*)::text FROM samurai_persistence.player_sessions WHERE player_id=$1) AS sessions
+      FROM samurai_persistence.player_progress p WHERE p.player_id=$1`, [playerId, guest.session.id, challenge.challengeId]);
+    const before = (await state()).rows[0];
+    const result = await stage3Service(new FailAfterStatementPool(pool, "UPDATE samurai_persistence.player_progress")).claimGuest({
+      resumeSecret: guest.resumeSecret, intent, challengeId: challenge.challengeId, proof,
+    });
+    expect(result).toEqual(ACCOUNT_CLAIM_PUBLIC_FAILURE);
+    expect((await state()).rows[0]).toEqual(before);
   });
 
   it("continues the identical service checkpoint through claim and admits only the acknowledged player session", async () => {

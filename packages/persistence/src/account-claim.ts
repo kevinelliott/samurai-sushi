@@ -12,6 +12,7 @@ import {
   type ClaimChallengeV1,
   type ClaimIntentV1,
 } from "@samurai-sushi/domain/claim-protocol";
+import { FIRST_EVENING_CONTENT_VERSION } from "@samurai-sushi/domain/evening-service";
 import {
   verifyAccountProof,
   type AccountProofInput,
@@ -603,6 +604,10 @@ export class AccountClaimService {
       const sessionSecret = issuedSession.secret;
       const sessionDigest = issuedSession.digest;
       const mergedCheckpoint = this.#mergeCheckpoint(guestProgress, playerProgress, intent);
+      if (intent.contentVersion === FIRST_EVENING_CONTENT_VERSION) {
+        const mergedRevision = (mergedCheckpoint as { readonly revision?: unknown }).revision;
+        if (!Number.isSafeInteger(mergedRevision) || mergedRevision !== playerRevision) invalid("CLAIM_REVISION_STALE");
+      }
       const requestHash = hashBytes(CLAIM_REQUEST_DOMAIN, canonicalClaimIntentBytes(intent), protocolHashBytes(challengeHash));
       const originSalt = randomBytes(32);
       const originCommitment = hashBytes(GUEST_ORIGIN_DOMAIN, originSalt, Buffer.from(guest.id, "utf8"));

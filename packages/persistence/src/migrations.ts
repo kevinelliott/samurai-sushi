@@ -47,8 +47,8 @@ const MIGRATION_MANIFEST = [
   },
   {
     name: "0004_evening_service_authority.sql",
-    checksumHex: "246c6e56d901f6bdab4aa95720e19d7695397f0ba6d732a4466610954566007d",
-    catalogChecksumHex: "50b0ab1d752a75554fe71bc0c6396ea07031795ace14832f253ddf0053bb8da3",
+    checksumHex: "54e797f10f356aa72a2761fcb7ec4f896720f7014af06573f88dbe81e8b07e1a",
+    catalogChecksumHex: "a0de5c3593e07d08da13b4836560ae1cc4c2a7c067cb4954babccf61f0a4ce39",
   },
 ] as const;
 

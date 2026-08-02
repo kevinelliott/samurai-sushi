@@ -6,6 +6,7 @@ import {
   GuestClaimKeyring,
   GuestSessionService,
   HmacKeyring,
+  mergeFirstEveningCheckpointForClaim,
   PersistenceAuthority,
   PlayerSessionKeyring,
   TombstoneKeyring,
@@ -55,6 +56,7 @@ export async function composeAccountRuntime(config: AccountRuntimeConfig): Promi
     const accounts = new AccountClaimService(pool, authority, {
       origin: config.canonicalOrigin,
       chainId: config.chainId,
+      mergeCheckpoint: mergeFirstEveningCheckpointForClaim,
     });
     return Object.freeze({
       guests: new GuestSessionService(pool, persistence, { claimKeys: guestClaimKeys }),

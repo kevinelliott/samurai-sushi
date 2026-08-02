@@ -242,6 +242,23 @@ function compileContentPackInternal(input: unknown, mode: "activation" | "histor
   bundle.components.forEach((component, index) => {
     const path = `$.components[${index}]`;
     const ingredient = resolve<IngredientDefinition>(indexes.ingredient, component.ingredientRef, `${path}.ingredientRef`, "ingredient", issues);
+    const preparationInputs = component.preparationInputs ?? [];
+    const preparationSignatures = preparationInputs.map((input) => `${refKey(input.ingredientRef)}:${input.stationStep.station}:${input.stationStep.action}`);
+    assertCanonicalSet(preparationSignatures, `${path}.preparationInputs`, issues);
+    const preparationIngredients = preparationInputs.map((input, inputIndex) =>
+      resolve<IngredientDefinition>(indexes.ingredient, input.ingredientRef, `${path}.preparationInputs[${inputIndex}].ingredientRef`, "ingredient", issues),
+    ).filter((row): row is IngredientDefinition => Boolean(row));
+    if (preparationInputs.some((input) => refKey(input.ingredientRef) === refKey(component.ingredientRef))) {
+      addIssue(issues, "DUPLICATE_IDENTITY", `${path}.preparationInputs`, "A preparation input cannot duplicate the component's primary ingredient.");
+    }
+    if (component.treatment === "seasoned") {
+      const seasoningInputs = preparationInputs.filter((input, inputIndex) =>
+        preparationIngredients[inputIndex]?.roles.includes("seasoning") && input.stationStep.action === "season",
+      );
+      if (seasoningInputs.length !== 1) {
+        addIssue(issues, "RECIPE_INVALID", `${path}.preparationInputs`, "A seasoned component requires exactly one versioned seasoning input bound to the season action.");
+      }
+    }
     const cut = component.cutStyleRef
       ? resolve(indexes["cut-style"], component.cutStyleRef, `${path}.cutStyleRef`, "cut-style", issues)
       : undefined;
@@ -259,9 +276,10 @@ function compileContentPackInternal(input: unknown, mode: "activation" | "histor
       if (noticeRequired !== (component.rawNotice === "required")) {
         addIssue(issues, "RAW_POLICY_INVALID", `${path}.rawNotice`, "Raw, cured, smoked, and surface-seared components require a notice; other treatments declare none.");
       }
-      if (!ingredient.baseContainsAllergens.every((allergen) => component.containsAllergens.includes(allergen)) ||
-          !ingredient.baseMayContainAllergens.every((allergen) => component.mayContainAllergens.includes(allergen)) ||
-          !ingredient.baseCrossContactTags.every((tag) => component.crossContactTags.includes(tag))) {
+      const allIngredients = [ingredient, ...preparationIngredients];
+      if (!allIngredients.every((row) => row.baseContainsAllergens.every((allergen) => component.containsAllergens.includes(allergen))) ||
+          !allIngredients.every((row) => row.baseMayContainAllergens.every((allergen) => component.mayContainAllergens.includes(allergen))) ||
+          !allIngredients.every((row) => row.baseCrossContactTags.every((tag) => component.crossContactTags.includes(tag)))) {
         addIssue(issues, "ALLERGEN_DERIVATION_MISMATCH", path, "Prepared-component facts cannot remove or downgrade ingredient allergen facts.");
       }
       if (cut && ingredient.productKind && !(cut as { compatibleProductKinds?: readonly string[] }).compatibleProductKinds?.includes(ingredient.productKind)) {
@@ -501,6 +519,11 @@ export function recipeSnapshot(input: unknown, recipeRef: VersionedRef): string 
         componentArt: art.get(component.artKey),
         ingredient,
         ingredientArt: art.get(ingredient.artKey),
+        preparationIngredients: (component.preparationInputs ?? []).map((input) => ({
+          input,
+          ingredient: required(bundle.ingredients, input.ingredientRef, "$.component.preparationInputs.ingredientRef"),
+          ingredientArt: art.get(required(bundle.ingredients, input.ingredientRef, "$.component.preparationInputs.ingredientRef").artKey),
+        })),
         cutStyle: component.cutStyleRef ? required(bundle.cutStyles, component.cutStyleRef, "$.component.cutStyleRef") : null,
       };
     }),

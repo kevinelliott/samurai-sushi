@@ -132,6 +132,28 @@ const firstServiceCatalog: ServiceCatalogBinding = deepFreeze({
 
 function fail(message: string): never { throw new Error(`Invalid first-service content: ${message}`); }
 
+function assertFirstServicePreparationGraph(): void {
+  const bundle = compiledFirstServiceCatalog.bundle;
+  const preparedRice = bundle.components.find((row) => row.id === "prepared-sushi-rice" && row.version === 1);
+  if (!preparedRice || preparedRice.ingredientRef.id !== "sushi-rice" || preparedRice.ingredientRef.version !== 1) {
+    fail("prepared sushi rice must bind sushi-rice@1 as its primary ingredient");
+  }
+  const inputs = preparedRice.preparationInputs ?? [];
+  if (inputs.length !== 1
+    || inputs[0]?.ingredientRef.id !== "rice-vinegar"
+    || inputs[0]?.ingredientRef.version !== 1
+    || inputs[0]?.stationStep.station !== "rice-hearth"
+    || inputs[0]?.stationStep.action !== "season") {
+    fail("prepared sushi rice must bind exactly rice-vinegar@1 to the rice-hearth season action");
+  }
+  for (const order of FIRST_EVENING_SERVICE_DEFINITION.orders) {
+    const recipe = bundle.recipes.find((row) => row.dishRef.id === order.dishId && row.dishRef.version === 1);
+    if (!recipe) fail(`order ${order.id} has no exact first-service recipe`);
+    const riceAmount = recipe.exactComponentAmounts.find((amount) => amount.componentRef.id === preparedRice.id && amount.componentRef.version === preparedRice.version);
+    if (!riceAmount) fail(`order ${order.id} does not resolve the prepared-rice dependency graph`);
+  }
+}
+
 function assertBoundedContent(input: unknown): void {
   const stack: Array<{ value: unknown; depth: number }> = [{ value: input, depth: 0 }];
   const seen = new WeakSet<object>();
@@ -275,6 +297,7 @@ export function buildFirstServiceTerminalReplay(goldenReplay: readonly JsonObjec
 
 export function compileFirstServiceContent(input: unknown): CompiledFirstServiceContent {
   assertBoundedContent(input);
+  assertFirstServicePreparationGraph();
   const source = JSON.parse(canonicalContentJson(input)) as FirstServiceContentSource;
   if (source.schemaVersion !== 1 || source.contentVersion !== FIRST_EVENING_CONTENT_VERSION) fail("schema/content version mismatch");
   if (canonicalContentJson(source.serviceDefinition) !== canonicalContentJson(FIRST_EVENING_SERVICE_DEFINITION)) fail("service definition drift");

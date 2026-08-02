@@ -156,6 +156,10 @@ const components: readonly PreparedComponent[] = [
     id: "prepared-sushi-rice",
     version: 1,
     ingredientRef: ref(ingredient("sushi-rice")),
+    preparationInputs: [{
+      ingredientRef: ref(ingredient("rice-vinegar")),
+      stationStep: { station: "rice-hearth", action: "season" },
+    }],
     treatment: "seasoned",
     rawNotice: "none",
     containsAllergens: [],

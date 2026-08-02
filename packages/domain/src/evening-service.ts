@@ -357,6 +357,17 @@ export function decodeEveningServiceCheckpoint(input: unknown): EveningServiceCh
   return deepFreeze(decoded);
 }
 
+export function rebaseEveningServiceCheckpointForClaim(
+  guestInput: unknown,
+  playerInput: unknown | null,
+  committedPlayerRevision: number,
+): EveningServiceCheckpoint {
+  const guest = decodeEveningServiceCheckpoint(guestInput);
+  const player = playerInput === null ? null : decodeEveningServiceCheckpoint(playerInput);
+  const unlocks = [...new Set([...(player?.unlocks ?? []), ...guest.unlocks])].sort();
+  return decodeEveningServiceCheckpoint({ ...guest, revision: safeRevision(committedPlayerRevision, "$committedPlayerRevision"), unlocks });
+}
+
 export function assertEveningServiceInvariants(checkpoint: EveningServiceCheckpoint): void {
   if (checkpoint.revision > MAX_SAFE_REVISION) invalid("Checkpoint revision exceeds the protocol maximum.");
   const served = checkpoint.orders.filter((order) => order.state === "SERVED").length;
@@ -381,15 +392,15 @@ export function assertEveningServiceInvariants(checkpoint: EveningServiceCheckpo
   });
   if (canonicalJson(checkpoint.components) !== canonicalJson(conservedComponents(checkpoint.orders))) invalid("Component conservation does not match the authored order state.");
   const unlocked = checkpoint.unlocks.includes(SALMON_SASHIMI_UNLOCK_ID);
-  if ((checkpoint.phase === "SETTLED") !== unlocked || checkpoint.unlocks.length > 1) invalid("The sashimi unlock and settlement must be one exact fact.");
+  if (checkpoint.unlocks.some((unlock) => unlock !== SALMON_SASHIMI_UNLOCK_ID) || checkpoint.unlocks.length > 1
+    || (checkpoint.phase === "SETTLED" && !unlocked)) invalid("The sashimi unlock must remain one exact monotonic fact.");
   if (["CLOSING", "SETTLED"].includes(checkpoint.phase) && (served !== 3 || checkpoint.activeOrderIndex !== 3)) invalid("Closing requires all authored orders served.");
   if (checkpoint.phase === "SETTLED" && (!checkpoint.restorationChoice || checkpoint.riceBeatIndex !== 3 || !checkpoint.presentationChoice)) invalid("Settlement prerequisites are incomplete.");
   if (checkpoint.phase !== "SETTLED" && checkpoint.restorationChoice !== null) invalid("Restoration is committed only at settlement.");
-  if (checkpoint.phase !== "SETTLED" && checkpoint.unlocks.length !== 0) invalid("Pre-settlement state cannot expose an unlock.");
   const kappa = checkpoint.orders[0]!;
   if (checkpoint.presentationChoice && !["READY_TO_PLATE", "PLATED", "SERVED"].includes(kappa.state)) invalid("Presentation can be chosen only after kappa preparation.");
   if (checkpoint.phase === "IDLE") {
-    if (checkpoint.revision !== 0 || checkpoint.riceBeatIndex !== 0 || checkpoint.activeOrderIndex !== 0 || checkpoint.presentationChoice !== null
+    if (checkpoint.riceBeatIndex !== 0 || checkpoint.activeOrderIndex !== 0 || checkpoint.presentationChoice !== null
       || checkpoint.storyFlags.length !== 0 || checkpoint.orders.some((order) => order.state !== "OFFERED")) invalid("Idle must be the exact untouched first-service checkpoint.");
   }
   if (checkpoint.phase === "OPEN") {
@@ -511,9 +522,10 @@ export function reduceEveningService(checkpointInput: unknown, commandInput: unk
     case "service.choose-restoration": {
       const payload = payloadObject(command, ["choice"]);
       if (checkpoint.phase !== "CLOSING" || !FIRST_EVENING_SERVICE_DEFINITION.restorationChoices.includes(payload.choice as RestorationChoice)) return correction(checkpoint, command, "cue.restoration.invalid");
-      const unlocks = [SALMON_SASHIMI_UNLOCK_ID];
+      const alreadyUnlocked = checkpoint.unlocks.includes(SALMON_SASHIMI_UNLOCK_ID);
+      const unlocks = alreadyUnlocked ? checkpoint.unlocks : [SALMON_SASHIMI_UNLOCK_ID];
       const next = nextCheckpoint(checkpoint, { phase: "SETTLED", restorationChoice: payload.choice as RestorationChoice, unlocks });
-      return buildDecision(next, command, true, "feedback.service.settled", true, unlocks);
+      return buildDecision(next, command, true, "feedback.service.settled", true, alreadyUnlocked ? [] : [SALMON_SASHIMI_UNLOCK_ID]);
     }
     case "service.abandon": {
       payloadObject(command, []);

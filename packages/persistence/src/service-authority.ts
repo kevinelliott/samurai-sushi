@@ -3,6 +3,7 @@ import {
   FIRST_EVENING_CONTENT_VERSION,
   createInitialEveningServiceCheckpoint,
   decodeEveningServiceCheckpoint,
+  rebaseEveningServiceCheckpointForClaim,
   reduceEveningService,
   type EveningServiceCheckpoint,
   type EveningServiceResponse,
@@ -15,7 +16,7 @@ import {
   type JsonObject,
   type SubjectRef,
 } from "@samurai-sushi/domain";
-import type { AccountClaimService } from "./account-claim";
+import type { AccountClaimService, AccountClaimServiceOptions } from "./account-claim";
 import { hashPersistenceResponse } from "./canonical-decision";
 import { constantTimeDigestEqual, GuestSecretFormatError } from "./crypto";
 import type { SqlClient, SqlPool } from "./database";
@@ -66,6 +67,13 @@ export type EveningServiceWriteBoundary = "checkpoint" | "settlement-unlock" | "
 export interface EveningServiceAuthorityOptions {
   readonly afterWriteBoundary?: (boundary: EveningServiceWriteBoundary) => void | Promise<void>;
 }
+
+export const mergeFirstEveningCheckpointForClaim: NonNullable<AccountClaimServiceOptions["mergeCheckpoint"]> = (guest, player, intent) => {
+  if (guest.contentVersion !== FIRST_EVENING_CONTENT_VERSION) return guest.checkpoint;
+  const committedRevision = intent.createPlayer ? guest.revision : intent.playerRevision + 1;
+  const playerCheckpoint = player?.content_version === FIRST_EVENING_CONTENT_VERSION ? player.checkpoint : null;
+  return rebaseEveningServiceCheckpointForClaim(guest.checkpoint, playerCheckpoint, committedRevision) as Readonly<Record<string, unknown>>;
+};
 
 interface ProgressRow {
   readonly revision: string;
@@ -393,7 +401,11 @@ export class EveningServiceAuthority {
   #checkpointFromProgress(progress: ProgressRow): EveningServiceCheckpoint {
     const revision = Number(progress.revision);
     if (!Number.isSafeInteger(revision) || revision < 0) throw new PersistenceError("SERVICE_REVISION_INVALID", "The canonical revision is not a safe integer.");
-    if (progress.content_version === FIRST_EVENING_CONTENT_VERSION) return decodeEveningServiceCheckpoint(progress.checkpoint);
+    if (progress.content_version === FIRST_EVENING_CONTENT_VERSION) {
+      const checkpoint = decodeEveningServiceCheckpoint(progress.checkpoint);
+      if (checkpoint.revision !== revision) throw new PersistenceError("SERVICE_REVISION_INVALID", "The checkpoint revision does not match canonical progress.");
+      return checkpoint;
+    }
     if (revision === 0) return createInitialEveningServiceCheckpoint();
     throw new PersistenceError("SERVICE_CONTENT_CONFLICT", "Existing canonical progress belongs to another content authority.");
   }

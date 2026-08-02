@@ -53,7 +53,7 @@ VersionedRef { id, version }
 SpeciesDefinition { id, version, contentHash, reviewId, scientificName, localizedCommonNames, marketNames, group }
 IngredientDefinition { id, version, contentHash, reviewId, kind, speciesRef?, productKind?, roles, names, glossary, baseContainsAllergens, baseMayContainAllergens, baseCrossContactTags, artKey }
 CutStyle { id, version, contentHash, names, glossary, compatibleProductKinds, presentationClass, reviewId }
-PreparedComponent { id, version, contentHash, ingredientRef, cutStyleRef?, treatment, rawNotice, containsAllergens, mayContainAllergens, crossContactTags, stationSteps, artKey, reviewId }
+PreparedComponent { id, version, contentHash, ingredientRef, preparationInputs?:[{ingredientRef:VersionedRef,stationStep}], cutStyleRef?, treatment, rawNotice, containsAllergens, mayContainAllergens, crossContactTags, stationSteps, artKey, reviewId }
 DishFamily { id, version, contentHash, reviewId, form, requiredRoles, allowedRoles, noriPlacement, namingRules, platingRules }
 ComponentSlot { role, componentRef:VersionedRef, noriPlacement? }
 DishDefinition { id, version, contentHash, reviewId, familyRef, names, glossary, componentSlots:[ComponentSlot], rawProfile, containsAllergens, mayContainAllergens, crossContactTags, dietaryTags, presentationRules, nonColorIdentity, artKey }

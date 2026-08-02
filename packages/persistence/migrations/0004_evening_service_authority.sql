@@ -1,6 +1,20 @@
 ALTER TABLE samurai_persistence.guest_progress
   ADD CONSTRAINT guest_progress_safe_revision_check
-  CHECK (revision <= 9007199254740991);
+  CHECK (revision <= 9007199254740991),
+  ADD CONSTRAINT guest_progress_service_revision_check CHECK (
+    content_version <> 'phase-1-evening-service-v1'
+    OR (jsonb_typeof(checkpoint -> 'revision') = 'number'
+      AND checkpoint ->> 'revision' ~ '^(0|[1-9][0-9]{0,15})$'
+      AND (checkpoint ->> 'revision')::numeric = revision)
+  ) NOT VALID;
+
+ALTER TABLE samurai_persistence.player_progress
+  ADD CONSTRAINT player_progress_service_revision_check CHECK (
+    content_version <> 'phase-1-evening-service-v1'
+    OR (jsonb_typeof(checkpoint -> 'revision') = 'number'
+      AND checkpoint ->> 'revision' ~ '^(0|[1-9][0-9]{0,15})$'
+      AND (checkpoint ->> 'revision')::numeric = revision)
+  ) NOT VALID;
 
 ALTER TABLE samurai_persistence.command_receipts
   DROP CONSTRAINT command_receipts_check,
