@@ -1,6 +1,11 @@
 import { randomBytes } from "node:crypto";
+import { ed25519 } from "@noble/curves/ed25519";
+import { blake2b } from "@noble/hashes/blake2b";
+import { b58Encode, PrefixV2 } from "@taquito/utils";
 import { assertCanonicalTezosChainId } from "@samurai-sushi/account-proof-verifier";
 import { hmacKeyIdentity, type HmacKeyPurpose, type VersionedHmacKey } from "@samurai-sushi/persistence";
+import { RECEIPT_AUTHORITY_MANIFEST } from "@samurai-sushi/receipt-authority";
+import type { ReceiptReviewWalletPolicy } from "@samurai-sushi/persistence";
 
 const SECRET_PATTERN = /^[A-Za-z0-9_-]{43}$/;
 
@@ -11,6 +16,7 @@ export interface AccountRuntimeConfig {
   readonly rawHeaderGuard: string;
   readonly keys: Readonly<Record<"resume" | "tombstone" | "guestClaim" | "playerSession", VersionedHmacKey>>;
   readonly resumeVerificationKeys: readonly VersionedHmacKey[];
+  readonly receiptPolicy: ReceiptReviewWalletPolicy | null;
 }
 
 export class RuntimeConfigurationError extends Error {
@@ -93,11 +99,28 @@ export function loadAccountRuntimeConfig(environment: NodeJS.ProcessEnv): Accoun
     retiredAt: exactDate(environment.SAMURAI_HMAC_RESUME_PREVIOUS_RETIRED_AT),
     verifyUntil: exactDate(environment.SAMURAI_HMAC_RESUME_PREVIOUS_VERIFY_UNTIL),
   })] : [];
+  const receiptVariables = [environment.SAMURAI_RECEIPT_DESTINATION, environment.SAMURAI_RECEIPT_ISSUER_SECRET_KEY_HEX];
+  if (receiptVariables.some(Boolean) && !receiptVariables.every(Boolean)) throw new RuntimeConfigurationError();
+  let receiptPolicy: ReceiptReviewWalletPolicy | null = null;
+  if (receiptVariables.every(Boolean)) {
+    const destination = environment.SAMURAI_RECEIPT_DESTINATION!;
+    const secretText = environment.SAMURAI_RECEIPT_ISSUER_SECRET_KEY_HEX!;
+    if (!/^KT1[1-9A-HJ-NP-Za-km-z]{33}$/.test(destination) || !/^[0-9a-f]{64}$/.test(secretText)) throw new RuntimeConfigurationError();
+    const issuerKeyId = environment.SAMURAI_RECEIPT_ISSUER_KEY_ID ?? "localnet-issuer-2026-01";
+    const issuerPolicyVersion = environment.SAMURAI_RECEIPT_ISSUER_POLICY_VERSION ?? "1";
+    const policy = RECEIPT_AUTHORITY_MANIFEST.issuerPolicies.find((item) => item.keyId === issuerKeyId);
+    const secret = Buffer.from(secretText, "hex");
+    if (!policy || policy.policyVersion !== issuerPolicyVersion
+      || b58Encode(ed25519.getPublicKey(secret), PrefixV2.Ed25519PublicKey) !== policy.publicKey) throw new RuntimeConfigurationError();
+    receiptPolicy = Object.freeze({ canonicalOrigin: canonicalOrigin(environment), destination, issuerKeyId, issuerPolicyVersion,
+      signer: (payloadHash: string) => b58Encode(ed25519.sign(blake2b(Buffer.from(payloadHash, "hex"), { dkLen: 32 }), secret), PrefixV2.Ed25519Signature) });
+  }
   return Object.freeze({
     canonicalOrigin: canonicalOrigin(environment),
     chainId,
     databaseUrl: databaseUrl(environment),
     rawHeaderGuard: guard,
+    receiptPolicy,
     resumeVerificationKeys: Object.freeze(resumeVerificationKeys),
     keys: Object.freeze({
       resume: key(environment, "SAMURAI_HMAC_RESUME_KEY", "resume", activatedAt, resumeVerificationKeys.length ? 2 : 1),

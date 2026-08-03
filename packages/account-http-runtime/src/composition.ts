@@ -9,6 +9,8 @@ import {
   mergeFirstEveningCheckpointForClaim,
   PersistenceAuthority,
   PlayerSessionKeyring,
+  ReceiptLifecycleAuthority,
+  ReceiptReviewWalletAuthority,
   TombstoneKeyring,
   type ConnectedSqlClient,
   type QueryResult,
@@ -39,6 +41,7 @@ export interface AccountRuntimeServices {
   readonly guests: GuestSessionService;
   readonly accounts: AccountClaimService;
   readonly evening: EveningServiceAuthority;
+  readonly receiptReview: ReceiptReviewWalletAuthority | null;
   close(): Promise<void>;
 }
 
@@ -58,10 +61,15 @@ export async function composeAccountRuntime(config: AccountRuntimeConfig): Promi
       chainId: config.chainId,
       mergeCheckpoint: mergeFirstEveningCheckpointForClaim,
     });
+    const evening = new EveningServiceAuthority(pool, persistence, accounts);
+    const receiptReview = config.receiptPolicy
+      ? new ReceiptReviewWalletAuthority(pool, evening, new ReceiptLifecycleAuthority(pool, evening), config.receiptPolicy)
+      : null;
     return Object.freeze({
       guests: new GuestSessionService(pool, persistence, { claimKeys: guestClaimKeys }),
       accounts,
-      evening: new EveningServiceAuthority(pool, persistence, accounts),
+      evening,
+      receiptReview,
       close: async () => rawPool.end(),
     });
   } catch (error) {

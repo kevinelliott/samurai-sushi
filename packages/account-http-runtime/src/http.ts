@@ -10,6 +10,7 @@ import {
   type AccountClaimService,
   type EveningServiceAuthority,
   type GuestSessionService,
+  type ReceiptReviewWalletAuthority,
   type ServiceSubjectCredential,
 } from "@samurai-sushi/persistence";
 import { buildBrowserEveningServiceView, compiledFirstEveningService } from "@samurai-sushi/content";
@@ -30,6 +31,7 @@ export interface AccountHttpServices {
   readonly guests: GuestSessionService;
   readonly accounts: AccountClaimService;
   readonly evening: EveningServiceAuthority;
+  readonly receiptReview: ReceiptReviewWalletAuthority | null;
 }
 
 export interface AccountHttpLogEvent {
@@ -53,6 +55,7 @@ function response(status: number, body: Readonly<Record<string, unknown>>, cooki
   const headers = new Headers({
     "Cache-Control": "no-store",
     "Content-Type": "application/json",
+    "Vary": "Cookie",
   });
   for (const cookie of cookies) headers.append("Set-Cookie", cookie);
   return new Response(JSON.stringify(body), { status, headers });
@@ -142,6 +145,16 @@ function proof(value: unknown): Readonly<Record<string, unknown>> {
   return strictObject(value, ["challenge", "publicKey", "signature"]);
 }
 
+function walletRuntime(value: unknown): Parameters<ReceiptReviewWalletAuthority["syncRuntime"]>[1]["runtime"] {
+  const row = strictObject(value, ["providerId", "chainId", "account", "permissionScopes"]);
+  if (!Array.isArray(row.permissionScopes) || row.permissionScopes.length !== 1 || row.permissionScopes[0] !== "account") {
+    throw new StrictJsonError();
+  }
+  const providerId = text(row.providerId);
+  if (providerId !== "localnet-wallet" && providerId !== "deterministic-wallet") throw new StrictJsonError();
+  return { providerId, chainId: text(row.chainId), account: text(row.account), permissionScopes: ["account"] };
+}
+
 function claimTransportIntent(value: unknown, capability: string): Readonly<Record<string, unknown>> {
   const base = strictObject(value, ["claimId", "createPlayer", "guestRevision", "idempotencyKey", "contentVersion", "cosmeticSelections"],
     ["targetPlayerId", "playerRevision"]);
@@ -208,6 +221,13 @@ function assertAuthorityCookieInventory(
     "deletion.submit": ["", "player"],
     "service.query": ["guest", "claim,guest", "player"],
     "service.command": ["guest", "claim,guest", "player"],
+    "receipt.review.prepare": ["guest", "claim,guest", "player"],
+    "receipt.review.restore": ["guest", "claim,guest", "player"],
+    "wallet.runtime.sync": ["guest", "claim,guest", "player"],
+    "wallet.link.challenge": ["guest", "claim,guest", "player"],
+    "wallet.link.proof": ["guest", "claim,guest", "player"],
+    "wallet.link.disconnect": ["guest", "claim,guest", "player"],
+    "receipt.review.preflight": ["guest", "claim,guest", "player"],
   };
   if (!allowed[operation].includes(key)) {
     if (operation === "service.query" || operation === "service.command") throw new ServiceAuthorityCookieError();
@@ -432,6 +452,69 @@ export async function handleAccountHttpRequest(
         payload = { view: serviceView(executed.response.checkpoint, credential, executed.disposition, executed.response.correctiveCueId) };
         break;
       }
+      case "wallet.runtime.sync": {
+        if (!services.receiptReview) return failure(operation, logger, PUBLIC_HTTP_FAILURES.runtime);
+        const input = strictObject(body, ["idempotencyKey", "runtimeGeneration", "sessionRevision", "runtime"]);
+        payload = await services.receiptReview.syncRuntime(serviceCredential(cookies), {
+          idempotencyKey: text(input.idempotencyKey), runtimeGeneration: safeInteger(input.runtimeGeneration),
+          sessionRevision: safeInteger(input.sessionRevision), runtime: walletRuntime(input.runtime),
+        }) as unknown as Readonly<Record<string, unknown>>;
+        break;
+      }
+      case "wallet.link.challenge": {
+        if (!services.receiptReview) return failure(operation, logger, PUBLIC_HTTP_FAILURES.runtime);
+        const input = strictObject(body, ["idempotencyKey", "walletLinkRef", "runtimeGeneration", "sessionRevision"]);
+        payload = await services.receiptReview.issueChallenge(serviceCredential(cookies), {
+          idempotencyKey: text(input.idempotencyKey), walletLinkRef: text(input.walletLinkRef),
+          runtimeGeneration: safeInteger(input.runtimeGeneration), sessionRevision: safeInteger(input.sessionRevision),
+        }) as unknown as Readonly<Record<string, unknown>>;
+        break;
+      }
+      case "wallet.link.proof": {
+        if (!services.receiptReview) return failure(operation, logger, PUBLIC_HTTP_FAILURES.runtime);
+        const input = strictObject(body, ["idempotencyKey", "walletLinkRef", "challengeRef", "proof"]);
+        payload = await services.receiptReview.consumeProof(serviceCredential(cookies), {
+          idempotencyKey: text(input.idempotencyKey), walletLinkRef: text(input.walletLinkRef),
+          challengeRef: text(input.challengeRef), proof: proof(input.proof) as unknown as Parameters<ReceiptReviewWalletAuthority["consumeProof"]>[1]["proof"],
+        }) as unknown as Readonly<Record<string, unknown>>;
+        break;
+      }
+      case "wallet.link.disconnect": {
+        if (!services.receiptReview) return failure(operation, logger, PUBLIC_HTTP_FAILURES.runtime);
+        const input = strictObject(body, ["idempotencyKey", "walletLinkRef", "runtimeGeneration", "sessionRevision"]);
+        payload = await services.receiptReview.disconnect(serviceCredential(cookies), {
+          idempotencyKey: text(input.idempotencyKey), walletLinkRef: text(input.walletLinkRef),
+          runtimeGeneration: safeInteger(input.runtimeGeneration), sessionRevision: safeInteger(input.sessionRevision),
+        }) as unknown as Readonly<Record<string, unknown>>;
+        break;
+      }
+      case "receipt.review.prepare": {
+        if (!services.receiptReview) return failure(operation, logger, PUBLIC_HTTP_FAILURES.runtime);
+        const input = strictObject(body, ["idempotencyKey", "walletLinkRef", "runtimeGeneration", "sessionRevision"]);
+        payload = { projection: await services.receiptReview.prepareReview(serviceCredential(cookies), {
+          idempotencyKey: text(input.idempotencyKey), walletLinkRef: text(input.walletLinkRef),
+          runtimeGeneration: safeInteger(input.runtimeGeneration), sessionRevision: safeInteger(input.sessionRevision),
+        }) };
+        break;
+      }
+      case "receipt.review.restore": {
+        if (!services.receiptReview) return failure(operation, logger, PUBLIC_HTTP_FAILURES.runtime);
+        exactEmpty(body);
+        payload = await services.receiptReview.restoreReviewState(serviceCredential(cookies));
+        break;
+      }
+      case "receipt.review.preflight": {
+        if (!services.receiptReview) return failure(operation, logger, PUBLIC_HTTP_FAILURES.runtime);
+        const input = strictObject(body, ["idempotencyKey", "walletLinkRef", "runtimeGeneration", "sessionRevision",
+          "publicIntentRef", "expectedProjectionRevision", "reviewDigest"]);
+        payload = await services.receiptReview.preflight(serviceCredential(cookies), {
+          idempotencyKey: text(input.idempotencyKey), walletLinkRef: text(input.walletLinkRef),
+          runtimeGeneration: safeInteger(input.runtimeGeneration), sessionRevision: safeInteger(input.sessionRevision),
+          publicIntentRef: text(input.publicIntentRef), expectedProjectionRevision: text(input.expectedProjectionRevision),
+          reviewDigest: text(input.reviewDigest),
+        }) as unknown as Readonly<Record<string, unknown>>;
+        break;
+      }
     }
     emit(logger, { event: "account_http_completed", operation, resultCode: "OK" });
     return response(200, payload, outgoing);
@@ -454,9 +537,12 @@ export async function handleAccountHttpRequest(
     if (error instanceof GuestRotationDeferredError) {
       return failure(operation, logger, { status: 409, body: { code: "GUEST_ROTATION_DEFERRED", message: "Guest rotation is temporarily deferred." } });
     }
+    if (errorCode(error)?.includes("NOT_FOUND")) return failure(operation, logger, PUBLIC_HTTP_FAILURES.notFound);
     const category = operation.startsWith("guest.")
       ? PUBLIC_HTTP_FAILURES.guest
-      : operation.startsWith("service.") ? PUBLIC_HTTP_FAILURES.service : PUBLIC_HTTP_FAILURES.request;
+      : operation.startsWith("service.") ? PUBLIC_HTTP_FAILURES.service
+        : operation.startsWith("wallet.") ? PUBLIC_HTTP_FAILURES.wallet
+          : operation.startsWith("receipt.") ? PUBLIC_HTTP_FAILURES.review : PUBLIC_HTTP_FAILURES.request;
     return failure(operation, logger, category);
   }
 }

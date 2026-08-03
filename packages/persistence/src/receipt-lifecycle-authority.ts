@@ -21,7 +21,7 @@ import {
 import type { SqlClient, SqlPool } from "./database";
 import { TransactionRunner } from "./database";
 import { IdempotencyPayloadMismatchError, ReceiptLifecycleError, ReceiptWorkerClaimLostError } from "./errors";
-import type { ServiceSubjectCredential, EveningServiceAuthority } from "./service-authority";
+import type { ServiceSubjectCredential, EveningServiceAuthority, SettledServiceTransactionContext } from "./service-authority";
 
 const PUBLIC_NETWORK = GENERATED_REGISTERED_RECEIPT_NETWORK_INVENTORY[0]!;
 
@@ -77,8 +77,14 @@ interface IntentRow {
   readonly subject_id: string;
   readonly state: string;
   readonly chain_id: string;
+  readonly profile: "localnet";
+  readonly network_label_ref: string;
   readonly account: string;
+  readonly owner: string;
+  readonly source: string;
   readonly contract_address: string;
+  readonly entrypoint: "submit_receipt";
+  readonly attached_mutez: string;
   readonly service_commitment: Uint8Array;
   readonly content_version: string;
   readonly nonce: Uint8Array;
@@ -86,9 +92,12 @@ interface IntentRow {
   readonly deployment_manifest_hash: Uint8Array;
   readonly issuer_key_id: string;
   readonly issuer_policy_version: string;
+  readonly packed_payload: Uint8Array;
   readonly confirmation_threshold: number;
   readonly finality_policy_id: string;
   readonly expires_at: Date;
+  readonly issued_at: Date;
+  readonly created_at: Date;
   readonly projection_revision: string;
 }
 
@@ -212,6 +221,26 @@ function reviewedProjection(
   });
 }
 
+function reviewedProjectionFromIntent(intent: IntentRow): BrowserSafeReceiptReviewProjectionV1 {
+  return parseBrowserSafeReceiptReviewProjection({
+    schemaVersion: 1,
+    projectionRevision: intent.projection_revision,
+    intent: { intentRef: intent.public_intent_ref, state: "REVIEWED", createdAt: intent.created_at.toISOString(), expiresAt: intent.expires_at.toISOString() },
+    status: { displayState: "REVIEWED", titleRef: "receipt.status.reviewed.title",
+      messageRef: "receipt.status.reviewed.message", nextActionRef: "receipt.action.review-details", tone: "neutral" },
+    reviewFacts: {
+      domain: "SAMURAI_SUSHI_RECEIPT_V1", payloadSchemaVersion: 1,
+      network: PUBLIC_NETWORK, owner: intent.owner, source: intent.source, destination: intent.contract_address,
+      entrypoint: intent.entrypoint, attachedMutez: intent.attached_mutez, serviceCommitment: hex(intent.service_commitment),
+      contentVersion: intent.content_version, nonce: hex(intent.nonce), issuedAt: intent.issued_at.toISOString(),
+      expiry: intent.expires_at.toISOString(), issuerKeyId: intent.issuer_key_id,
+      issuerPolicyVersion: intent.issuer_policy_version, packedPayloadHex: hex(intent.packed_payload), payloadHash: hex(intent.payload_hash),
+    },
+    policy: { confirmationThreshold: String(intent.confirmation_threshold), finalityPolicyRef: intent.finality_policy_id },
+    activeAttempt: null, canonicalReceipt: null, incident: null,
+  });
+}
+
 function eventId(intentId: string, sequence: number, kind: string): string {
   return `receipt:${createHash("sha256").update("samurai-sushi:receipt-event:v1\n").update(intentId).update("\0").update(String(sequence)).update("\0").update(kind).digest("hex")}`;
 }
@@ -238,11 +267,21 @@ export class ReceiptLifecycleAuthority {
     input: PrepareSettledReceiptIntentInput,
     signer: ReceiptPermitSigner,
   ): Promise<BrowserSafeReceiptReviewProjectionV1> {
+    return this.service.runSettledTransaction(credential, input.idempotencyKey,
+      (context) => this.prepareSettledReceiptIntentInTransaction(context, input, signer));
+  }
+
+  /** Shared SETTLED-lock seam for the Phase 2C wallet/runtime authority. */
+  async prepareSettledReceiptIntentInTransaction(
+    context: SettledServiceTransactionContext,
+    input: PrepareSettledReceiptIntentInput,
+    signer: ReceiptPermitSigner,
+  ): Promise<BrowserSafeReceiptReviewProjectionV1> {
     if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{15,127}$/.test(input.idempotencyKey)) throw new ReceiptLifecycleError("RECEIPT_INPUT_INVALID", "Receipt idempotency key is invalid.");
     if (input.chainId !== PUBLIC_NETWORK.chainId || input.deploymentManifestHash !== PUBLIC_NETWORK.deploymentManifestHash) {
       throw new ReceiptLifecycleError("CHAIN_OR_MANIFEST_DRIFT", "Receipt preparation does not match the registered network tuple.");
     }
-    return this.service.runSettledTransaction(credential, input.idempotencyKey, async ({ client, subjectKind, subjectId, checkpoint, now }) => {
+    const { client, subjectKind, subjectId, checkpoint, now } = context;
       const permit = issueSettledReceiptPermit({
         checkpoint,
         commitmentNonce: input.commitmentNonce,
@@ -320,7 +359,33 @@ export class ReceiptLifecycleAuthority {
       );
       await this.options.afterWriteBoundary?.("audit");
       return projection;
-    });
+  }
+
+  async restoreSettledReceiptProjection(
+    credential: ServiceSubjectCredential,
+    publicIntentRef: string,
+  ): Promise<BrowserSafeReceiptReviewProjectionV1> {
+    return this.service.runSettledTransaction(credential, `restore:${publicIntentRef}`,
+      (context) => this.restoreSettledReceiptProjectionInTransaction(context, publicIntentRef));
+  }
+
+  /** Subject-locked restore seam; no signature or executable permit leaves the server. */
+  async restoreSettledReceiptProjectionInTransaction(
+    context: SettledServiceTransactionContext,
+    publicIntentRef: string,
+  ): Promise<BrowserSafeReceiptReviewProjectionV1> {
+    if (!/^ri_[A-Za-z0-9_-]{22}$/.test(publicIntentRef)) {
+      throw new ReceiptLifecycleError("RECEIPT_INTENT_NOT_FOUND", "Receipt intent is unavailable to this subject.");
+    }
+    const intent = await this.#lockIntentByPublicRef(context.client, publicIntentRef, context.subjectKind, context.subjectId);
+    if (context.now.getTime() >= intent.expires_at.getTime()) {
+      await this.#expireLockedIntent(context.client, intent, context.now);
+      throw new ReceiptLifecycleError("RECEIPT_EXPIRED", "The prepared receipt expired at the exact database-clock boundary.");
+    }
+    if (intent.state !== "REVIEWED") {
+      throw new ReceiptLifecycleError("RECEIPT_INTENT_ADVANCED", "The receipt is no longer in the read-only review state.");
+    }
+    return reviewedProjectionFromIntent(intent);
   }
 
   async markAwaitingSignature(credential: ServiceSubjectCredential, publicIntentRef: string): Promise<void> {

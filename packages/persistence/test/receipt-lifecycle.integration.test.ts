@@ -76,6 +76,8 @@ describe("Phase 2B durable receipt lifecycle authority", () => {
           client,
           subjectKind: "player",
           subjectId: "player_phase2b_test_001",
+          playerSessionId: "11111111-1111-4111-8111-111111111111",
+          playerSessionDeliveryGeneration: 1,
           checkpoint: deterministicSettledCheckpointFixture(),
           now: clock.rows[0]!.now,
         });
@@ -686,7 +688,9 @@ describe("Phase 2B durable receipt lifecycle authority", () => {
     const serviceFor = (subjectId: string): EveningServiceAuthority => ({
       runSettledTransaction: async <T>(_credential: unknown, _scope: string, operation: (context: SettledServiceTransactionContext) => Promise<T>): Promise<T> => runner.run(async (client) => {
         const clock = await client.query<{ readonly now: Date }>("SELECT clock_timestamp() AS now");
-        return operation({ client, subjectKind: "player", subjectId, checkpoint: deterministicSettledCheckpointFixture(), now: clock.rows[0]!.now });
+        return operation({ client, subjectKind: "player", subjectId,
+          playerSessionId: "11111111-1111-4111-8111-111111111111", playerSessionDeliveryGeneration: 1,
+          checkpoint: deterministicSettledCheckpointFixture(), now: clock.rows[0]!.now });
       }),
     } as unknown as EveningServiceAuthority);
     const firstAuthority = new ReceiptLifecycleAuthority(pool, serviceFor("player_phase2b_test_001"), { maximumConsecutiveFailures: 1 });

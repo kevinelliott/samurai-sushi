@@ -18,6 +18,8 @@ function configIdentity(config: AccountRuntimeConfig): string {
     ...Object.values(config.keys).map((key) => `${key.version}:${key.keyIdentity}:${key.activatedAt.toISOString()}`),
     ...config.resumeVerificationKeys.map((key) => [key.version, key.keyIdentity, key.activatedAt.toISOString(),
       key.retiredAt?.toISOString() ?? "", key.verifyUntil?.toISOString() ?? "", key.compromisedAt?.toISOString() ?? ""].join(":")),
+    config.receiptPolicy ? [config.receiptPolicy.destination, config.receiptPolicy.issuerKeyId,
+      config.receiptPolicy.issuerPolicyVersion].join(":") : "receipt-disabled",
   ].join("|");
 }
 

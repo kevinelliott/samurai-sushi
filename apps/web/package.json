@@ -12,6 +12,8 @@
     "@samurai-sushi/account-http-runtime": "workspace:*",
     "@samurai-sushi/domain": "workspace:*",
     "@samurai-sushi/network": "workspace:*",
+    "@samurai-sushi/receipt-lifecycle": "workspace:*",
+    "@samurai-sushi/wallet-link": "workspace:*",
     "next": "16.2.12",
     "react": "19.2.8",
     "react-dom": "19.2.8"

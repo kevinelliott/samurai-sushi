@@ -1,12 +1,16 @@
-import { createHash } from "node:crypto";
+import { createHash, generateKeyPairSync, sign as signMessage } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { b58DecodeAndCheckPrefix, b58Encode, PrefixV2, verifySignature } from "@taquito/utils";
 import { walletSigningBytes } from "@samurai-sushi/domain/claim-protocol";
+import { blake2b } from "@noble/hashes/blake2b";
+import { getPkhfromPk } from "@taquito/utils";
+import { walletLinkSigningBytes } from "@samurai-sushi/wallet-link";
 import { describe, expect, it } from "vitest";
 import {
   AccountProofError,
   accountProofVerifierProfile,
   verifyAccountProof,
+  verifyWalletLinkProof,
   type TezosAccountScheme,
 } from "./index";
 
@@ -86,6 +90,20 @@ function corruptChecksum(value: string): string {
 }
 
 describe("server-side account proof verifier", () => {
+  it("verifies the purpose-specific wallet review challenge without widening claim parsing", () => {
+    const { privateKey, publicKey } = generateKeyPairSync("ed25519");
+    const der = publicKey.export({ format: "der", type: "spki" });
+    const publicKeyText = b58Encode(der.subarray(der.byteLength - 32), PrefixV2.Ed25519PublicKey);
+    const walletChallenge = { domain: "samurai-sushi:receipt-wallet-link:v1", schemaVersion: 1,
+      purpose: "RECEIPT_WALLET_LINK", canonicalOrigin: "https://game.samurai-sushi.example",
+      publicLinkRef: "wl_AAAAAAAAAAAAAAAAAAAAAA", chainId: "NetXtJqPyJGB6Pc", account: getPkhfromPk(publicKeyText),
+      providerId: "deterministic-wallet", permissionScopeDigest: "a".repeat(64), runtimeGeneration: 2,
+      sessionRevision: 3, privacyPolicyVersion: "receipt-wallet-privacy-v1", nonce: "A".repeat(43),
+      issuedAt: "2026-08-02T14:00:00.000Z", expiresAt: "2026-08-02T14:05:00.000Z" };
+    const signature = b58Encode(signMessage(null, blake2b(walletLinkSigningBytes(walletChallenge), { dkLen: 32 }), privateKey), PrefixV2.Ed25519Signature);
+    expect(verifyWalletLinkProof({ challenge: walletChallenge, publicKey: publicKeyText, signature })).toMatchObject({ account: walletChallenge.account, publicKey: publicKeyText, scheme: "tz1" });
+    expect(() => verifyAccountProof({ challenge: walletChallenge, publicKey: publicKeyText, signature })).toThrow(AccountProofError);
+  });
   it("pins and accepts the four curve-specific proof tuples over exact Micheline bytes", () => {
     expect(accountProofVerifierProfile).toEqual({
       taquitoUtilsVersion: "25.0.0",

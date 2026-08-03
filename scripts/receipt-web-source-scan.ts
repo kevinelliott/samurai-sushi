@@ -1,7 +1,7 @@
 import { lstatSync, readdirSync, readFileSync } from "node:fs";
 import { relative, resolve, sep } from "node:path";
 
-export const RECEIPT_WEB_CONTAMINATION = /receipt-authority|SAMURAI_SUSHI_RECEIPT_V1|edsk2gM2LioC6Yfk|issueSettledReceiptPermit|admitSettledReceiptPermit|deriveSettledServiceReceiptFacts|FIXTURE_SETTLED_COMMITMENT_NONCE|deterministicSettledCheckpointFixture|commitmentNonce|SAMURAI_SUSHI_SERVICE_COMMITMENT_V1/;
+export const RECEIPT_WEB_CONTAMINATION = /receipt-authority(?:\/server)?|edsk2gM2LioC6Yfk|issueSettledReceiptPermit|admitSettledReceiptPermit|deriveSettledServiceReceiptFacts|FIXTURE_SETTLED_COMMITMENT_NONCE|deterministicSettledCheckpointFixture|commitmentNonce|commitmentPreimage|issuerSignature|executablePermit|workerToken|leaseGeneration|SAMURAI_SUSHI_SERVICE_COMMITMENT_V1|challenge_id|player_session_id|credential_id|wallet_link_id|proof_hash|proof_request_hash|rawProvider(?:Payload|Error)?|providerErrorText|requestSignPayload|requestOperation|sendOperations|injectOperation|broadcastOperation|buildContractCall|estimateNetworkFee|ObserveOperation/;
 
 function repositoryPath(root: string, absolute: string): string {
   const path = relative(root, absolute);

@@ -2,10 +2,11 @@ import { readdir, readFile } from "node:fs/promises";
 import { createServer as createHttpServer, request as httpRequest } from "node:http";
 import { connect as connectSocket } from "node:net";
 import { resolve } from "node:path";
-import { generateKeyPairSync, randomUUID, sign as signMessage } from "node:crypto";
+import { createHash, generateKeyPairSync, randomUUID, sign as signMessage } from "node:crypto";
 import { blake2b } from "@noble/hashes/blake2b";
 import { b58Encode, getPkhfromPk, PrefixV2 } from "@taquito/utils";
 import { compiledFirstEveningService } from "@samurai-sushi/content";
+import { canonicalJson } from "@samurai-sushi/domain";
 import { walletSigningBytes } from "@samurai-sushi/domain/claim-protocol";
 import { Pool, type PoolClient, type QueryResult as PgQueryResult } from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -52,6 +53,8 @@ function environment(guardByte: number, applicationName: string): NodeJS.Process
     SAMURAI_HMAC_GUEST_CLAIM_KEY: key(11),
     SAMURAI_HMAC_PLAYER_SESSION_KEY: key(12),
     SAMURAI_INTERNAL_RAW_HEADER_GUARD: key(guardByte),
+    SAMURAI_RECEIPT_DESTINATION: "KT1RJ6PbjHpwc3M5rw5s2Nbmefwbuwbdxton",
+    SAMURAI_RECEIPT_ISSUER_SECRET_KEY_HEX: "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20",
   };
 }
 
@@ -517,6 +520,99 @@ describe("built account HTTP boundary", () => {
       phase: "SETTLED", unlock: { key: "dish-salmon-sashimi" }, revision: 29,
       disposition: "query", ledgerRows: [{ orderId: "ceramicist-kappa" },
       { orderId: "fishmonger-tamago" }, { orderId: "courier-salmon" }] } });
+
+    const boundaryRuntime = await requestJson(portOf(server), "/api/account/wallet/runtime/sync", JSON.stringify({
+      idempotencyKey: randomUUID(), runtimeGeneration: Number.MAX_SAFE_INTEGER, sessionRevision: 0,
+      runtime: { providerId: "deterministic-wallet", chainId: "NetXtJqPyJGB6Pc", account: wallet.account,
+        permissionScopes: ["account"] },
+    }), playerCookie);
+    expect(boundaryRuntime.status, `boundary wallet runtime: ${boundaryRuntime.body}`).toBe(409);
+
+    const runtimeBody = JSON.stringify({ idempotencyKey: randomUUID(), runtimeGeneration: 1, sessionRevision: 0,
+      runtime: { providerId: "deterministic-wallet", chainId: "NetXtJqPyJGB6Pc", account: wallet.account,
+        permissionScopes: ["account"] } });
+    const runtime = await requestJson(portOf(server), "/api/account/wallet/runtime/sync", runtimeBody, playerCookie);
+    expect(runtime.status, `wallet runtime: ${runtime.body}`).toBe(200);
+    const runtimeView = JSON.parse(runtime.body) as { readonly walletLinkRef: string; readonly runtimeGeneration: number;
+      readonly sessionRevision: number; readonly credentialMatch: boolean; readonly state: string };
+    expect(runtimeView).toMatchObject({ credentialMatch: true, state: "ACTIVE_CREDENTIAL_MATCH", runtimeGeneration: 1, sessionRevision: 1 });
+    expect(runtime.body).not.toMatch(/playerId|sessionId|credentialId|publicKey|rawProvider|signature|permit|checkpoint|worker|lease/);
+
+    const prepareKey = randomUUID();
+    const prepareBody = JSON.stringify({ idempotencyKey: prepareKey, walletLinkRef: runtimeView.walletLinkRef,
+      runtimeGeneration: runtimeView.runtimeGeneration, sessionRevision: runtimeView.sessionRevision });
+    const prepared = await requestJson(portOf(server), "/api/account/receipt/review/prepare", prepareBody, playerCookie);
+    expect(prepared.status, `receipt prepare: ${prepared.body}`).toBe(200);
+    const projection = (JSON.parse(prepared.body) as { readonly projection: Record<string, unknown> }).projection;
+    expect(projection).toMatchObject({ schemaVersion: 1, intent: { state: "REVIEWED" }, reviewFacts: {
+      owner: wallet.account, source: wallet.account, destination: "KT1RJ6PbjHpwc3M5rw5s2Nbmefwbuwbdxton",
+      entrypoint: "submit_receipt", attachedMutez: "0" } });
+    expect((await requestJson(portOf(server), "/api/account/receipt/review/prepare", prepareBody, playerCookie)).body).toBe(prepared.body);
+    const restored = await requestJson(portOf(server), "/api/account/receipt/review/restore", "{}", playerCookie);
+    expect(restored.status, restored.body).toBe(200);
+    const restoredBody = JSON.parse(restored.body) as { readonly walletAccess: Record<string, unknown> };
+    expect(restoredBody).toMatchObject({ schemaVersion: 1, doorway: {
+      network: { profile: "localnet", chainId: "NetXtJqPyJGB6Pc", label: "Localnet rehearsal" },
+      actionLabel: "Connect wallet for Localnet rehearsal",
+    }, accessPresentation: { ref: "wallet.access.disconnected", recoveryAction: { ref: "wallet.access.reconnect" } },
+    projection, walletAccess: { walletLinkRef: runtimeView.walletLinkRef, state: "ACTIVE_CREDENTIAL_MATCH",
+      runtimeGeneration: runtimeView.runtimeGeneration, sessionRevision: runtimeView.sessionRevision } });
+
+    const reviewDigest = createHash("sha256").update(canonicalJson(projection)).digest("hex");
+    const receiptIntent = projection.intent as { readonly intentRef: string; readonly expiresAt: string };
+    const preflightBody = JSON.stringify({ idempotencyKey: randomUUID(), walletLinkRef: runtimeView.walletLinkRef,
+      runtimeGeneration: runtimeView.runtimeGeneration, sessionRevision: runtimeView.sessionRevision,
+      publicIntentRef: receiptIntent.intentRef, expectedProjectionRevision: projection.projectionRevision, reviewDigest });
+    const preflight = await requestJson(portOf(server), "/api/account/receipt/review/preflight", preflightBody, playerCookie);
+    expect(preflight.status, preflight.body).toBe(200);
+    expect(JSON.parse(preflight.body)).toMatchObject({ schemaVersion: 1, status: "REVIEW_READY", intentRef: receiptIntent.intentRef,
+      walletLinkRef: runtimeView.walletLinkRef, reviewDigest });
+    expect(preflight.body).not.toMatch(
+      /transportCallback|issuerSignature|executablePermit|requestSignPayload|requestOperation|operationBytes|feeEstimate|playerId|sessionId|credentialId/,
+    );
+    const stale = await requestJson(portOf(server), "/api/account/receipt/review/preflight", JSON.stringify({
+      ...JSON.parse(preflightBody), idempotencyKey: randomUUID(), sessionRevision: runtimeView.sessionRevision + 1,
+    }), playerCookie);
+    expect(stale.status).toBe(200);
+    expect(JSON.parse(stale.body)).toMatchObject({ schemaVersion: 1, status: "NOT_READY", reason: "WALLET_SESSION_REVISION_STALE",
+      presentation: { reasonRef: "receipt.preflight.session-revision-stale" } });
+    const challengeRejected = await requestJson(portOf(server), "/api/account/wallet/link/challenge", JSON.stringify({
+      idempotencyKey: randomUUID(), walletLinkRef: runtimeView.walletLinkRef,
+      runtimeGeneration: runtimeView.runtimeGeneration, sessionRevision: runtimeView.sessionRevision,
+    }), playerCookie);
+    expect(challengeRejected.status, `active-credential challenge: ${challengeRejected.body}`).toBe(409);
+    const proofRejected = await requestJson(portOf(server), "/api/account/wallet/link/proof", JSON.stringify({
+      idempotencyKey: randomUUID(), walletLinkRef: runtimeView.walletLinkRef, challengeRef: `wc_${"A".repeat(22)}`,
+      proof: { challenge: {}, publicKey: "invalid", signature: "invalid" },
+    }), playerCookie);
+    expect(proofRejected.status, `malformed fixture proof: ${proofRejected.body}`).toBe(409);
+    const disconnectBody = JSON.stringify({ idempotencyKey: randomUUID(), walletLinkRef: runtimeView.walletLinkRef,
+      runtimeGeneration: runtimeView.runtimeGeneration, sessionRevision: runtimeView.sessionRevision });
+    const disconnected = await requestJson(portOf(server), "/api/account/wallet/link/disconnect", disconnectBody, playerCookie);
+    expect(disconnected.status, `wallet disconnect: ${disconnected.body}`).toBe(200);
+    expect(JSON.parse(disconnected.body)).toMatchObject({ state: "DISCONNECTED", credentialMatch: false,
+      runtimeGeneration: runtimeView.runtimeGeneration + 1, sessionRevision: runtimeView.sessionRevision + 1 });
+    const disconnectedReplay = await requestJson(portOf(server), "/api/account/wallet/link/disconnect", disconnectBody, playerCookie);
+    expect(disconnectedReplay.status, `wallet disconnect replay: ${disconnectedReplay.body}`).toBe(200);
+    expect(disconnectedReplay.body).toBe(disconnected.body);
+    const reconnected = await requestJson(portOf(server), "/api/account/wallet/runtime/sync", JSON.stringify({
+      idempotencyKey: randomUUID(), runtimeGeneration: runtimeView.runtimeGeneration + 1, sessionRevision: 0,
+      runtime: { providerId: "deterministic-wallet", chainId: "NetXtJqPyJGB6Pc", account: wallet.account,
+        permissionScopes: ["account"] },
+    }), playerCookie);
+    expect(reconnected.status, `wallet reconnect after restore retirement: ${reconnected.body}`).toBe(200);
+    const reconnectedView = JSON.parse(reconnected.body) as typeof runtimeView;
+    expect(reconnectedView).toMatchObject({ state: "ACTIVE_CREDENTIAL_MATCH", credentialMatch: true,
+      runtimeGeneration: runtimeView.runtimeGeneration + 1, sessionRevision: 1 });
+    const restoredReconnect = await requestJson(portOf(server), "/api/account/receipt/review/restore", "{}", playerCookie);
+    expect(JSON.parse(restoredReconnect.body)).toMatchObject({ projection,
+      accessPresentation: { ref: "wallet.access.disconnected", recoveryAction: { ref: "wallet.access.reconnect" } },
+      walletAccess: { walletLinkRef: reconnectedView.walletLinkRef, state: "ACTIVE_CREDENTIAL_MATCH" } });
+    const reconnectDisconnect = await requestJson(portOf(server), "/api/account/wallet/link/disconnect", JSON.stringify({
+      idempotencyKey: randomUUID(), walletLinkRef: reconnectedView.walletLinkRef,
+      runtimeGeneration: reconnectedView.runtimeGeneration, sessionRevision: reconnectedView.sessionRevision,
+    }), playerCookie);
+    expect(reconnectDisconnect.status, reconnectDisconnect.body).toBe(200);
     const serviceMatrixBeforeReplay = (await admin.query<{ events: string; outbox: string; receipts: string }>(`SELECT
       (SELECT count(*)::text FROM samurai_persistence.domain_events WHERE player_id=$1 AND event_type LIKE 'service.%') AS events,
       (SELECT count(*)::text FROM samurai_persistence.outbox_deliveries o JOIN samurai_persistence.domain_events e ON e.event_id=o.event_id
@@ -535,15 +631,17 @@ describe("built account HTTP boundary", () => {
     [claimPayload.playerId])).rows[0]!;
     expect(serviceMatrixAfterReplay).toEqual(serviceMatrixBeforeReplay);
     const rotated = await requestJson(portOf(server), "/api/account/player/session/rotate", "{}", playerCookie);
-    expect(rotated.status).toBe(200);
+    expect(rotated.status, `player rotation after review: ${rotated.body}`).toBe(200);
     const rotatedSecret = cookieValue(rotated.rawHeaders, "__Host-samurai-player");
     const rotatedCookie = `__Host-samurai-player=${rotatedSecret}`;
     const rotatedPayload = JSON.parse(rotated.body) as typeof claimResult;
     const rotatedCoordinates = { playerId: rotatedPayload.playerId, claimId: rotatedPayload.claimId,
       sessionId: rotatedPayload.sessionId, deliveryGeneration: rotatedPayload.deliveryGeneration };
-    expect((await requestJson(portOf(server), "/api/account/claim/delivery",
-      JSON.stringify(rotatedCoordinates), rotatedCookie)).status).toBe(200);
-    expect((await requestJson(portOf(server), "/api/account/player/session", "{}", rotatedCookie)).status).toBe(200);
+    const rotatedDelivery = await requestJson(portOf(server), "/api/account/claim/delivery",
+      JSON.stringify(rotatedCoordinates), rotatedCookie);
+    expect(rotatedDelivery.status, `rotated delivery after review: ${rotatedDelivery.body}`).toBe(200);
+    const rotatedSession = await requestJson(portOf(server), "/api/account/player/session", "{}", rotatedCookie);
+    expect(rotatedSession.status, `rotated session after review: ${rotatedSession.body}`).toBe(200);
     const replay = await requestJson(portOf(server), "/api/account/claim",
       JSON.stringify({ intent, challengeId: challenge.challengeId, proof }), guestCookies);
     expect(replay.status, `claim replay after delivery: ${replay.body}`).toBe(409);
@@ -558,7 +656,7 @@ describe("built account HTTP boundary", () => {
     const expiredIntent = { ...intent, claimId: randomUUID(), idempotencyKey: randomUUID(), guestRevision: 0, contentVersion: "v1" };
     const expiring = await requestJson(portOf(server), "/api/account/claim/challenge",
       JSON.stringify({ intent: expiredIntent, account: expiredWallet.account }), expiredCookies);
-    expect(expiring.status).toBe(200);
+    expect(expiring.status, `expiring challenge: ${expiring.body}`).toBe(200);
     const expiredChallenge = challengeBody(expiring);
     await admin.query(`WITH sampled AS (SELECT clock_timestamp() AS now)
       UPDATE samurai_persistence.claim_challenges
@@ -579,13 +677,13 @@ describe("built account HTTP boundary", () => {
     const lostIntent = { ...intent, claimId: randomUUID(), idempotencyKey: randomUUID(), guestRevision: 0, contentVersion: "v1" };
     const lostChallengeResult = await requestJson(portOf(server), "/api/account/claim/challenge",
       JSON.stringify({ intent: lostIntent, account: lostWallet.account }), lostGuestCookies);
-    expect(lostChallengeResult.status).toBe(200);
+    expect(lostChallengeResult.status, `lost-response challenge: ${lostChallengeResult.body}`).toBe(200);
     const lostChallenge = challengeBody(lostChallengeResult);
     const lostProof = { challenge: lostChallenge.challenge, publicKey: lostWallet.publicKey,
       signature: lostWallet.sign(lostChallenge.challenge) };
     const droppedClaim = await requestJson(portOf(server), "/api/account/claim",
       JSON.stringify({ intent: lostIntent, challengeId: lostChallenge.challengeId, proof: lostProof }), lostGuestCookies);
-    expect(droppedClaim.status).toBe(200);
+    expect(droppedClaim.status, `dropped claim: ${droppedClaim.body}`).toBe(200);
     const reauth = await requestJson(portOf(server), "/api/account/claim",
       JSON.stringify({ intent: lostIntent, challengeId: lostChallenge.challengeId, proof: lostProof }), lostGuestCookies);
     expect(reauth.status, `lost claim retry: ${reauth.body}`).toBe(401);
@@ -594,13 +692,13 @@ describe("built account HTTP boundary", () => {
     const recoveryIntent = { recoverClaimId: lostIntent.claimId, idempotencyKey: randomUUID() };
     const recoveryChallengeResult = await requestJson(portOf(server), "/api/account/claim/recovery/challenge",
       JSON.stringify({ recoveryIntent, account: lostWallet.account }));
-    expect(recoveryChallengeResult.status).toBe(200);
+    expect(recoveryChallengeResult.status, `recovery challenge: ${recoveryChallengeResult.body}`).toBe(200);
     const recoveryChallenge = challengeBody(recoveryChallengeResult);
     const recoveryProof = { challenge: recoveryChallenge.challenge, publicKey: lostWallet.publicKey,
       signature: lostWallet.sign(recoveryChallenge.challenge) };
     const recovered = await requestJson(portOf(server), "/api/account/claim/recovery",
       JSON.stringify({ recoveryIntent, challengeId: recoveryChallenge.challengeId, proof: recoveryProof }));
-    expect(recovered.status).toBe(200);
+    expect(recovered.status, `recovered claim: ${recovered.body}`).toBe(200);
     const recoveredSecret = cookieValue(recovered.rawHeaders, "__Host-samurai-player");
     const recoveredCookie = `__Host-samurai-player=${recoveredSecret}`;
     const recoveredCoordinates = JSON.parse(recovered.body) as typeof claimResult;
@@ -620,13 +718,13 @@ describe("built account HTTP boundary", () => {
     const deletionIntent = { deleteClaimId: lostIntent.claimId, idempotencyKey: randomUUID() };
     const deletionChallengeResult = await requestJson(portOf(server), "/api/account/player/deletion/challenge",
       JSON.stringify({ deletionIntent, account: lostWallet.account }), recoveredCookie);
-    expect(deletionChallengeResult.status).toBe(200);
+    expect(deletionChallengeResult.status, `deletion challenge: ${deletionChallengeResult.body}`).toBe(200);
     const deletionChallenge = challengeBody(deletionChallengeResult);
     const deletionProof = { challenge: deletionChallenge.challenge, publicKey: lostWallet.publicKey,
       signature: lostWallet.sign(deletionChallenge.challenge) };
     const deletionBody = JSON.stringify({ deletionIntent, challengeId: deletionChallenge.challengeId, proof: deletionProof });
     const deleted = await requestJson(portOf(server), "/api/account/player/deletion", deletionBody, recoveredCookie);
-    expect(deleted.status).toBe(200);
+    expect(deleted.status, `deleted player: ${deleted.body}`).toBe(200);
     expect(setCookies(deleted.rawHeaders)).toContain(
       "__Host-samurai-player=; Path=/; Secure; HttpOnly; SameSite=Strict; Max-Age=0",
     );
@@ -650,6 +748,91 @@ describe("built account HTTP boundary", () => {
         (SELECT count(*)::text FROM samurai_persistence.progress_merges WHERE player_id=$1) AS merges`,
     [recoveredCoordinates.playerId]);
     expect(deletedState.rows[0]).toEqual({ players: "0", wallets: "0", sessions: "0", digests: "0", merges: "0" });
+  });
+
+  it("returns truthful proof-unavailable results for settled guests and players without active credentials", async () => {
+    const wallet = testWallet(); const issued = await requestIssue(portOf(server));
+    const guest = cookieValue(issued.rawHeaders, "__Host-samurai-guest");
+    const capability = cookieValue(issued.rawHeaders, "__Host-samurai-guest-claim");
+    const guestCookies = cookiePair(guest, capability);
+    for (const entry of compiledFirstEveningService.goldenReplay.slice(1)) {
+      const item = entry as { readonly command: { readonly idempotencyKey: string; readonly expectedRevision: number;
+        readonly commandName: string; readonly payload: object } };
+      const response = await requestJson(portOf(server), "/api/account/service/command", JSON.stringify({
+        idempotencyKey: item.command.idempotencyKey, expectedRevision: item.command.expectedRevision,
+        commandName: item.command.commandName, payload: item.command.payload,
+      }), guestCookies);
+      expect(response.status, `${item.command.commandName}: ${response.body}`).toBe(200);
+    }
+    expect(JSON.parse((await requestJson(portOf(server), "/api/account/service", "{}", guestCookies)).body))
+      .toMatchObject({ view: { identity: "guest", phase: "SETTLED", revision: 29 } });
+    const beforeGuest = (await admin.query<{ credentials: string; links: string; challenges: string; intents: string }>(`SELECT
+      (SELECT count(*)::text FROM samurai_persistence.wallet_credentials) credentials,
+      (SELECT count(*)::text FROM samurai_persistence.wallet_runtime_links) links,
+      (SELECT count(*)::text FROM samurai_persistence.wallet_link_challenges) challenges,
+      (SELECT count(*)::text FROM samurai_persistence.receipt_intents) intents`)).rows[0]!;
+    const guestSyncBody = JSON.stringify({ idempotencyKey: randomUUID(), runtimeGeneration: 1, sessionRevision: 0,
+      runtime: { providerId: "deterministic-wallet", chainId: "NetXtJqPyJGB6Pc", account: wallet.account,
+        permissionScopes: ["account"] } });
+    const guestSync = await requestJson(portOf(server), "/api/account/wallet/runtime/sync", guestSyncBody, guestCookies);
+    expect(guestSync.status, guestSync.body).toBe(200);
+    expect(JSON.parse(guestSync.body)).toEqual({ schemaVersion: 1, accessScope: "DISPLAY_ONLY",
+      state: "ACCOUNT_PROOF_UNAVAILABLE", providerId: "deterministic-wallet", chainId: "NetXtJqPyJGB6Pc",
+      account: wallet.account, permissionScopes: ["account"], credentialMatch: false, reason: "ACCOUNT_PROOF_UNAVAILABLE",
+      presentation: expect.objectContaining({ ref: "wallet.access.account-proof-unavailable" }) });
+    expect(guestSync.body).not.toMatch(/walletLinkRef|runtimeGeneration|sessionRevision|guestId|playerId|credentialId|challengeId/);
+    const malformedPrepare = await requestJson(portOf(server), "/api/account/receipt/review/prepare",
+      JSON.stringify({ idempotencyKey: randomUUID() }), guestCookies);
+    expect(malformedPrepare.status).toBe(400);
+    const afterGuest = (await admin.query<{ credentials: string; links: string; challenges: string; intents: string }>(`SELECT
+      (SELECT count(*)::text FROM samurai_persistence.wallet_credentials) credentials,
+      (SELECT count(*)::text FROM samurai_persistence.wallet_runtime_links) links,
+      (SELECT count(*)::text FROM samurai_persistence.wallet_link_challenges) challenges,
+      (SELECT count(*)::text FROM samurai_persistence.receipt_intents) intents`)).rows[0]!;
+    expect(afterGuest).toEqual(beforeGuest);
+
+    const intent = { claimId: randomUUID(), createPlayer: true, guestRevision: 29, idempotencyKey: randomUUID(),
+      contentVersion: compiledFirstEveningService.contentVersion, cosmeticSelections: {} } as const;
+    const challengeResponse = await requestJson(portOf(server), "/api/account/claim/challenge",
+      JSON.stringify({ intent, account: wallet.account }), guestCookies);
+    expect(challengeResponse.status, challengeResponse.body).toBe(200);
+    const challenge = challengeBody(challengeResponse); const proof = { challenge: challenge.challenge,
+      publicKey: wallet.publicKey, signature: wallet.sign(challenge.challenge) };
+    const claimed = await requestJson(portOf(server), "/api/account/claim",
+      JSON.stringify({ intent, challengeId: challenge.challengeId, proof }), guestCookies);
+    expect(claimed.status, claimed.body).toBe(200);
+    const claimPayload = JSON.parse(claimed.body) as { readonly playerId: string; readonly claimId: string;
+      readonly sessionId: string; readonly deliveryGeneration: number };
+    const coordinates = { playerId: claimPayload.playerId, claimId: claimPayload.claimId,
+      sessionId: claimPayload.sessionId, deliveryGeneration: claimPayload.deliveryGeneration };
+    const playerCookie = `__Host-samurai-player=${cookieValue(claimed.rawHeaders, "__Host-samurai-player")}`;
+    expect((await requestJson(portOf(server), "/api/account/claim/delivery", JSON.stringify(coordinates), playerCookie)).status).toBe(200);
+    const revokedAt = (await admin.query<{ now: Date }>("SELECT clock_timestamp() AS now")).rows[0]!.now;
+    expect((await admin.query(`UPDATE samurai_persistence.wallet_credentials SET state='revoked',
+      credential_revision=credential_revision+1,updated_at=$3,revoked_at=$3
+      WHERE player_id=$1 AND chain_id='NetXtJqPyJGB6Pc' AND account=$2 AND state='active'`,
+    [coordinates.playerId, wallet.account, revokedAt])).rowCount).toBe(1);
+    const playerSync = await requestJson(portOf(server), "/api/account/wallet/runtime/sync", JSON.stringify({
+      idempotencyKey: randomUUID(), runtimeGeneration: 2, sessionRevision: 0,
+      runtime: { providerId: "deterministic-wallet", chainId: "NetXtJqPyJGB6Pc", account: wallet.account,
+        permissionScopes: ["account"] },
+    }), playerCookie);
+    expect(playerSync.status, playerSync.body).toBe(200);
+    expect(JSON.parse(playerSync.body)).toMatchObject({ state: "ACCOUNT_PROOF_UNAVAILABLE", credentialMatch: false,
+      reason: "ACCOUNT_PROOF_UNAVAILABLE", walletLinkRef: expect.stringMatching(/^wl_[A-Za-z0-9_-]{22}$/),
+      runtimeGeneration: 2, sessionRevision: 1, presentation: { ref: "wallet.access.account-proof-unavailable" } });
+    const proofUnavailableRestore = await requestJson(portOf(server), "/api/account/receipt/review/restore", "{}", playerCookie);
+    expect(proofUnavailableRestore.status, proofUnavailableRestore.body).toBe(200);
+    expect(JSON.parse(proofUnavailableRestore.body)).toMatchObject({ projection: null,
+      accessPresentation: { ref: "wallet.access.account-proof-unavailable", recoveryAction: null },
+      walletAccess: { state: "ACCOUNT_PROOF_UNAVAILABLE", credentialMatch: false } });
+    expect((await admin.query<{ activeCredentials: string; links: string; challenges: string; intents: string }>(`SELECT
+      (SELECT count(*)::text FROM samurai_persistence.wallet_credentials
+        WHERE player_id=$1 AND chain_id='NetXtJqPyJGB6Pc' AND account=$2 AND state='active') AS "activeCredentials",
+      (SELECT count(*)::text FROM samurai_persistence.wallet_runtime_links WHERE player_id=$1) AS links,
+      (SELECT count(*)::text FROM samurai_persistence.wallet_link_challenges WHERE player_id=$1) AS challenges,
+      (SELECT count(*)::text FROM samurai_persistence.receipt_intents WHERE subject_kind='player' AND subject_id=$1) AS intents`,
+    [coordinates.playerId, wallet.account])).rows[0]).toEqual({ activeCredentials: "0", links: "1", challenges: "0", intents: "0" });
   });
 
   it("keeps guest capability recovery cookie-only and converges rotation/delete response-loss retries", async () => {
@@ -801,10 +984,10 @@ describe("built account HTTP boundary", () => {
       "@samurai-sushi/content", "account-proof-verifier", "claim-protocol", "node:crypto", "pg-pool", "@taquito", "@noble",
       "SAMURAI_DATABASE_URL", "SAMURAI_HMAC_RESUME_KEY", "SAMURAI_HMAC_GUEST_CLAIM_KEY",
       "x-samurai-raw-header-guard", "__Host-samurai", "postgresql://", "challengeId", "claimId", "guestId", "playerId",
-      "subjectId", "payloadHash", "resultHash", "publicKey", "signature", "checkpoint", "tz1", "edpk",
+      "subjectId", "resultHash", "playerSessionId", "credentialId", "issuerSignature", "executablePermit", "edpk",
       "issueSettledReceiptPermit", "admitSettledReceiptPermit", "deriveSettledServiceReceiptFacts",
       "FIXTURE_SETTLED_COMMITMENT_NONCE", "deterministicSettledCheckpointFixture", "commitmentNonce",
-      "NetXtJqPyJGB6Pc", "NetXsqzbfFenSTS", "rpc.shadownet.teztnets.com", "api.shadownet.tzkt.io", "127.0.0.1:8732"]) {
+      "rpc.shadownet.teztnets.com", "api.shadownet.tzkt.io", "127.0.0.1:8732"]) {
       expect(source).not.toContain(marker);
     }
   });

@@ -107,6 +107,8 @@ interface AuthenticatedSubject {
   readonly subject: SubjectRef;
   readonly subjectKind: "guest" | "player";
   readonly subjectId: string;
+  readonly playerSessionId: string | null;
+  readonly playerSessionDeliveryGeneration: number | null;
   revalidate(client: SqlClient): Promise<Date>;
 }
 
@@ -114,6 +116,8 @@ export interface SettledServiceTransactionContext {
   readonly client: SqlClient;
   readonly subjectKind: "guest" | "player";
   readonly subjectId: string;
+  readonly playerSessionId: string | null;
+  readonly playerSessionDeliveryGeneration: number | null;
   readonly checkpoint: EveningServiceCheckpoint;
   readonly now: Date;
 }
@@ -256,6 +260,8 @@ export class EveningServiceAuthority {
       subject: { kind: "guest", guestSessionId: preliminary.id },
       subjectKind: "guest",
       subjectId: preliminary.id,
+      playerSessionId: null,
+      playerSessionDeliveryGeneration: null,
       revalidate,
     };
   }
@@ -274,6 +280,8 @@ export class EveningServiceAuthority {
       subject: { kind: "player", playerId: initial.playerId },
       subjectKind: "player",
       subjectId: initial.playerId,
+      playerSessionId: initial.sessionId,
+      playerSessionDeliveryGeneration: initial.deliveryGeneration,
       revalidate: async (revalidationClient) => {
         let fresh;
         try {
@@ -282,7 +290,8 @@ export class EveningServiceAuthority {
           if (isPlayerAuthenticationFailure(error)) throw new CommandAuthenticationError();
           throw error;
         }
-        if (fresh.playerId !== initial.playerId || fresh.sessionId !== initial.sessionId) throw new CommandAuthenticationError();
+        if (fresh.playerId !== initial.playerId || fresh.sessionId !== initial.sessionId
+          || fresh.deliveryGeneration !== initial.deliveryGeneration) throw new CommandAuthenticationError();
         return fresh.now;
       },
     };
@@ -331,6 +340,8 @@ export class EveningServiceAuthority {
         client,
         subjectKind: authenticated.subjectKind,
         subjectId: authenticated.subjectId,
+        playerSessionId: authenticated.playerSessionId,
+        playerSessionDeliveryGeneration: authenticated.playerSessionDeliveryGeneration,
         checkpoint,
         now,
       });

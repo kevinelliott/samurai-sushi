@@ -343,6 +343,16 @@ describe("account HTTP boundary", () => {
         proof: { challenge: {}, publicKey: "key", signature: "signature" } }),
       "service.query": "{}",
       "service.command": JSON.stringify({ idempotencyKey: id, expectedRevision: 0, commandName: "service.start", payload: {} }),
+      "receipt.review.prepare": JSON.stringify({ idempotencyKey: id, walletLinkRef: "wl_AAAAAAAAAAAAAAAAAAAAAA", runtimeGeneration: 1, sessionRevision: 1 }),
+      "receipt.review.restore": JSON.stringify({ publicIntentRef: "ri_AAAAAAAAAAAAAAAAAAAAAA" }),
+      "wallet.runtime.sync": JSON.stringify({ idempotencyKey: id, runtimeGeneration: 1, sessionRevision: 1,
+        runtime: { providerId: "deterministic-wallet", chainId: "NetXtJqPyJGB6Pc", account: "tz1VSUr8wwNhLAzempoch5d6hLRiTh8Cjcjb", permissionScopes: ["account"] } }),
+      "wallet.link.challenge": JSON.stringify({ idempotencyKey: id, walletLinkRef: "wl_AAAAAAAAAAAAAAAAAAAAAA", runtimeGeneration: 1, sessionRevision: 1 }),
+      "wallet.link.proof": JSON.stringify({ idempotencyKey: id, walletLinkRef: "wl_AAAAAAAAAAAAAAAAAAAAAA", challengeRef: "wc_AAAAAAAAAAAAAAAAAAAAAA",
+        proof: { challenge: {}, publicKey: "key", signature: "signature" } }),
+      "wallet.link.disconnect": JSON.stringify({ idempotencyKey: id, walletLinkRef: "wl_AAAAAAAAAAAAAAAAAAAAAA", runtimeGeneration: 1, sessionRevision: 1 }),
+      "receipt.review.preflight": JSON.stringify({ idempotencyKey: id, walletLinkRef: "wl_AAAAAAAAAAAAAAAAAAAAAA", runtimeGeneration: 1,
+        sessionRevision: 1, publicIntentRef: "ri_AAAAAAAAAAAAAAAAAAAAAA", expectedProjectionRevision: "1", reviewDigest: "a".repeat(64) }),
     };
     const allowed: Readonly<Record<AccountRouteId, readonly string[]>> = {
       "cookies.reset": ["", "guest", "claim", "player", "claim,guest", "guest,player", "claim,player", "claim,guest,player"],
@@ -356,6 +366,10 @@ describe("account HTTP boundary", () => {
       "deletion.challenge": ["", "player"], "deletion.submit": ["", "player"],
       "service.query": ["guest", "claim,guest", "player"],
       "service.command": ["guest", "claim,guest", "player"],
+      "receipt.review.prepare": ["guest", "claim,guest", "player"], "receipt.review.restore": ["guest", "claim,guest", "player"],
+      "wallet.runtime.sync": ["guest", "claim,guest", "player"], "wallet.link.challenge": ["guest", "claim,guest", "player"],
+      "wallet.link.proof": ["guest", "claim,guest", "player"], "wallet.link.disconnect": ["guest", "claim,guest", "player"],
+      "receipt.review.preflight": ["guest", "claim,guest", "player"],
     };
     const combinations = [[], ["guest"], ["claim"], ["player"], ["guest", "claim"],
       ["guest", "player"], ["claim", "player"], ["guest", "claim", "player"]] as const;
@@ -364,7 +378,8 @@ describe("account HTTP boundary", () => {
         const key = [...kinds].sort().join(",");
         const result = await handleAccountHttpRequest(operation,
           request(operation, bodies[operation], cookie(...kinds)), services(), config);
-        const expected = allowed[operation].includes(key) ? 200
+        const isPhase2c = operation.startsWith("wallet.") || operation.startsWith("receipt.");
+        const expected = allowed[operation].includes(key) ? (isPhase2c ? 503 : 200)
           : operation === "service.query" || operation === "service.command" ? 401 : 400;
         expect(result.status, `${operation} with ${key || "no authority"}`).toBe(expected);
         if (expected === 401 && operation.startsWith("service.")) {

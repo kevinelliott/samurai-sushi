@@ -44,7 +44,7 @@ describe("receipt web-source contamination scan", () => {
 
   it("rejects the existing contamination expressions and symbolic links fail closed", () => {
     const root = fixture();
-    writeFileSync(resolve(root, "apps/web/public/icon.txt"), "SAMURAI_SUSHI_RECEIPT_V1\n");
+    writeFileSync(resolve(root, "apps/web/public/icon.txt"), "issuerSignature\n");
     expect(() => assertNoReceiptWebContamination(root, ["apps/web/app", "apps/web/public"]))
       .toThrow(/Receipt authority or fixture secret crossed into the web source/);
     writeFileSync(resolve(root, "apps/web/public/icon.txt"), "safe\n");

@@ -16,6 +16,7 @@
     "@samurai-sushi/domain": "workspace:*",
     "@samurai-sushi/receipt-authority": "workspace:*",
     "@samurai-sushi/receipt-lifecycle": "workspace:*",
+    "@samurai-sushi/wallet-link": "workspace:*",
     "pg": "8.16.3"
   },
   "devDependencies": {

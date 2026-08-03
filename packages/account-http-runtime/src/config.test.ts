@@ -48,4 +48,15 @@ describe("server-only account runtime configuration", () => {
     delete source.SAMURAI_HMAC_RESUME_PREVIOUS_VERIFY_UNTIL;
     expect(() => loadAccountRuntimeConfig(source)).toThrow(RuntimeConfigurationError);
   });
+
+  it("admits receipt review issuance only from the complete server-only destination and exact manifest signer", () => {
+    const source = { ...environment(), SAMURAI_RECEIPT_DESTINATION: "KT1RJ6PbjHpwc3M5rw5s2Nbmefwbuwbdxton",
+      SAMURAI_RECEIPT_ISSUER_SECRET_KEY_HEX: "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20" };
+    expect(loadAccountRuntimeConfig(source).receiptPolicy).toMatchObject({ destination: source.SAMURAI_RECEIPT_DESTINATION,
+      issuerKeyId: "localnet-issuer-2026-01", issuerPolicyVersion: "1" });
+    expect(() => loadAccountRuntimeConfig({ ...environment(), SAMURAI_RECEIPT_DESTINATION: source.SAMURAI_RECEIPT_DESTINATION }))
+      .toThrow(RuntimeConfigurationError);
+    expect(() => loadAccountRuntimeConfig({ ...source, SAMURAI_RECEIPT_ISSUER_SECRET_KEY_HEX: "00".repeat(32) }))
+      .toThrow(RuntimeConfigurationError);
+  });
 });
